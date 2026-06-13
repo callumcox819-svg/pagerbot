@@ -88,6 +88,25 @@ def infer_step_from_history(
     return 0
 
 
+def scripts_to_resend_for_step(hist_step: int) -> list[str]:
+    """Resend scripts when a prior attempt was marked processed but never delivered."""
+    if hist_step < 1:
+        return ["01_intro"]
+    if hist_step < 2:
+        return ["02_how_it_works", "03_zmw_table"]
+    if hist_step < 4:
+        return ["04_registration", "05_link"]
+    if hist_step < 5:
+        return ["10_reg_screenshot"]
+    if hist_step < 6:
+        return ["07_game_id"]
+    if hist_step < 7:
+        return ["06_deposit"]
+    if hist_step < 9:
+        return ["08_tg_invite", "09_tg_link"]
+    return []
+
+
 def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> list[str]:
     """Return script keys to POST in order."""
     if intent == "interested" and step < 1:

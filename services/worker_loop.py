@@ -20,6 +20,7 @@ from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
     load_script,
+    scripts_to_resend_for_step,
     scripts_to_send_after_intent,
 )
 from services.status_ids import EXCELLENT, ZM_STATUSES, is_no_status, should_process_conversation
@@ -141,9 +142,10 @@ async def _handle_conversation(
         )
 
     last_in_ts = str(last_in.get("createdAt") or "")
+    needs_reply = not _has_operator_reply_after(last_in_ts)
     is_retry = False
     if msg_id and msg_id == state.get("last_processed_msg_id"):
-        if _has_operator_reply_after(last_in_ts):
+        if not needs_reply:
             return "done"
         logger.info(
             "conv=%s retry: was marked processed but no reply sent",
@@ -157,7 +159,7 @@ async def _handle_conversation(
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
     hist_step = infer_step_from_history(msg_only, pager_user_id)
-    if is_retry and hist_step < 5:
+    if needs_reply:
         step = hist_step
     else:
         step = max(int(state.get("step") or 0), hist_step)
@@ -203,9 +205,9 @@ async def _handle_conversation(
                     '{"error":"take chat failed — operator not assigned"}',
                 )
 
-        async def _browser_send(cookies: dict[str, str]) -> None:
+        async def _browser_send(cookie_dict: dict[str, str]) -> None:
             await send_messages_via_browser_ui(
-                cookies,
+                cookie_dict,
                 conv_id=conv_id,
                 texts=texts,
                 org_id=oid,
@@ -215,9 +217,15 @@ async def _handle_conversation(
                 skip_take=True,
             )
 
-        cookies = _cookies(account)
+        send_cookies = {
+            k: v
+            for k, v in client.cookies.items()
+            if not k.startswith("_pager_") and v
+        }
+        if not send_cookies:
+            send_cookies = _cookies(account)
         try:
-            await _browser_send(cookies)
+            await _browser_send(send_cookies)
         except Exception as exc:
             logger.warning(
                 "browser send failed conv=%s: %s — refreshing session",
@@ -227,6 +235,9 @@ async def _handle_conversation(
             fresh = await refresh_pager_session(account)
             if not fresh:
                 raise
+            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+            if acc:
+                account.update(acc)
             client = PagerClient(
                 _settings.pager_base_url,
                 fresh,
@@ -250,12 +261,12 @@ async def _handle_conversation(
     async def send(text: str) -> None:
         await _outbound_send([text])
 
-    # Waiting for game ID / deposit photo — ignore short acks unless retry pending.
+    # Waiting for game ID / deposit photo — ignore short acks once operator replied.
     if (
         step >= 5
         and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE)
         and not has_image
-        and not is_retry
+        and not needs_reply
     ):
         await db.save_conversation_state(
             account_id, conv_id, last_processed_msg_id=msg_id
@@ -397,6 +408,17 @@ async def _handle_conversation(
         keys = ["04_registration", "05_link"]
     elif no_status and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE, Intent.INTERESTED):
         keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
+    elif intent == Intent.INTERESTED and hist_step < 1:
+        keys = ["01_intro"]
+    elif needs_reply and not keys:
+        keys = scripts_to_resend_for_step(hist_step)
+        if keys:
+            logger.info(
+                "conv=%s resend hist_step=%s keys=%s",
+                conv_id[:8],
+                hist_step,
+                keys,
+            )
     elif intent == Intent.JOINED:
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
@@ -526,6 +548,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             fresh = await refresh_pager_session(account)
             if not fresh:
                 return
+            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+            if acc:
+                account.update(acc)
             client = _make_client(fresh)
             await client.warm_session()
             convs = await client.collect_conversations(enabled, max_pages=5)
@@ -553,7 +578,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 12
+        max_replies = 5
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
