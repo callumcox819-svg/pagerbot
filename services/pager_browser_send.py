@@ -282,6 +282,69 @@ async def _browser_send_via_ui(page, text: str) -> bool:
     return False
 
 
+async def _browser_prepare_outbound(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+) -> str:
+    """Assign operator + load conv in browser session (required before POST /api/message)."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
+    conv_url = _api(f"/api/conversation/{conv_id}?orgId={oid}")
+    msg_url = _api(
+        f"/api/message?convId={conv_id}&orgId={oid}&pageSize=5&page=1"
+    )
+    result = await page.evaluate(
+        f"""async ({{patchUrl, convUrl, msgUrl, userId}}) => {{
+            {_SAFE_FETCH}
+            const patch = await safeJsonFetch(patchUrl, {{
+                method: 'PATCH',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    responsibleUserId: userId,
+                    conversationState: 'read',
+                }}),
+            }});
+            const convR = await safeJsonFetch(convUrl);
+            await safeJsonFetch(msgUrl);
+            const conv = convR.data || {{}};
+            const respId = conv.responsibleuserId || conv.responsibleUserId
+                || (conv.responsibleUser && conv.responsibleUser.id) || '';
+            const ch = conv.channelId
+                || (conv.channel && conv.channel.id) || '';
+            return {{
+                patchStatus: patch.status,
+                sessionError: patch.html || convR.html,
+                responsibleOk: respId === userId,
+                responsibleId: respId || '',
+                channelId: ch || '',
+            }};
+        }}""",
+        {
+            "patchUrl": patch_url,
+            "convUrl": conv_url,
+            "msgUrl": msg_url,
+            "userId": uid,
+        },
+    )
+    if result.get("sessionError"):
+        raise RuntimeError(
+            f"Browser session stale preparing conv={conv_id[:8]}"
+        )
+    ch = str(result.get("channelId") or "").strip()
+    logger.info(
+        "browser prepared conv=%s patch=%s resp=%s channel=%s",
+        conv_id[:8],
+        result.get("patchStatus"),
+        str(result.get("responsibleId") or "")[:16],
+        ch[:8] if ch else "?",
+    )
+    return ch
+
+
 async def _send_one_in_session(
     page,
     *,
@@ -289,61 +352,88 @@ async def _send_one_in_session(
     org_id: str,
     user_id: str,
     text: str,
+    channel_id: str = "",
 ) -> None:
-    """POST from browser session only — same as operator UI, never textarea (page identity)."""
+    """POST from browser session — operator UI payload after prepare."""
     qs = f"orgId={org_id}&userId={user_id}"
     post_url = _api(f"/api/message?{qs}")
-    result = await page.evaluate(
-        f"""async ({{url, convId, text}}) => {{
-            {_SAFE_FETCH}
-            const r = await safeJsonFetch(url, {{
-                method: 'POST',
-                headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{ conversationId: convId, text }}),
-            }});
-            const p = r.data || {{}};
-            return {{
-                status: r.status,
-                html: r.html,
-                authorId: p.authorId || '',
-                isDelivered: !!p.isDelivered,
-                facebookMessageId: p.facebookMessageId || '',
-            }};
-        }}""",
-        {"url": post_url, "convId": conv_id, "text": text},
-    )
-    status = int(result.get("status") or 0)
-    author = str(result.get("authorId") or "").strip()
-    fb = str(result.get("facebookMessageId") or "").strip()
+    ch = (channel_id or "").strip()
+    bodies: list[dict] = [{"conversationId": conv_id, "text": text}]
+    if ch:
+        bodies.append({"conversationId": conv_id, "text": text, "channelId": ch})
 
-    if status >= 400:
-        raise RuntimeError(f"Send POST failed status={status}")
-
-    if author == user_id and (result.get("isDelivered") or fb):
-        logger.info(
-            "browser sent conv=%s author=%s fb=%s",
-            conv_id[:8],
-            author[:16],
-            fb[:12],
+    last_err = ""
+    for body in bodies:
+        result = await page.evaluate(
+            f"""async ({{url, payload}}) => {{
+                {_SAFE_FETCH}
+                const r = await safeJsonFetch(url, {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify(payload),
+                }});
+                const p = r.data || {{}};
+                const err = typeof p.error === 'string' ? p.error : (r.raw || '').slice(0, 240);
+                return {{
+                    status: r.status,
+                    html: r.html,
+                    error: err,
+                    authorId: p.authorId || '',
+                    isDelivered: !!p.isDelivered,
+                    facebookMessageId: p.facebookMessageId || '',
+                    bodyKeys: Object.keys(payload),
+                }};
+            }}""",
+            {"url": post_url, "payload": body},
         )
-        return
+        status = int(result.get("status") or 0)
+        author = str(result.get("authorId") or "").strip()
+        fb = str(result.get("facebookMessageId") or "").strip()
+        last_err = str(result.get("error") or "")[:200]
 
-    verify = await _verify_message_delivered(
-        page,
-        conv_id=conv_id,
-        org_id=org_id,
-        user_id=user_id,
-        text=text,
-        attempts=12,
-    )
-    if verify.get("ok"):
-        logger.info(
-            "browser sent conv=%s author=%s fb=%s (verified)",
-            conv_id[:8],
-            str(verify.get("authorId") or user_id)[:16],
-            str(verify.get("facebookMessageId") or "")[:12],
+        if status >= 400:
+            logger.warning(
+                "browser POST conv=%s status=%s keys=%s err=%s",
+                conv_id[:8],
+                status,
+                result.get("bodyKeys"),
+                last_err[:120],
+            )
+            continue
+
+        if author == user_id and (result.get("isDelivered") or fb):
+            logger.info(
+                "browser sent conv=%s author=%s fb=%s",
+                conv_id[:8],
+                author[:16],
+                fb[:12],
+            )
+            return
+
+        if author and author != user_id:
+            logger.warning(
+                "browser POST wrong author conv=%s author=%s",
+                conv_id[:8],
+                author[:16],
+            )
+            continue
+
+        verify = await _verify_message_delivered(
+            page,
+            conv_id=conv_id,
+            org_id=org_id,
+            user_id=user_id,
+            text=text,
+            attempts=10,
         )
-        return
+        if verify.get("ok"):
+            logger.info(
+                "browser sent conv=%s author=%s fb=%s (verified)",
+                conv_id[:8],
+                str(verify.get("authorId") or user_id)[:16],
+                str(verify.get("facebookMessageId") or "")[:12],
+            )
+            return
 
     page_msg = await _find_outgoing_by_text(
         page, conv_id=conv_id, org_id=org_id, text=text
@@ -354,7 +444,7 @@ async def _send_one_in_session(
         )
 
     raise RuntimeError(
-        f"Message not delivered as operator (conv={conv_id[:8]})"
+        f"Send POST failed conv={conv_id[:8]}: {last_err or 'not delivered as operator'}"
     )
 
 
@@ -445,17 +535,13 @@ async def _run_browser_session(
                 raise RuntimeError("Browser session expired (redirected to sign-in)")
 
             await _verify_logged_in_operator(page, uid)
-            if skip_take:
-                logger.info("browser skip take conv=%s (REST already took)", conv_id[:8])
-            else:
-                await _browser_take_and_verify(
-                    page,
-                    conv_id=conv_id,
-                    org_id=oid,
-                    user_id=uid,
-                    chat_url=chat_url,
-                )
-            await page.wait_for_timeout(1500)
+            channel_id = await _browser_prepare_outbound(
+                page,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+            )
+            await page.wait_for_timeout(800)
 
             for i, body in enumerate(texts):
                 if i:
@@ -466,6 +552,7 @@ async def _run_browser_session(
                     org_id=oid,
                     user_id=uid,
                     text=body,
+                    channel_id=channel_id,
                 )
         finally:
             await browser.close()

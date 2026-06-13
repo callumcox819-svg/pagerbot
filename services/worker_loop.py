@@ -201,10 +201,13 @@ async def _handle_conversation(
                 for k in (
                     "sign-in",
                     "session expired",
+                    "session stale",
                     "session",
                     "wrong pager login",
                     "chat not taken",
                     "not delivered",
+                    "send post failed",
+                    "status=500",
                 )
             )
             if retryable:
