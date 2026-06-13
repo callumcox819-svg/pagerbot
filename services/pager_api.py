@@ -862,6 +862,79 @@ class PagerClient:
             ),
         )
 
+    async def send_operator_message(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        conv: dict | None = None,
+        author_id: str = "",
+    ) -> dict[str, Any]:
+        """Send like operator UI: POST {conversationId, text} + userId query only."""
+        org_id = await self._ensure_org_id()
+        user_id, conv_data = await self.prepare_outbound(
+            conv_id, conv=conv, author_id=author_id
+        )
+        referer = self._chat_referer(conv_id)
+        body: dict[str, Any] = {"conversationId": conv_id, "text": text}
+        params: dict[str, Any] = {"orgId": org_id}
+        if user_id:
+            params["userId"] = user_id
+
+        logger.info(
+            "operator send conv=%s user=%s chars=%s",
+            conv_id[:8],
+            (user_id or "")[:16],
+            len(text),
+        )
+
+        try:
+            result = await self._request(
+                "POST",
+                "/api/message",
+                params=params,
+                json_body=body,
+                referer=referer,
+            )
+        except PagerAPIError as exc:
+            logger.warning(
+                "operator send failed conv=%s -> %s",
+                conv_id[:8],
+                exc.body[:200],
+            )
+            raise
+
+        if not isinstance(result, dict):
+            raise PagerAPIError(502, '{"error":"empty message response"}')
+        if message_accepted(result, user_id):
+            logger.info(
+                "operator sent conv=%s author=%s fb=%s",
+                conv_id[:8],
+                str(result.get("authorId") or "")[:16],
+                str(result.get("facebookMessageId") or "")[:12],
+            )
+            return result
+        if message_delivered(result):
+            raise PagerAPIError(
+                502,
+                json.dumps(
+                    {
+                        "error": "Delivered as Facebook page, not operator",
+                        "authorId": str(result.get("authorId") or ""),
+                    }
+                ),
+            )
+        raise PagerAPIError(
+            502,
+            json.dumps(
+                {
+                    "error": "operator message not accepted",
+                    "authorId": str(result.get("authorId") or ""),
+                    "isDelivered": result.get("isDelivered"),
+                }
+            ),
+        )
+
     async def mark_conversation_read(
         self,
         conv_id: str,

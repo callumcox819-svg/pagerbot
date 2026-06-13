@@ -197,50 +197,90 @@ async def _handle_conversation(
             org_slug=slug,
         )
         locale = str(account.get("pager_locale") or _settings.pager_locale)
-        email = str(account.get("email") or "").strip()
-        pwd_enc = str(account.get("password_enc") or "").strip()
-        password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
 
-        await client.warm_session()
-
-        if pager_user_id:
-            taken = await client.take_conversation(conv_id, pager_user_id)
-            if not taken:
-                raise PagerAPIError(
-                    502,
-                    '{"error":"take chat failed — operator not assigned"}',
-                )
-
-        send_cookies = {
-            k: v
-            for k, v in client.cookies.items()
-            if not k.startswith("_pager_") and v
-        }
-        if not send_cookies:
-            send_cookies = _cookies(account)
-
-        await asyncio.wait_for(
-            send_messages_via_browser_ui(
-                send_cookies,
-                conv_id=conv_id,
-                texts=texts,
+        async def _rebuild_client(cookies: dict[str, str]) -> PagerClient:
+            return PagerClient(
+                _settings.pager_base_url,
+                cookies,
                 org_id=oid,
                 org_slug=slug,
-                user_id=pager_user_id,
                 locale=locale,
-                skip_take=True,
-                email=email,
-                password=password,
-            ),
-            timeout=150.0,
-        )
+                org_id_fallback=oid,
+                session_user_id=pager_user_id,
+            )
+
+        for i, body in enumerate(texts):
+            if i:
+                await asyncio.sleep(0.8)
+            sent = False
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                try:
+                    await client.warm_session()
+                    await client.send_operator_message(
+                        conv_id,
+                        body,
+                        conv=conv,
+                        author_id=pager_user_id,
+                    )
+                    sent = True
+                    break
+                except PagerAPIError as exc:
+                    last_exc = exc
+                    body_l = (exc.body or "").lower()
+                    retry = is_session_error(exc) or "organization id required" in body_l
+                    if retry and attempt == 0:
+                        logger.warning(
+                            "operator send session stale conv=%s — refresh",
+                            conv_id[:8],
+                        )
+                        fresh = await refresh_pager_session(account)
+                        if fresh:
+                            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+                            if acc:
+                                account.update(acc)
+                            client = await _rebuild_client(fresh)
+                            continue
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    break
+
+            if not sent:
+                logger.warning(
+                    "REST send failed conv=%s, browser fallback: %s",
+                    conv_id[:8],
+                    last_exc,
+                )
+                email = str(account.get("email") or "").strip()
+                pwd_enc = str(account.get("password_enc") or "").strip()
+                password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
+                cookies = {
+                    k: v
+                    for k, v in client.cookies.items()
+                    if not k.startswith("_pager_") and v
+                }
+                await asyncio.wait_for(
+                    send_messages_via_browser_ui(
+                        cookies,
+                        conv_id=conv_id,
+                        texts=[body],
+                        org_id=oid,
+                        org_slug=slug,
+                        user_id=pager_user_id,
+                        locale=locale,
+                        skip_take=True,
+                        email=email,
+                        password=password,
+                    ),
+                    timeout=90.0,
+                )
 
         await db.save_conversation_state(
             account_id, conv_id, send_failures=0
         )
-
         logger.info(
-            "browser sent conv=%s count=%s",
+            "sent conv=%s count=%s",
             conv_id[:8],
             len(texts),
         )
@@ -597,7 +637,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 1
+        max_replies = 3
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:

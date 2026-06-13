@@ -841,7 +841,7 @@ async def send_messages_via_browser_ui(
                 logger.info("browser login for send conv=%s", conv_id[:8])
                 await playwright_sign_in_on_page(page, email.strip(), password)
                 org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
-                await page.goto(org_inbox, wait_until="networkidle", timeout=90000)
+                await page.goto(org_inbox, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(1500)
             else:
                 await context.add_cookies(
