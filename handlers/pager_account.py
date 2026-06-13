@@ -1,0 +1,190 @@
+"""Connect / disconnect Pager account."""
+
+from __future__ import annotations
+
+import json
+import logging
+
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
+import database as db
+from config import load_settings
+from handlers.states import PagerConnect
+from keyboards.main_menu import channels_kb, connect_kb
+from services.encryption import Secrets
+from services.pager_api import PagerAPIError, PagerClient
+from services.pager_auth import authenticate
+
+logger = logging.getLogger(__name__)
+router = Router()
+_settings = load_settings()
+_secrets = Secrets(_settings.encryption_key)
+
+
+async def _save_session(tg_user_id: int, email: str, password: str, cookies: dict) -> str:
+    session_enc = _secrets.encrypt(json.dumps(cookies))
+    password_enc = _secrets.encrypt(password) if password else ""
+    client = PagerClient(_settings.pager_base_url, cookies)
+    probe = await client.probe_session()
+    account_id = await db.upsert_account(
+        tg_user_id,
+        email=email,
+        password_enc=password_enc,
+        session_enc=session_enc,
+        org_id=probe.get("org_id") or "",
+        pager_user_id=probe.get("pager_user_id") or "",
+        session_ok=1,
+        last_error="",
+    )
+    channels = await client.list_channels_from_conversations()
+    if channels:
+        await db.replace_channels(account_id, channels)
+    return probe.get("pager_user_id") or "ok"
+
+
+@router.message(F.text == "🔐 Pager аккаунт")
+@router.message(Command("pager"))
+async def pager_menu(message: Message) -> None:
+    acc = await db.get_account_by_tg(message.from_user.id)
+    if acc and acc.get("session_ok"):
+        text = (
+            f"✅ Pager подключён\n"
+            f"Email: <code>{acc.get('email') or '—'}</code>\n"
+            f"Org: <code>{acc.get('org_id') or '—'}</code>\n"
+            f"Авто-ответ: {'вкл' if acc.get('auto_reply') else 'выкл'}\n"
+            f"Пауза: {'да' if acc.get('paused') else 'нет'}"
+        )
+    else:
+        err = (acc or {}).get("last_error") or ""
+        text = "Pager не подключён." + (f"\n⚠️ {err}" if err else "")
+    await message.answer(text, parse_mode="HTML", reply_markup=connect_kb())
+
+
+@router.callback_query(F.data == "pager:login")
+async def cb_login_start(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.set_state(PagerConnect.email)
+    await cb.message.answer("Введите email Pager:")
+
+
+@router.message(PagerConnect.email)
+async def on_email(message: Message, state: FSMContext) -> None:
+    await state.update_data(email=(message.text or "").strip())
+    await state.set_state(PagerConnect.password)
+    await message.answer("Введите пароль Pager (сообщение удалите после входа):")
+
+
+@router.message(PagerConnect.password)
+async def on_password(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    email = data.get("email") or ""
+    password = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    status = await message.answer("⏳ Вхожу в Pager…")
+    try:
+        auth = await authenticate(email=email, password=password)
+        await _save_session(message.from_user.id, email, password, auth["cookies"])
+        await status.edit_text(
+            "✅ Pager подключён.\n"
+            "Откройте 📡 Каналы и включите нужные (например Kelvin Phiri)."
+        )
+    except Exception as exc:
+        logger.exception("login")
+        await db.upsert_account(
+            message.from_user.id,
+            email=email,
+            session_ok=0,
+            last_error=str(exc)[:500],
+        )
+        await status.edit_text(
+            f"❌ Не удалось войти.\n{exc}\n\n"
+            "Попробуйте 🍪 Импорт cookies: скопируйте Cookie из DevTools → Network."
+        )
+    await state.clear()
+
+
+@router.callback_query(F.data == "pager:cookies")
+async def cb_cookies_start(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.set_state(PagerConnect.cookies)
+    await cb.message.answer(
+        "Вставьте Cookie из DevTools (Network → любой запрос → Request Headers → Cookie):\n"
+        "или JSON вида {\"__session\": \"...\"}"
+    )
+
+
+@router.message(PagerConnect.cookies)
+async def on_cookies(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    status = await message.answer("⏳ Проверяю сессию…")
+    try:
+        auth = await authenticate(cookie_raw=raw)
+        await _save_session(message.from_user.id, "", "", auth["cookies"])
+        await status.edit_text("✅ Сессия сохранена. Откройте 📡 Каналы.")
+    except Exception as exc:
+        await status.edit_text(f"❌ {exc}")
+    await state.clear()
+
+
+@router.callback_query(F.data == "pager:disconnect")
+async def cb_disconnect(cb: CallbackQuery) -> None:
+    await cb.answer()
+    await db.delete_account(cb.from_user.id)
+    await cb.message.answer("Pager отключён.")
+
+
+@router.message(F.text == "📡 Каналы")
+async def channels_menu(message: Message) -> None:
+    acc = await db.get_account_by_tg(message.from_user.id)
+    if not acc or not acc.get("session_ok"):
+        await message.answer("Сначала подключите Pager: 🔐 Pager аккаунт")
+        return
+    chs = await db.list_channels(int(acc["id"]))
+    if not chs:
+        await message.answer("Каналы не найдены. Нужны чаты в Pager — откройте пару диалогов и нажмите 🔄.")
+        return
+    await message.answer("Каналы (нажмите чтобы вкл/выкл):", reply_markup=channels_kb(chs))
+
+
+@router.callback_query(F.data.startswith("ch:toggle:"))
+async def cb_toggle_channel(cb: CallbackQuery) -> None:
+    acc = await db.get_account_by_tg(cb.from_user.id)
+    if not acc:
+        await cb.answer("Нет аккаунта")
+        return
+    channel_id = cb.data.split(":", 2)[2]
+    chs = await db.list_channels(int(acc["id"]))
+    current = next((c for c in chs if c["channel_id"] == channel_id), None)
+    enabled = not (current and current.get("enabled"))
+    await db.toggle_channel(int(acc["id"]), channel_id, enabled)
+    chs = await db.list_channels(int(acc["id"]))
+    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
+    await cb.answer("OK")
+
+
+@router.callback_query(F.data == "ch:refresh")
+async def cb_refresh_channels(cb: CallbackQuery) -> None:
+    acc = await db.get_account_by_tg(cb.from_user.id)
+    if not acc or not acc.get("session_enc"):
+        await cb.answer("Нет сессии")
+        return
+    await cb.answer("Обновляю…")
+    try:
+        cookies = json.loads(_secrets.decrypt(acc["session_enc"]))
+        client = PagerClient(_settings.pager_base_url, cookies)
+        channels = await client.list_channels_from_conversations()
+        await db.replace_channels(int(acc["id"]), channels)
+        chs = await db.list_channels(int(acc["id"]))
+        await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
+    except PagerAPIError as exc:
+        await cb.message.answer(f"Ошибка API: {exc}")

@@ -1,0 +1,310 @@
+"""Background worker: poll Pager accounts and run script engine."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+from aiogram import Bot
+
+import database as db
+from config import load_settings
+from services.ai_intent import Intent, classify, needs_human
+from services.encryption import Secrets
+from services.image_extract import extract_id_from_image_url, extract_id_from_text
+from services.pager_api import PagerAPIError, PagerClient
+from services.script_engine import (
+    infer_step_from_history,
+    load_script,
+    scripts_to_send_after_intent,
+)
+from services.status_ids import EXCELLENT, ZM_STATUSES
+from services.telegram_notify import notify_escalation
+
+logger = logging.getLogger(__name__)
+_settings = load_settings()
+_secrets = Secrets(_settings.encryption_key)
+
+_worker_task: asyncio.Task | None = None
+
+
+def _cookies(account: dict[str, Any]) -> dict[str, str]:
+    raw = account.get("session_enc") or ""
+    if not raw:
+        return {}
+    return json.loads(_secrets.decrypt(raw))
+
+
+async def _enabled_channel_ids(account_id: int) -> set[str]:
+    chs = await db.list_channels(account_id)
+    if not chs:
+        return set()
+    return {c["channel_id"] for c in chs if c.get("enabled")}
+
+
+async def _escalation_chat(account: dict[str, Any]) -> int:
+    cid = int(account.get("escalation_chat_id") or 0)
+    return cid or int(account["tg_user_id"])
+
+
+async def _handle_conversation(
+    bot: Bot,
+    account: dict[str, Any],
+    conv: dict[str, Any],
+    client: PagerClient,
+) -> None:
+    account_id = int(account["id"])
+    conv_id = str(conv.get("id") or "")
+    if not conv_id:
+        return
+
+    if (conv.get("lastMessageDirection") or "").upper() != "IN":
+        return
+
+    enabled = await _enabled_channel_ids(account_id)
+    channel_id = str(conv.get("channelId") or "")
+    if enabled and channel_id not in enabled:
+        return
+
+    state = await db.get_conversation_state(account_id, conv_id)
+    if state.get("human_takeover") or state.get("pause_scripts"):
+        return
+
+    messages = await client.list_messages(conv_id, page_size=80)
+    # API returns newest first — work chronologically
+    msg_only = [m for m in messages if m.get("text") is not None or m.get("attachments")]
+    msg_only.sort(key=lambda m: m.get("createdAt") or "")
+
+    last_in = None
+    for m in reversed(msg_only):
+        if m.get("messageDirection") == "incoming" and "oldStatusId" not in m:
+            last_in = m
+            break
+    if not last_in:
+        return
+
+    msg_id = str(last_in.get("id") or "")
+    if msg_id and msg_id == state.get("last_processed_msg_id"):
+        return
+
+    text = (last_in.get("text") or "").strip()
+    attachments = last_in.get("attachments") or []
+    has_image = bool(attachments)
+
+    step = infer_step_from_history(msg_only)
+    intent = classify(text, has_image=has_image)
+    geo = account.get("geo") or "zm"
+    pager_user_id = str(account.get("pager_user_id") or "")
+
+    client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
+    channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
+    folder = ((conv.get("status") or {}) or {}).get("name") or ""
+
+    esc_chat = await _escalation_chat(account)
+
+    # --- Complaints / unclear → TG only ---
+    if needs_human(intent, step) and intent != Intent.IMAGE_ONLY:
+        await notify_escalation(
+            bot,
+            esc_chat,
+            title="Нужен оператор",
+            client_name=client_name,
+            channel_name=channel_name,
+            folder=folder,
+            reason=f"Intent: {intent.value}, step {step}",
+            last_message=text or "(photo)",
+            conv_id=conv_id,
+        )
+        await db.save_conversation_state(
+            account_id, conv_id, pause_scripts=1, last_processed_msg_id=msg_id
+        )
+        return
+
+    actions_sent = False
+
+    # --- Image: account ID or deposit screenshot ---
+    if has_image:
+        img_url = ""
+        for att in attachments:
+            if att.get("type") == "image":
+                img_url = (att.get("payload") or {}).get("url") or ""
+                break
+        extracted = extract_id_from_text(text)
+        if not extracted and img_url:
+            extracted = await extract_id_from_image_url(img_url, _settings.openai_api_key)
+
+        if step >= 5 and step < 7:
+            if extracted:
+                await client.send_message(conv_id, EXCELLENT)
+                await asyncio.sleep(0.8)
+                dep = load_script(geo, "06_deposit")
+                await client.send_message(conv_id, dep)
+                if pager_user_id:
+                    await client.patch_status(conv_id, ZM_STATUSES["registration"], pager_user_id)
+                await db.save_conversation_state(
+                    account_id,
+                    conv_id,
+                    step=7,
+                    extracted_game_id=extracted,
+                    last_processed_msg_id=msg_id,
+                )
+                await notify_escalation(
+                    bot,
+                    esc_chat,
+                    title="Game ID распознан",
+                    client_name=client_name,
+                    channel_name=channel_name,
+                    folder=folder,
+                    reason="Проверьте депозит при необходимости",
+                    last_message=text or "(photo)",
+                    conv_id=conv_id,
+                    extra=f"ID: {extracted}",
+                )
+                return
+            await notify_escalation(
+                bot,
+                esc_chat,
+                title="Фото — ID не распознан",
+                client_name=client_name,
+                channel_name=channel_name,
+                folder=folder,
+                reason="Нужен оператор",
+                last_message="(photo)",
+                conv_id=conv_id,
+            )
+            await db.save_conversation_state(
+                account_id, conv_id, last_processed_msg_id=msg_id, pause_scripts=1
+            )
+            return
+
+        if step >= 7:
+            await notify_escalation(
+                bot,
+                esc_chat,
+                title="Скрин депозита",
+                client_name=client_name,
+                channel_name=channel_name,
+                folder=folder,
+                reason="Подтвердите депозит вручную",
+                last_message="(photo)",
+                conv_id=conv_id,
+            )
+            if pager_user_id:
+                await client.patch_status(conv_id, ZM_STATUSES["deps_pending"], pager_user_id)
+            await client.send_message(conv_id, EXCELLENT)
+            await asyncio.sleep(0.8)
+            await client.send_message(conv_id, load_script(geo, "08_tg_invite"))
+            await asyncio.sleep(0.8)
+            await client.send_message(conv_id, load_script(geo, "09_tg_link"))
+            await db.save_conversation_state(
+                account_id, conv_id, step=9, last_processed_msg_id=msg_id
+            )
+            return
+
+    # --- Text game ID at wait_id step ---
+    if intent == Intent.GAME_ID_TEXT:
+        gid = extract_id_from_text(text)
+        if gid and step >= 5 and step < 7:
+            await client.send_message(conv_id, EXCELLENT)
+            await asyncio.sleep(0.8)
+            await client.send_message(conv_id, load_script(geo, "06_deposit"))
+            if pager_user_id:
+                await client.patch_status(conv_id, ZM_STATUSES["registration"], pager_user_id)
+            await db.save_conversation_state(
+                account_id,
+                conv_id,
+                step=7,
+                extracted_game_id=gid,
+                last_processed_msg_id=msg_id,
+            )
+            return
+
+    # --- Script chain ---
+    keys = scripts_to_send_after_intent(step, intent.value, geo)
+
+    if intent == Intent.READY and step < 4:
+        keys = ["04_registration", "05_link"]
+    elif intent == Intent.INTERESTED and step < 1:
+        keys = ["01_intro"]
+    elif intent == Intent.POSITIVE and step < 2:
+        keys = ["02_how_it_works", "03_zmw_table"]
+    elif intent == Intent.JOINED:
+        await db.save_conversation_state(
+            account_id, conv_id, step=10, last_processed_msg_id=msg_id
+        )
+        return
+
+    for key in keys:
+        body = load_script(geo, key)
+        await client.send_message(conv_id, body)
+        actions_sent = True
+        await asyncio.sleep(1.0)
+
+    new_step = step
+    if keys == ["04_registration", "05_link"] or (intent == Intent.READY and step < 4):
+        new_step = 4
+        if pager_user_id:
+            await client.patch_status(conv_id, ZM_STATUSES["in_progress"], pager_user_id)
+        await asyncio.sleep(0.5)
+        await client.send_message(conv_id, load_script(geo, "10_reg_screenshot"))
+        if pager_user_id:
+            await client.patch_status(conv_id, ZM_STATUSES["wait_id"], pager_user_id)
+        new_step = 5
+    elif keys == ["01_intro"]:
+        new_step = max(new_step, 1)
+    elif keys == ["02_how_it_works", "03_zmw_table"]:
+        new_step = max(new_step, 2)
+
+    if actions_sent or msg_id:
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            step=new_step,
+            last_processed_msg_id=msg_id,
+        )
+
+
+async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
+    try:
+        cookies = _cookies(account)
+        if not cookies:
+            return
+        client = PagerClient(_settings.pager_base_url, cookies)
+        convs = await client.list_conversations(page_size=40)
+        for conv in convs:
+            try:
+                await _handle_conversation(bot, account, conv, client)
+            except Exception:
+                logger.exception(
+                    "conv failed account=%s conv=%s", account.get("id"), conv.get("id")
+                )
+    except PagerAPIError as exc:
+        if exc.status in (401, 403):
+            await db.upsert_account(
+                int(account["tg_user_id"]),
+                session_ok=0,
+                last_error="Session expired — reconnect in bot",
+            )
+        logger.warning("Pager API account=%s: %s", account.get("id"), exc)
+
+
+async def worker_loop(bot: Bot) -> None:
+    logger.info("Pager worker started, poll=%ss", _settings.poll_sec)
+    while True:
+        try:
+            accounts = await db.list_worker_accounts()
+            for acc in accounts:
+                await _process_account(bot, acc)
+        except Exception:
+            logger.exception("worker tick failed")
+        await asyncio.sleep(_settings.poll_sec)
+
+
+def start_worker(bot: Bot) -> asyncio.Task:
+    global _worker_task
+    if _worker_task and not _worker_task.done():
+        return _worker_task
+    _worker_task = asyncio.create_task(worker_loop(bot))
+    return _worker_task
