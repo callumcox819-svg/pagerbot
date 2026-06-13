@@ -300,49 +300,41 @@ async def _open_conversation_in_ui(
     org_slug: str,
     conv_id: str,
 ) -> bool:
-    """Open chat thread in Pager SPA — must not stay on «Оберіть чат»."""
-    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
-    chat_url = f"{inbox}/{conv_id}"
+    """Open chat thread — fast path, composer check optional."""
+    chat_url = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
 
-    await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(3500)
+    await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(2000)
     if await _chat_thread_active(page, conv_id):
-        logger.info("browser chat open conv=%s (direct url)", conv_id[:8])
+        logger.info("browser chat open conv=%s (url)", conv_id[:8])
         return True
 
-    await page.goto(inbox, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(2500)
+    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
+    await page.goto(inbox, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(1500)
     clicked = await page.evaluate(
         f"""() => {{
-            const sel = 'a[href*="{conv_id}"]';
-            const links = document.querySelectorAll(sel);
-            for (const el of links) {{
-                el.click();
-                return true;
-            }}
-            const rows = document.querySelectorAll('[role="listitem"], [class*="conversation"]');
-            for (const row of rows) {{
-                if (row.innerHTML.includes("{conv_id}")) {{
-                    row.click();
-                    return true;
-                }}
-            }}
+            const el = document.querySelector('a[href*="{conv_id}"]');
+            if (el) {{ el.click(); return true; }}
             return false;
         }}"""
     )
     if clicked:
-        await page.wait_for_timeout(3500)
+        await page.wait_for_timeout(2500)
         if await _chat_thread_active(page, conv_id):
-            logger.info("browser chat open conv=%s (sidebar click)", conv_id[:8])
+            logger.info("browser chat open conv=%s (click)", conv_id[:8])
             return True
 
-    await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(4000)
+    await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(2000)
     ok = await _chat_thread_active(page, conv_id)
     if ok:
-        logger.info("browser chat open conv=%s (retry url)", conv_id[:8])
+        logger.info("browser chat open conv=%s (retry)", conv_id[:8])
     else:
-        logger.warning("browser chat NOT open conv=%s url=%s", conv_id[:8], page.url[:80])
+        logger.warning(
+            "browser chat maybe closed conv=%s — will try send anyway",
+            conv_id[:8],
+        )
     return ok
 
 
@@ -842,6 +834,7 @@ async def send_messages_via_browser_ui(
             locale="uk-UA",
             viewport={"width": 1280, "height": 720},
         )
+        context.set_default_timeout(25000)
         page = await context.new_page()
         try:
             if use_login:
@@ -870,7 +863,10 @@ async def send_messages_via_browser_ui(
             if not await _open_conversation_in_ui(
                 page, locale=locale, org_slug=slug, conv_id=conv_id
             ):
-                raise RuntimeError(f"Chat thread not open conv={conv_id[:8]}")
+                logger.warning(
+                    "composer not ready conv=%s — POST fallback",
+                    conv_id[:8],
+                )
 
             if skip_take:
                 await _browser_prepare_outbound(
@@ -941,6 +937,7 @@ async def send_batch_via_browser(
             locale="uk-UA",
             viewport={"width": 1280, "height": 720},
         )
+        context.set_default_timeout(25000)
         page = await context.new_page()
         try:
             logger.info("browser batch login jobs=%s", len(jobs))
@@ -963,8 +960,9 @@ async def send_batch_via_browser(
                     if not await _open_conversation_in_ui(
                         page, locale=locale, org_slug=slug, conv_id=conv_id
                     ):
-                        raise RuntimeError(
-                            f"Chat thread not open conv={conv_id[:8]}"
+                        logger.warning(
+                            "batch conv=%s composer not ready — trying send",
+                            conv_id[:8],
                         )
                     await _browser_prepare_outbound(
                         page, conv_id=conv_id, org_id=oid, user_id=uid

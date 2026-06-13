@@ -62,6 +62,8 @@ def classify(
         return Intent.READY
     if _INTERESTED.search(t):
         return Intent.INTERESTED
+    if re.fullmatch(r"how\??", t.strip(), re.I):
+        return Intent.QUESTION
     if _POSITIVE.search(t):
         return Intent.POSITIVE
     if "?" in t or re.search(r"\b(how|what|when|why|can you)\b", t, re.I):
