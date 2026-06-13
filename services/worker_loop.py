@@ -333,6 +333,10 @@ async def _handle_conversation(
         new_step = max(new_step, 2)
 
     if actions_sent:
+        try:
+            await client.mark_conversation_read(conv_id, user_id=pager_user_id)
+        except Exception:
+            pass
         await db.save_conversation_state(
             account_id,
             conv_id,

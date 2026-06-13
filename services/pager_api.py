@@ -161,9 +161,12 @@ class PagerClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        referer: str = "",
     ) -> Any:
         url = f"{self.base_url}{path}"
         headers = self._api_headers()
+        if referer:
+            headers["Referer"] = referer
         if json_body is not None:
             headers["Content-Type"] = "application/json"
 
@@ -493,32 +496,79 @@ class PagerClient:
         author_id: str = "",
     ) -> dict[str, Any]:
         org_id = await self._ensure_org_id()
-        params = {"orgId": org_id}
-        # Browser sends only conversationId + text (session cookies carry the rest).
-        attempts: list[dict[str, Any]] = [
-            {"conversationId": conv_id, "text": text},
-            {"convId": conv_id, "text": text},
+        conv_data = conv or {}
+        ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
+        if not ch:
+            raise PagerAPIError(
+                400,
+                '{"error":"channelId missing on conversation"}',
+            )
+
+        chat_referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
+        if self.org_slug:
+            chat_referer = (
+                f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
+            )
+
+        # channelId is required — without it Pager returns channel.findUnique id undefined.
+        attempts: list[tuple[dict[str, Any] | None, dict[str, Any]]] = [
+            (
+                {"orgId": org_id},
+                {"conversationId": conv_id, "text": text, "channelId": ch},
+            ),
+            (
+                {"orgId": org_id},
+                {"convId": conv_id, "text": text, "channelId": ch},
+            ),
         ]
 
         last_exc: PagerAPIError | None = None
-        for body in attempts:
+        for params, body in attempts:
             try:
-                return await self._request(
+                result = await self._request(
                     "POST",
                     "/api/message",
                     params=params,
                     json_body=body,
+                    referer=chat_referer,
                 )
+                logger.info(
+                    "Pager message sent conv=%s channel=%s chars=%s",
+                    conv_id[:8],
+                    ch[:8],
+                    len(text),
+                )
+                return result
             except PagerAPIError as exc:
                 last_exc = exc
                 logger.debug(
-                    "send_message keys=%s -> %s",
+                    "send attempt params=%s body=%s -> %s",
+                    params,
                     sorted(body.keys()),
-                    exc.body[:200],
+                    exc.body[:160],
                 )
         if last_exc:
             raise last_exc
         raise PagerAPIError(400, '{"error":"send_message failed"}')
+
+    async def mark_conversation_read(
+        self,
+        conv_id: str,
+        *,
+        user_id: str = "",
+    ) -> None:
+        params: dict[str, Any] = {}
+        if user_id:
+            params["userId"] = user_id
+        try:
+            await self._request(
+                "PATCH",
+                f"/api/conversation/{conv_id}",
+                params=params,
+                json_body={"conversationState": "read"},
+            )
+        except PagerAPIError as exc:
+            logger.debug("mark read conv=%s: %s", conv_id[:8], exc.body[:80])
 
     async def patch_status(self, conv_id: str, status_id: str, user_id: str) -> dict[str, Any]:
         return await self._request(
@@ -579,8 +629,11 @@ class PagerClient:
         if convs:
             org_id = str(convs[0].get("organizationId") or org_id)
             self.org_id = org_id
-            ru = convs[0].get("responsibleUser") or {}
-            pager_user_id = str(ru.get("id") or convs[0].get("responsibleuserId") or "")
+            pager_user_id = str(
+                convs[0].get("responsibleuserId")
+                or (convs[0].get("responsibleUser") or {}).get("id")
+                or pager_user_id
+            )
         if not org_slug:
             org_slug = await self.discover_org_slug()
         return {
