@@ -64,6 +64,10 @@ async def _save_session(tg_user_id: int, email: str, password: str, cookies: dic
         session_ok=1,
         last_error="",
     )
+    await db.deactivate_other_accounts(email=email, keep_id=account_id)
+    cleared = await db.clear_pauses_for_account(account_id)
+    if cleared:
+        logger.info("Cleared %s script pauses for account %s", cleared, account_id)
     channels = await client.list_channels_api()
     if channels:
         await db.sync_channels(account_id, channels, default_enabled=False)

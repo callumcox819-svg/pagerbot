@@ -179,11 +179,15 @@ class PagerClient:
                 text = await resp.text()
                 if resp.status >= 400:
                     cookie_keys = sorted(_clean_cookies(self.cookies).keys())
+                    body_preview = ""
+                    if json_body is not None:
+                        body_preview = f" body={sorted(json_body.keys())}"
                     logger.warning(
-                        "Pager API %s %s params=%s cookies=%s -> %s",
+                        "Pager API %s %s params=%s%s cookies=%s -> %s",
                         method,
                         path,
                         params,
+                        body_preview,
                         cookie_keys,
                         text[:120],
                     )
@@ -471,21 +475,56 @@ class PagerClient:
         text: str,
         *,
         channel_id: str = "",
+        conv: dict | None = None,
+        author_id: str = "",
     ) -> dict[str, Any]:
-        ch = (channel_id or "").strip()
-        if not ch:
-            raise PagerAPIError(
-                400,
-                '{"error":"channelId required — pass channel_id from conversation"}',
-            )
-        body: dict[str, Any] = {
-            "conversationId": conv_id,
-            "channelId": ch,
-            "text": text,
-        }
-        if self.org_id:
-            body["organizationId"] = self.org_id
-        return await self._request("POST", "/api/message", json_body=body)
+        org_id = await self._ensure_org_id()
+        conv_data = conv or {}
+        ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
+        author = (
+            author_id
+            or str(conv_data.get("responsibleuserId") or "")
+            or str((conv_data.get("responsibleUser") or {}).get("id") or "")
+        ).strip()
+
+        params = {"orgId": org_id}
+        base: dict[str, Any] = {"text": text}
+        for key in ("pagePSID", "clientPSID", "clientId"):
+            val = conv_data.get(key)
+            if val:
+                base[key] = val
+        if ch:
+            base["channelId"] = ch
+        if author:
+            base["authorId"] = author
+
+        # Pager GET uses convId; POST accepts convId or conversationId depending on version.
+        attempts: list[dict[str, Any]] = [
+            {**base, "convId": conv_id},
+            {**base, "conversationId": conv_id},
+        ]
+        if not ch and not author:
+            attempts.append({"text": text, "conversationId": conv_id})
+
+        last_exc: PagerAPIError | None = None
+        for body in attempts:
+            try:
+                return await self._request(
+                    "POST",
+                    "/api/message",
+                    params=params,
+                    json_body=body,
+                )
+            except PagerAPIError as exc:
+                last_exc = exc
+                logger.debug(
+                    "send_message keys=%s -> %s",
+                    sorted(body.keys()),
+                    exc.body[:120],
+                )
+        if last_exc:
+            raise last_exc
+        raise PagerAPIError(400, '{"error":"send_message failed"}')
 
     async def patch_status(self, conv_id: str, status_id: str, user_id: str) -> dict[str, Any]:
         return await self._request(

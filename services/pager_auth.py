@@ -340,10 +340,12 @@ async def authenticate(
 
     if email and password:
         errors: list[str] = []
-        for method_name, login_fn in (
-            ("clerk_http", login_with_clerk_http),
+        # Railway/Docker: Clerk HTTP cookies often fail Pager API — use browser login first.
+        login_methods = (
             ("playwright", login_with_playwright),
-        ):
+            ("clerk_http", login_with_clerk_http),
+        )
+        for method_name, login_fn in login_methods:
             try:
                 cookies = await login_fn(email, password)
                 return {"cookies": cookies, "method": method_name}

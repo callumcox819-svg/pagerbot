@@ -128,7 +128,13 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def send(text: str) -> None:
-        await client.send_message(conv_id, text, channel_id=channel_id)
+        await client.send_message(
+            conv_id,
+            text,
+            channel_id=channel_id,
+            conv=conv,
+            author_id=pager_user_id,
+        )
 
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
@@ -354,13 +360,16 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             client = _make_client(fresh)
             await client.warm_session()
             convs = await client.collect_conversations(enabled, max_pages=5)
-        inbound = sum(
-            1
+        inbound_convs = [
+            c
             for c in convs
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
-        )
+        ]
+        inbound_convs.sort(key=lambda c: c.get("lastMessageAt") or "", reverse=True)
+        inbound = len(inbound_convs)
         handled = 0
-        for conv in convs:
+        max_replies = 25
+        for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
                 if await _handle_conversation(bot, account, conv, client):
@@ -390,11 +399,18 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         if client.org_id:
+            pager_uid = str(account.get("pager_user_id") or "")
+            if not pager_uid and inbound_convs:
+                pager_uid = str(
+                    inbound_convs[0].get("responsibleuserId")
+                    or (inbound_convs[0].get("responsibleUser") or {}).get("id")
+                    or ""
+                )
             await db.upsert_account(
                 int(account["tg_user_id"]),
                 org_id=client.org_id,
                 org_slug=client.org_slug or account.get("org_slug") or _settings.pager_org_slug,
-                pager_user_id=account.get("pager_user_id") or "",
+                pager_user_id=pager_uid,
                 session_ok=1,
             )
     except PagerAPIError as exc:

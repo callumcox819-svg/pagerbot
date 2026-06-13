@@ -85,6 +85,15 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
         session_ok=1,
         last_error="",
     )
+    acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+    if acc:
+        cleared = await db.clear_pauses_for_account(int(acc["id"]))
+        if cleared:
+            logger.info(
+                "Session refresh: cleared %s pauses account=%s",
+                cleared,
+                account.get("id"),
+            )
     logger.info(
         "Session refreshed account=%s org=%s",
         account.get("id"),

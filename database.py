@@ -195,21 +195,41 @@ async def delete_account(tg_user_id: int) -> None:
 
 
 async def list_worker_accounts() -> list[dict[str, Any]]:
-    """Active accounts — one row per Telegram user (latest connection)."""
+    """One active worker row per Pager email (or per TG user if email empty)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
             SELECT a.* FROM pager_accounts a
             INNER JOIN (
-                SELECT tg_user_id, MAX(id) AS max_id
+                SELECT COALESCE(NULLIF(email, ''), 'tg:' || tg_user_id) AS grp,
+                       MAX(id) AS max_id
                 FROM pager_accounts
                 WHERE session_ok = 1 AND paused = 0 AND auto_reply = 1
-                GROUP BY tg_user_id
+                GROUP BY grp
             ) latest ON a.id = latest.max_id
             """
         )
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def deactivate_other_accounts(*, email: str = "", keep_id: int) -> None:
+    """Disable duplicate Pager connections for the same email."""
+    email = (email or "").strip()
+    if not email:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE pager_accounts
+            SET auto_reply = 0, session_ok = 0,
+                last_error = 'Replaced by newer login',
+                updated_at = datetime('now')
+            WHERE email = ? AND id != ?
+            """,
+            (email, keep_id),
+        )
+        await db.commit()
 
 
 async def sync_channels(
