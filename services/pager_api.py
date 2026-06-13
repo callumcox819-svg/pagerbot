@@ -705,15 +705,43 @@ class PagerClient:
             conv_id, conv=conv_data, author_id=author_id
         )
         referer = self._chat_referer(conv_id)
+        ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
+        if not ch:
+            nested = conv_data.get("channel")
+            if isinstance(nested, dict):
+                ch = str(nested.get("id") or "").strip()
+        if not ch:
+            raise PagerAPIError(
+                400,
+                json.dumps({"error": "channelId missing", "conv": conv_id[:8]}),
+            )
 
-        # Minimal body — same as operator UI (conversationId + text).
+        # Pager requires channelId — without it: prisma channel.findUnique id undefined.
         bodies: list[dict[str, Any]] = [
-            {"conversationId": conv_id, "text": text},
+            {"conversationId": conv_id, "text": text, "channelId": ch},
         ]
+        if user_id:
+            bodies.append(
+                {
+                    "conversationId": conv_id,
+                    "text": text,
+                    "channelId": ch,
+                    "authorId": user_id,
+                }
+            )
+        bodies.append({"convId": conv_id, "text": text, "channelId": ch})
 
         params: dict[str, Any] = {"orgId": org_id}
         if user_id:
             params["userId"] = user_id
+
+        logger.info(
+            "send conv=%s channel=%s user=%s chars=%s",
+            conv_id[:8],
+            ch[:8],
+            (user_id or "")[:16],
+            len(text),
+        )
 
         last_exc: PagerAPIError | None = None
         last_result: dict[str, Any] | None = None
@@ -754,9 +782,9 @@ class PagerClient:
             except PagerAPIError as exc:
                 last_exc = exc
                 logger.info(
-                    "send attempt conv=%s params=%s body=%s -> %s",
+                    "send attempt conv=%s ch=%s body=%s -> %s",
                     conv_id[:8],
-                    list(params.keys()),
+                    ch[:8],
                     sorted(body.keys()),
                     exc.body[:160],
                 )
