@@ -23,6 +23,31 @@ def is_session_error(exc: PagerAPIError) -> bool:
     return exc.status == 400 and "organization id required" in body
 
 
+def message_delivered(result: Any) -> bool:
+    """True when Pager confirms Messenger delivery."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("isDelivered") is True:
+        return True
+    fb_id = str(result.get("facebookMessageId") or "").strip()
+    return bool(fb_id)
+
+
+def _extract_user_id(data: Any) -> str:
+    if isinstance(data, dict):
+        for key in ("id", "userId", "pagerUserId"):
+            val = str(data.get(key) or "").strip()
+            if val.startswith("user_"):
+                return val
+        for key in ("user", "data"):
+            nested = data.get(key)
+            if nested:
+                found = _extract_user_id(nested)
+                if found:
+                    return found
+    return ""
+
+
 def _clean_cookies(cookies: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in cookies.items() if not k.startswith("_pager_")}
 
@@ -118,6 +143,7 @@ class PagerClient:
         org_slug: str = "",
         locale: str = "uk",
         org_id_fallback: str = "",
+        session_user_id: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookies = cookies
@@ -130,6 +156,14 @@ class PagerClient:
             org_id_fallback,
             org_slug=slug,
         )
+        self.session_user_id = (session_user_id or "").strip()
+
+    def _chat_referer(self, conv_id: str = "") -> str:
+        if self.org_slug and conv_id:
+            return f"{self.base_url}/{self.locale}/{self.org_slug}/chats/{conv_id}"
+        if self.org_slug:
+            return f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
+        return f"{self.base_url}/"
 
     def _api_headers(self) -> dict[str, str]:
         referer = f"{self.base_url}/"
@@ -486,6 +520,137 @@ class PagerClient:
         )
         return data if isinstance(data, list) else []
 
+    async def resolve_session_user_id(self) -> str:
+        """Logged-in Pager operator id (Clerk user_…)."""
+        if self.session_user_id:
+            return self.session_user_id
+
+        org_id = await self._ensure_org_id()
+        for path in ("/api/user/me", "/api/users/me", "/api/user"):
+            try:
+                data = await self._request("GET", path, params={"orgId": org_id})
+                uid = _extract_user_id(data)
+                if uid:
+                    self.session_user_id = uid
+                    return uid
+            except PagerAPIError:
+                continue
+
+        try:
+            from services.pager_auth import (
+                CLERK_API_VERSION,
+                CLERK_BASE,
+                CLERK_JS_VERSION,
+                extract_clerk_session_info,
+            )
+
+            params = {
+                "_clerk_js_version": CLERK_JS_VERSION,
+                "__clerk_api_version": CLERK_API_VERSION,
+            }
+            headers = self._api_headers()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{CLERK_BASE}/v1/client",
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status < 400:
+                        payload = await resp.json()
+                        info = extract_clerk_session_info(payload)
+                        uid = str(info.get("pager_user_id") or "").strip()
+                        if uid:
+                            self.session_user_id = uid
+                            return uid
+        except Exception as exc:
+            logger.debug("Clerk user lookup failed: %s", exc)
+
+        return ""
+
+    async def open_conversation(self, conv_id: str) -> dict[str, Any] | None:
+        org_id = await self._ensure_org_id()
+        try:
+            data = await self._request(
+                "GET",
+                f"/api/conversation/{conv_id}",
+                params={"orgId": org_id},
+                referer=self._chat_referer(conv_id),
+            )
+            return data if isinstance(data, dict) else None
+        except PagerAPIError as exc:
+            logger.debug("open conv=%s: %s", conv_id[:8], exc.body[:80])
+            return None
+
+    async def take_conversation(self, conv_id: str, user_id: str) -> bool:
+        """Assign chat to operator — required before Messenger send (like UI «взяв чат»)."""
+        uid = (user_id or "").strip()
+        if not uid:
+            return False
+
+        org_id = await self._ensure_org_id()
+        referer = self._chat_referer(conv_id)
+        attempts: list[tuple[dict[str, Any], dict[str, Any] | None]] = [
+            (
+                {"userId": uid, "orgId": org_id},
+                {"responsibleUserId": uid},
+            ),
+            (
+                {"userId": uid, "orgId": org_id},
+                {"responsibleuserId": uid},
+            ),
+            ({"userId": uid}, {"responsibleUserId": uid}),
+        ]
+        last_exc: PagerAPIError | None = None
+        for params, body in attempts:
+            try:
+                await self._request(
+                    "PATCH",
+                    f"/api/conversation/{conv_id}",
+                    params=params,
+                    json_body=body,
+                    referer=referer,
+                )
+                logger.debug("take conv=%s user=%s", conv_id[:8], uid[:16])
+                return True
+            except PagerAPIError as exc:
+                last_exc = exc
+        if last_exc:
+            logger.warning(
+                "take conv=%s failed: %s",
+                conv_id[:8],
+                last_exc.body[:120],
+            )
+        return False
+
+    async def prepare_outbound(
+        self,
+        conv_id: str,
+        *,
+        conv: dict | None = None,
+        author_id: str = "",
+    ) -> str:
+        """Warm session, open chat, take it — returns operator user id."""
+        await self.warm_session()
+        user_id = (
+            (author_id or "").strip()
+            or self.session_user_id
+            or await self.resolve_session_user_id()
+        )
+        conv_data = conv or {}
+        fresh = await self.open_conversation(conv_id)
+        if fresh:
+            conv_data = {**conv_data, **fresh}
+
+        current = str(
+            conv_data.get("responsibleuserId")
+            or (conv_data.get("responsibleUser") or {}).get("id")
+            or ""
+        ).strip()
+        if user_id and current != user_id:
+            await self.take_conversation(conv_id, user_id)
+        return user_id
+
     async def send_message(
         self,
         conv_id: str,
@@ -497,53 +662,56 @@ class PagerClient:
     ) -> dict[str, Any]:
         org_id = await self._ensure_org_id()
         conv_data = conv or {}
+        user_id = await self.prepare_outbound(
+            conv_id, conv=conv_data, author_id=author_id
+        )
+        referer = self._chat_referer(conv_id)
         ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
-        if not ch:
-            raise PagerAPIError(
-                400,
-                '{"error":"channelId missing on conversation"}',
-            )
 
-        chat_referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
-        if self.org_slug:
-            chat_referer = (
-                f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
-            )
-
-        # channelId is required — without it Pager returns channel.findUnique id undefined.
-        attempts: list[tuple[dict[str, Any] | None, dict[str, Any]]] = [
-            (
-                {"orgId": org_id},
-                {"conversationId": conv_id, "text": text, "channelId": ch},
-            ),
-            (
-                {"orgId": org_id},
-                {"convId": conv_id, "text": text, "channelId": ch},
-            ),
+        # Browser UI sends only conversationId + text (no channelId).
+        bodies: list[dict[str, Any]] = [
+            {"conversationId": conv_id, "text": text},
         ]
+        if ch:
+            bodies.append({"conversationId": conv_id, "text": text, "channelId": ch})
 
         last_exc: PagerAPIError | None = None
-        for params, body in attempts:
+        for body in bodies:
             try:
                 result = await self._request(
                     "POST",
                     "/api/message",
-                    params=params,
+                    params={"orgId": org_id},
                     json_body=body,
-                    referer=chat_referer,
+                    referer=referer,
                 )
+                if not isinstance(result, dict):
+                    raise PagerAPIError(502, '{"error":"empty message response"}')
+                if not message_delivered(result):
+                    msg_id = str(result.get("id") or "")
+                    raise PagerAPIError(
+                        502,
+                        json.dumps(
+                            {
+                                "error": "Message not delivered to Messenger",
+                                "id": msg_id,
+                                "isDelivered": result.get("isDelivered"),
+                            }
+                        ),
+                    )
                 logger.info(
-                    "Pager message sent conv=%s channel=%s chars=%s",
+                    "Pager message sent conv=%s user=%s chars=%s fb=%s",
                     conv_id[:8],
-                    ch[:8],
+                    (user_id or "")[:16],
                     len(text),
+                    str(result.get("facebookMessageId") or "")[:12],
                 )
                 return result
             except PagerAPIError as exc:
                 last_exc = exc
                 logger.debug(
-                    "send attempt params=%s body=%s -> %s",
-                    params,
+                    "send attempt conv=%s body=%s -> %s",
+                    conv_id[:8],
                     sorted(body.keys()),
                     exc.body[:160],
                 )
@@ -624,21 +792,24 @@ class PagerClient:
     async def probe_session(self) -> dict[str, Any]:
         org_id = await self._ensure_org_id()
         org_slug = await self.discover_org_slug()
-        pager_user_id = ""
+        pager_user_id = await self.resolve_session_user_id()
         convs = await self.list_conversations(page_size=1)
         if convs:
             org_id = str(convs[0].get("organizationId") or org_id)
             self.org_id = org_id
-            pager_user_id = str(
-                convs[0].get("responsibleuserId")
-                or (convs[0].get("responsibleUser") or {}).get("id")
-                or pager_user_id
-            )
+            if not pager_user_id:
+                pager_user_id = str(
+                    convs[0].get("responsibleuserId")
+                    or (convs[0].get("responsibleUser") or {}).get("id")
+                    or ""
+                )
+                if pager_user_id:
+                    self.session_user_id = pager_user_id
         if not org_slug:
             org_slug = await self.discover_org_slug()
         return {
             "ok": True,
             "org_id": org_id,
             "org_slug": org_slug,
-            "pager_user_id": pager_user_id,
+            "pager_user_id": pager_user_id or self.session_user_id,
         }

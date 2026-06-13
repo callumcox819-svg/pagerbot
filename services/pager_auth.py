@@ -118,7 +118,15 @@ async def _validate_cookies(
     try:
         probe = await client.probe_session()
         if probe.get("org_id"):
-            logger.info("Session OK org=%s user=%s", probe.get("org_id"), probe.get("pager_user_id"))
+            logger.info(
+                "Session OK org=%s user=%s",
+                probe.get("org_id"),
+                probe.get("pager_user_id"),
+            )
+        if probe.get("pager_user_id"):
+            cookies["_pager_user_id"] = str(probe["pager_user_id"])
+        if probe.get("org_id"):
+            cookies["_pager_org_id"] = str(probe["org_id"])
     except PagerAPIError as exc:
         if is_session_error(exc):
             raise RuntimeError(

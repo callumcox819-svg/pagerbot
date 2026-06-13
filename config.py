@@ -18,6 +18,11 @@ DEFAULT_ORG_ID_BY_SLUG: dict[str, str] = {
     "tehsup": "org_3Cd5AHJTskSRAzLNkoft2qlfaUw",
 }
 
+# Operator user for tehsup (Тех Саппорт) — used for take-chat + send.
+DEFAULT_USER_ID_BY_SLUG: dict[str, str] = {
+    "tehsup": "user_3Cd53IT5ABAj5qZlk3qclPu6bTx",
+}
+
 
 def resolve_pager_org_id(*values: str, org_slug: str = "") -> str:
     """Pick first valid org_ id, else map slug / env."""
@@ -46,6 +51,7 @@ class Settings:
     pager_locale: str = "uk"
     pager_org_slug: str = ""
     pager_org_id: str = ""
+    pager_user_id: str = ""
 
 
 def load_settings() -> Settings:
@@ -71,6 +77,9 @@ def load_settings() -> Settings:
     pager_org_id = (os.getenv("PAGER_ORG_ID") or "").strip()
     if not pager_org_id and pager_org_slug:
         pager_org_id = DEFAULT_ORG_ID_BY_SLUG.get(pager_org_slug.lower(), "")
+    pager_user_id = (os.getenv("PAGER_USER_ID") or "").strip()
+    if not pager_user_id and pager_org_slug:
+        pager_user_id = DEFAULT_USER_ID_BY_SLUG.get(pager_org_slug.lower(), "")
 
     return Settings(
         bot_token=token,
@@ -82,4 +91,5 @@ def load_settings() -> Settings:
         pager_locale=(os.getenv("PAGER_LOCALE") or "uk").strip() or "uk",
         pager_org_slug=pager_org_slug,
         pager_org_id=pager_org_id,
+        pager_user_id=pager_user_id,
     )

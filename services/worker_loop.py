@@ -134,9 +134,11 @@ async def _handle_conversation(
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
     pager_user_id = str(
-        conv.get("responsibleuserId")
+        account.get("pager_user_id")
+        or _settings.pager_user_id
+        or client.session_user_id
+        or conv.get("responsibleuserId")
         or (conv.get("responsibleUser") or {}).get("id")
-        or account.get("pager_user_id")
         or ""
     )
 
@@ -377,6 +379,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         def _make_client(cookie_dict: dict[str, str]) -> PagerClient:
+            session_uid = str(
+                account.get("pager_user_id")
+                or _settings.pager_user_id
+                or ""
+            ).strip()
             return PagerClient(
                 _settings.pager_base_url,
                 cookie_dict,
@@ -384,10 +391,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 org_slug=org_slug,
                 locale=str(account.get("pager_locale") or _settings.pager_locale),
                 org_id_fallback=org_id,
+                session_user_id=session_uid,
             )
 
         client = _make_client(cookies)
         await client.warm_session()
+        if not client.session_user_id:
+            uid = await client.resolve_session_user_id()
+            if not uid and _settings.pager_user_id:
+                client.session_user_id = _settings.pager_user_id
 
         try:
             convs = await client.collect_conversations(enabled, max_pages=5)
@@ -453,7 +465,12 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         if client.org_id:
-            pager_uid = str(account.get("pager_user_id") or "")
+            pager_uid = str(
+                client.session_user_id
+                or account.get("pager_user_id")
+                or _settings.pager_user_id
+                or ""
+            )
             if not pager_uid and inbound_convs:
                 pager_uid = str(
                     inbound_convs[0].get("responsibleuserId")
