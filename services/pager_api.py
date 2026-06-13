@@ -37,10 +37,24 @@ def _extract_org_from_payload(data: Any) -> str:
 
 
 def _org_from_html(html: str) -> str:
+    script = re.search(
+        r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html,
+        re.S,
+    )
+    if script:
+        try:
+            found = _extract_org_from_payload(json.loads(script.group(1)))
+            if found:
+                return found
+        except json.JSONDecodeError:
+            pass
+
     for pattern in (
         r'"orgId"\s*:\s*"(org_[^"]+)"',
         r'"organizationId"\s*:\s*"(org_[^"]+)"',
         r"orgId=(org_[^&\"'\s]+)",
+        r"(org_[a-zA-Z0-9]{20,})",
     ):
         match = re.search(pattern, html)
         if match:
@@ -88,12 +102,14 @@ class PagerClient:
         *,
         org_slug: str = "",
         locale: str = "uk",
+        org_id_fallback: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookies = cookies
         self.org_id = (org_id or "").strip()
         self.org_slug = (org_slug or "").strip()
         self.locale = (locale or "uk").strip() or "uk"
+        self.org_id_fallback = (org_id_fallback or "").strip()
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
@@ -185,11 +201,32 @@ class PagerClient:
             logger.debug("org from conversation (no orgId param): %s", exc)
         return ""
 
+    async def _try_org_by_slug(self) -> str:
+        if not self.org_slug:
+            return ""
+        for path in (
+            f"/api/organization/{self.org_slug}",
+            f"/api/organizations/{self.org_slug}",
+        ):
+            try:
+                data = await self._request("GET", path)
+                org_id = _extract_org_from_payload(data)
+                if org_id:
+                    self.org_id = org_id
+                    return org_id
+            except PagerAPIError as exc:
+                logger.debug("discover org via %s: %s", path, exc)
+        return ""
+
     async def discover_org_id(self) -> str:
         if self.org_id:
             return self.org_id
 
         org_id = await self._try_org_from_conversations()
+        if org_id:
+            return org_id
+
+        org_id = await self._try_org_by_slug()
         if org_id:
             return org_id
 
@@ -229,6 +266,11 @@ class PagerClient:
                         self.org_slug = slug
         except Exception as exc:
             logger.debug("discover org via chats html: %s", exc)
+
+        if self.org_id_fallback:
+            logger.info("Using PAGER_ORG_ID fallback org=%s", self.org_id_fallback)
+            self.org_id = self.org_id_fallback
+            return self.org_id
 
         return ""
 

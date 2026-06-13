@@ -292,8 +292,17 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             org_id=str(account.get("org_id") or ""),
             org_slug=str(account.get("org_slug") or _settings.pager_org_slug),
             locale=str(account.get("pager_locale") or _settings.pager_locale),
+            org_id_fallback=_settings.pager_org_id,
         )
         convs = await client.list_conversations(page_size=40)
+        if client.org_id and not account.get("org_id"):
+            await db.upsert_account(
+                int(account["tg_user_id"]),
+                org_id=client.org_id,
+                org_slug=client.org_slug or account.get("org_slug") or "",
+                pager_user_id=account.get("pager_user_id") or "",
+                session_ok=1,
+            )
         for conv in convs:
             try:
                 await _handle_conversation(bot, account, conv, client)

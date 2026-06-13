@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any
 
@@ -48,10 +47,25 @@ def _jar_to_dict(jar: aiohttp.CookieJar) -> dict[str, str]:
 
 def extract_clerk_session_info(payload: dict[str, Any]) -> dict[str, str]:
     """Read org/user ids from Clerk client payload after login."""
-    client = payload.get("response") or payload.get("meta", {}).get("client") or {}
-    sessions = client.get("sessions") or []
-    org_id = ""
+    if not isinstance(payload, dict):
+        return {"org_id": "", "pager_user_id": ""}
+
+    client = (
+        payload.get("response")
+        or payload.get("client")
+        or payload.get("meta", {}).get("client")
+        or payload
+    )
+    if not isinstance(client, dict):
+        client = {}
+
+    org_id = str(
+        client.get("last_active_organization_id")
+        or client.get("active_organization_id")
+        or ""
+    ).strip()
     pager_user_id = ""
+    sessions = client.get("sessions") or []
 
     if sessions:
         sess = sessions[0]
@@ -73,7 +87,7 @@ def extract_clerk_session_info(payload: dict[str, Any]) -> dict[str, str]:
                 sess.get("last_active_organization_id")
                 or sess.get("active_organization_id")
                 or ""
-            )
+            ).strip()
 
     return {"org_id": org_id, "pager_user_id": pager_user_id}
 
@@ -88,12 +102,18 @@ async def _validate_cookies(
     if not cookies:
         raise RuntimeError("После входа cookies пустые")
 
+    from config import load_settings
+
+    settings = load_settings()
+    org_fallback = (org_id_hint or settings.pager_org_id or "").strip()
+
     client = PagerClient(
         PAGER_BASE,
         cookies,
-        org_id=org_id_hint,
-        org_slug=(os.getenv("PAGER_ORG_SLUG") or "").strip(),
-        locale=(os.getenv("PAGER_LOCALE") or "uk").strip() or "uk",
+        org_id=org_fallback,
+        org_slug=settings.pager_org_slug,
+        locale=settings.pager_locale,
+        org_id_fallback=settings.pager_org_id,
     )
     try:
         probe = await client.probe_session()
@@ -192,8 +212,7 @@ async def login_with_clerk_http(email: str, password: str) -> dict[str, str]:
 
         org_id_hint = ""
         pager_user_hint = ""
-        meta = result.get("meta") or data.get("meta") or {}
-        clerk_info = extract_clerk_session_info(meta)
+        clerk_info = extract_clerk_session_info(result)
         org_id_hint = clerk_info.get("org_id") or ""
         pager_user_hint = clerk_info.get("pager_user_id") or ""
 

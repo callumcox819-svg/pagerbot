@@ -37,6 +37,7 @@ def _pager_client(
         org_id=org_id,
         org_slug=org_slug or _settings.pager_org_slug,
         locale=locale or _settings.pager_locale,
+        org_id_fallback=_settings.pager_org_id,
     )
 
 
@@ -251,6 +252,7 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
     except PagerAPIError as exc:
         await cb.message.answer(
             f"Ошибка API: {exc}\n\n"
-            "Попробуйте перелогиниться (🔐 Pager аккаунт) или задайте "
-            "PAGER_ORG_SLUG=tehsup в Railway."
+            "Добавьте в Railway Variables:\n"
+            "PAGER_ORG_ID=org_… (из Network → status?orgId=…)\n"
+            "PAGER_ORG_SLUG=tehsup"
         )
