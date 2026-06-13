@@ -64,11 +64,27 @@ async def cmd_status(message: Message) -> None:
         await message.answer("Pager не подключён.")
         return
     chs = await db.list_channels(int(acc["id"]))
-    en = sum(1 for c in chs if c.get("enabled"))
+    enabled_names = [c["name"] for c in chs if c.get("enabled")]
+    en = len(enabled_names)
     await message.answer(
         f"Session: {'OK' if acc.get('session_ok') else 'FAIL'}\n"
+        f"Org: {acc.get('org_id') or '—'}\n"
         f"Каналов включено: {en}/{len(chs)}\n"
-        f"Paused: {bool(acc.get('paused'))}\n"
+        + (f"Активные: {', '.join(enabled_names)}\n" if enabled_names else "")
+        + f"Paused: {bool(acc.get('paused'))}\n"
         f"Auto-reply: {bool(acc.get('auto_reply'))}\n"
-        f"Escalation chat: {acc.get('escalation_chat_id') or acc.get('tg_user_id')}"
+        f"Escalation chat: {acc.get('escalation_chat_id') or acc.get('tg_user_id')}\n\n"
+        "Бот обрабатывает только включённые каналы (не вкладку «Всі» целиком)."
+    )
+
+
+@router.message(Command("reset_pauses"))
+async def cmd_reset_pauses(message: Message) -> None:
+    acc = await db.get_account_by_tg(message.from_user.id)
+    if not acc:
+        await message.answer("Pager не подключён.")
+        return
+    n = await db.clear_pauses_for_account(int(acc["id"]))
+    await message.answer(
+        f"Сброшено пауз у {n} чат(ов). Бот снова может отвечать в Pager."
     )

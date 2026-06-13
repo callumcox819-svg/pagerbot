@@ -44,7 +44,12 @@ async def _enabled_channel_ids(account_id: int) -> set[str] | None:
     return {c["channel_id"] for c in chs if c.get("enabled")}
 
 
-async def _escalation_chat(account: dict[str, Any]) -> int:
+def _is_incoming_direction(value: str) -> bool:
+    return (value or "").strip().lower() in ("incoming", "in")
+
+
+def _is_outgoing_direction(value: str) -> bool:
+    return (value or "").strip().lower() in ("outgoing", "out")
     cid = int(account.get("escalation_chat_id") or 0)
     return cid or int(account["tg_user_id"])
 
@@ -63,28 +68,28 @@ async def _handle_conversation(
     account: dict[str, Any],
     conv: dict[str, Any],
     client: PagerClient,
-) -> None:
+) -> bool:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
     if not conv_id:
-        return
+        return False
 
-    if (conv.get("lastMessageDirection") or "").upper() != "IN":
-        return
+    if not _is_incoming_direction(str(conv.get("lastMessageDirection") or "")):
+        return False
 
     enabled = await _enabled_channel_ids(account_id)
     channel_id = str(conv.get("channelId") or "")
     if enabled is None:
-        return
+        return False
     if not enabled or channel_id not in enabled:
-        return
+        return False
 
     if should_skip_processing(conv):
-        return
+        return False
 
     state = await db.get_conversation_state(account_id, conv_id)
     if state.get("human_takeover") or state.get("pause_scripts"):
-        return
+        return False
 
     messages = await client.list_messages(conv_id, page_size=80)
     # API returns newest first — work chronologically
@@ -93,15 +98,15 @@ async def _handle_conversation(
 
     last_in = None
     for m in reversed(msg_only):
-        if m.get("messageDirection") == "incoming" and "oldStatusId" not in m:
+        if _is_incoming_direction(str(m.get("messageDirection") or "")) and "oldStatusId" not in m:
             last_in = m
             break
     if not last_in:
-        return
+        return False
 
     msg_id = str(last_in.get("id") or "")
     if msg_id and msg_id == state.get("last_processed_msg_id"):
-        return
+        return False
 
     text = (last_in.get("text") or "").strip()
     attachments = last_in.get("attachments") or []
@@ -135,7 +140,7 @@ async def _handle_conversation(
         await db.save_conversation_state(
             account_id, conv_id, pause_scripts=1, last_processed_msg_id=msg_id
         )
-        return
+        return True
 
     actions_sent = False
 
@@ -178,7 +183,7 @@ async def _handle_conversation(
                     extra=f"ID: {extracted}",
                     **_escalation_link_kwargs(account, channel_id),
                 )
-                return
+                return True
             await notify_escalation(
                 bot,
                 esc_chat,
@@ -194,7 +199,7 @@ async def _handle_conversation(
             await db.save_conversation_state(
                 account_id, conv_id, last_processed_msg_id=msg_id, pause_scripts=1
             )
-            return
+            return True
 
         if step >= 7:
             await notify_escalation(
@@ -219,7 +224,7 @@ async def _handle_conversation(
             await db.save_conversation_state(
                 account_id, conv_id, step=9, last_processed_msg_id=msg_id
             )
-            return
+            return True
 
     # --- Text game ID at wait_id step ---
     if intent == Intent.GAME_ID_TEXT:
@@ -237,7 +242,7 @@ async def _handle_conversation(
                 extracted_game_id=gid,
                 last_processed_msg_id=msg_id,
             )
-            return
+            return True
 
     # --- Script chain ---
     keys = scripts_to_send_after_intent(step, intent.value, geo)
@@ -252,7 +257,7 @@ async def _handle_conversation(
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
         )
-        return
+        return True
 
     for key in keys:
         body = load_script(geo, key)
@@ -275,13 +280,15 @@ async def _handle_conversation(
     elif keys == ["02_how_it_works", "03_zmw_table"]:
         new_step = max(new_step, 2)
 
-    if actions_sent or msg_id:
+    if actions_sent:
         await db.save_conversation_state(
             account_id,
             conv_id,
             step=new_step,
             last_processed_msg_id=msg_id,
         )
+        return True
+    return False
 
 
 async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
@@ -315,6 +322,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         seen: set[str] = set()
+        inbound = 0
+        handled = 0
         for page in (1, 2, 3, 4):
             convs = await client.list_conversations(page=page, page_size=50)
             if not convs:
@@ -326,14 +335,27 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 if not conv_id or conv_id in seen:
                     continue
                 seen.add(conv_id)
+                if _is_incoming_direction(str(conv.get("lastMessageDirection") or "")):
+                    inbound += 1
                 try:
-                    await _handle_conversation(bot, account, conv, client)
+                    if await _handle_conversation(bot, account, conv, client):
+                        handled += 1
                 except Exception:
                     logger.exception(
                         "conv failed account=%s conv=%s",
                         account.get("id"),
                         conv_id,
                     )
+
+        logger.info(
+            "Worker account=%s: org=%s channels=%s scanned=%s inbound=%s processed=%s",
+            account.get("id"),
+            (client.org_id or "")[:16],
+            len(enabled),
+            len(seen),
+            inbound,
+            handled,
+        )
 
         if client.org_id:
             await db.upsert_account(

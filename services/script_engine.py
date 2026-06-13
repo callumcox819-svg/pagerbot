@@ -49,7 +49,8 @@ def infer_step_from_history(messages: list[dict]) -> int:
     outgoing = [
         (m.get("text") or "")
         for m in messages
-        if m.get("messageDirection") == "outgoing" and m.get("text")
+        if (m.get("messageDirection") or "").lower() in ("outgoing", "out")
+        and m.get("text")
     ]
     outgoing_joined = "\n".join(outgoing).lower()
 

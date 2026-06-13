@@ -25,7 +25,7 @@ _POSITIVE = re.compile(r"\b(ok|okay|ok\.|explain|i am|alright|got it)\b", re.I)
 _READY = re.compile(r"\b(yes|ready|am ready|let'?s start|start today)\b", re.I)
 _JOINED = re.compile(r"\b(have joined|joined|i joined)\b", re.I)
 _COMPLAINT = re.compile(
-    r"\b(lost|didn'?t win|scam|taking my money|stop|refund|nothing happened|help)\b", re.I
+    r"\b(lost|didn'?t win|scam|taking my money|stop|refund|nothing happened)\b", re.I
 )
 _GAME_ID = re.compile(r"\b16\d{6,}\b")
 

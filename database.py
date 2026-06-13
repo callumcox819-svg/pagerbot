@@ -274,6 +274,20 @@ async def toggle_channel(account_id: int, channel_id: str, enabled: bool) -> Non
         await db.commit()
 
 
+async def clear_pauses_for_account(account_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            UPDATE conversation_states
+            SET pause_scripts = 0, human_takeover = 0, updated_at = datetime('now')
+            WHERE account_id = ? AND (pause_scripts = 1 OR human_takeover = 1)
+            """,
+            (account_id,),
+        )
+        await db.commit()
+        return cur.rowcount or 0
+
+
 async def get_conversation_state(account_id: int, conversation_id: str) -> dict[str, Any]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
