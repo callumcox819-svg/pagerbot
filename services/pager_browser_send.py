@@ -211,6 +211,44 @@ async def _browser_take_and_verify(
     )
 
 
+async def _verify_outgoing_dom(page, text: str) -> dict:
+    """Pager UI: successful operator bubble is right-aligned (items-end / flex-row-reverse)."""
+    snippet = (text or "")[:80]
+    result = await page.evaluate(
+        """(snippet) => {
+            const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
+            const want = norm(snippet).slice(0, 40);
+            if (!want) return { ok: false };
+
+            const rows = document.querySelectorAll(
+                '[class*="flex-row-reverse"][class*="items-end"],'
+                + '[class*="flex-col"][class*="items-end"]'
+            );
+            for (const row of rows) {
+                const txt = norm(row.innerText || row.textContent || '');
+                if (!want || !txt.includes(want.slice(0, 20))) continue;
+
+                const err = row.querySelector(
+                    '[class*="text-red"], [class*="text-error"],'
+                    + '[class*="fill-red"], svg[class*="red"],'
+                    + '[aria-label*="error" i], [title*="не достав" i],'
+                    + '[title*="failed" i]'
+                );
+                if (err) {
+                    return { ok: false, ghost: true, reason: 'dom_error_icon' };
+                }
+                const hasAvatar = !!row.querySelector(
+                    'img, [class*="rounded-full"]'
+                );
+                return { ok: true, hasAvatar, preview: txt.slice(0, 48) };
+            }
+            return { ok: false };
+        }""",
+        snippet,
+    )
+    return result if isinstance(result, dict) else {"ok": False}
+
+
 async def _verify_message_delivered(
     page,
     *,
@@ -255,6 +293,38 @@ async def _verify_message_delivered(
             continue
         if result.get("ok"):
             return result
+        dom = await _verify_outgoing_dom(page, text)
+        if dom.get("ghost"):
+            return {"ok": False, "ghost": True}
+        if dom.get("ok"):
+            await page.wait_for_timeout(1200)
+            retry = await page.evaluate(
+                f"""async ({{msgUrl, userId, snippet}}) => {{
+                    {_SAFE_FETCH}
+                    const r = await safeJsonFetch(msgUrl);
+                    if (r.html) return {{ ok: false }};
+                    const list = Array.isArray(r.data) ? r.data : [];
+                    const hit = list.find(m =>
+                        m.messageDirection === 'outgoing'
+                        && m.authorId === userId
+                        && m.text
+                        && m.text.startsWith(snippet.slice(0, 40))
+                        && (m.isDelivered || m.facebookMessageId)
+                    );
+                    if (hit) {{
+                        return {{
+                            ok: true,
+                            authorId: hit.authorId,
+                            facebookMessageId: hit.facebookMessageId || '',
+                            via: 'dom_then_api',
+                        }};
+                    }}
+                    return {{ ok: false }};
+                }}""",
+                {"msgUrl": api_msg, "userId": user_id, "snippet": snippet},
+            )
+            if isinstance(retry, dict) and retry.get("ok"):
+                return retry
         await page.wait_for_timeout(800)
 
     return {"ok": False}
@@ -626,9 +696,27 @@ async def _send_one_in_session(
         page, conv_id=conv_id, org_id=org_id, text=text
     )
     if page_msg and not page_msg.get("authorId"):
+        dom = await _verify_outgoing_dom(page, text)
+        if dom.get("ghost"):
+            raise RuntimeError(
+                f"Message delivery error in UI (conv={conv_id[:8]}) — red !"
+            )
         raise RuntimeError(
             f"Message stuck as Facebook page (conv={conv_id[:8]}) — not retrying"
         )
+
+    dom = await _verify_outgoing_dom(page, text)
+    if dom.get("ghost"):
+        raise RuntimeError(
+            f"Message delivery error in UI (conv={conv_id[:8]}) — red !"
+        )
+    if dom.get("ok") and dom.get("hasAvatar"):
+        logger.info(
+            "browser DOM verified conv=%s preview=%r",
+            conv_id[:8],
+            dom.get("preview", "")[:40],
+        )
+        return
 
     raise RuntimeError(
         f"Send POST failed conv={conv_id[:8]} status={last_status}: "
