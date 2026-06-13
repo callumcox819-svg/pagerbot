@@ -85,7 +85,7 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
         return ["01_intro"]
     if intent == "positive" and step < 2:
         return ["02_how_it_works", "03_zmw_table"]
-    if intent == "ready" and step < 4:
+    if intent in ("positive", "ready") and 2 <= step < 4:
         return ["04_registration", "05_link"]
     if step == 4:
         return ["10_reg_screenshot"]

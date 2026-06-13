@@ -15,7 +15,7 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
-from services.pager_browser_send import send_message_via_browser
+from services.pager_browser_send import send_message_via_browser, send_messages_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -162,7 +162,7 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
-    async def send(text: str) -> None:
+    async def _browser_send(texts: list[str]) -> None:
         slug = str(
             account.get("org_slug") or _settings.pager_org_slug or ""
         ).strip()
@@ -175,37 +175,43 @@ async def _handle_conversation(
         browser_cookies = _cookies(account)
         if not browser_cookies:
             raise PagerAPIError(401, '{"error":"no session cookies"}')
+        locale = str(account.get("pager_locale") or _settings.pager_locale)
+
+        async def _do(cookies: dict[str, str]) -> None:
+            if len(texts) == 1:
+                await send_message_via_browser(
+                    cookies,
+                    conv_id=conv_id,
+                    text=texts[0],
+                    org_id=oid,
+                    org_slug=slug,
+                    user_id=pager_user_id,
+                    locale=locale,
+                )
+            else:
+                await send_messages_via_browser(
+                    cookies,
+                    conv_id=conv_id,
+                    texts=texts,
+                    org_id=oid,
+                    org_slug=slug,
+                    user_id=pager_user_id,
+                    locale=locale,
+                )
 
         try:
-            await send_message_via_browser(
-                browser_cookies,
-                conv_id=conv_id,
-                text=text,
-                org_id=oid,
-                org_slug=slug,
-                user_id=pager_user_id,
-                locale=str(
-                    account.get("pager_locale") or _settings.pager_locale
-                ),
-            )
+            await _do(browser_cookies)
         except RuntimeError as exc:
             msg = str(exc)
             if "session expired" in msg.lower() or "sign-in" in msg.lower():
                 fresh = await refresh_pager_session(account)
                 if fresh:
-                    await send_message_via_browser(
-                        fresh,
-                        conv_id=conv_id,
-                        text=text,
-                        org_id=oid,
-                        org_slug=slug,
-                        user_id=pager_user_id,
-                        locale=str(
-                            account.get("pager_locale") or _settings.pager_locale
-                        ),
-                    )
+                    await _do(fresh)
                     return
             raise PagerAPIError(502, msg) from exc
+
+    async def send(text: str) -> None:
+        await _browser_send([text])
 
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
@@ -342,7 +348,7 @@ async def _handle_conversation(
         keys = ["01_intro"]
     elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
         keys = ["02_how_it_works", "03_zmw_table"]
-    elif intent == Intent.READY and step >= 2 and step < 4:
+    elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
         keys = ["04_registration", "05_link"]
     elif no_status and step < 3 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
@@ -352,6 +358,7 @@ async def _handle_conversation(
         )
         return True
 
+    bodies: list[str] = []
     for key in keys:
         if keys == ["04_registration", "05_link"] and key == "05_link":
             continue
@@ -363,9 +370,11 @@ async def _handle_conversation(
             )
         else:
             body = load_script(geo, key)
-        await send(body)
+        bodies.append(body)
+
+    if bodies:
+        await _browser_send(bodies)
         actions_sent = True
-        await asyncio.sleep(1.0)
 
     new_step = step
     if keys == ["04_registration", "05_link"] or (
