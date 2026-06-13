@@ -5,6 +5,17 @@ from __future__ import annotations
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+PAGER_BASE = "https://www.pager.co.ua"
+
+
+def pager_conversation_url(conv_id: str, base_url: str = PAGER_BASE) -> str:
+    """Deep link to a specific Pager chat (opens after login if needed)."""
+    root = base_url.rstrip("/")
+    cid = (conv_id or "").strip()
+    if not cid:
+        return f"{root}/chats"
+    return f"{root}/chats/{cid}"
+
 
 async def notify_escalation(
     bot: Bot,
@@ -18,6 +29,7 @@ async def notify_escalation(
     last_message: str,
     conv_id: str,
     extra: str = "",
+    pager_base_url: str = PAGER_BASE,
 ) -> None:
     text = (
         f"🚨 <b>{title}</b>\n\n"
@@ -31,12 +43,13 @@ async def notify_escalation(
         text += f"\n🆔 {extra}\n"
     text += f"\n<code>{conv_id}</code>"
 
+    chat_url = pager_conversation_url(conv_id, pager_base_url)
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Открыть Pager",
-                    url="https://www.pager.co.ua/",
+                    url=chat_url,
                 )
             ]
         ]
