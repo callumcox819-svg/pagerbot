@@ -195,12 +195,18 @@ async def delete_account(tg_user_id: int) -> None:
 
 
 async def list_worker_accounts() -> list[dict[str, Any]]:
+    """Active accounts — one row per Telegram user (latest connection)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             """
-            SELECT * FROM pager_accounts
-            WHERE session_ok = 1 AND paused = 0 AND auto_reply = 1
+            SELECT a.* FROM pager_accounts a
+            INNER JOIN (
+                SELECT tg_user_id, MAX(id) AS max_id
+                FROM pager_accounts
+                WHERE session_ok = 1 AND paused = 0 AND auto_reply = 1
+                GROUP BY tg_user_id
+            ) latest ON a.id = latest.max_id
             """
         )
         return [dict(r) for r in await cur.fetchall()]

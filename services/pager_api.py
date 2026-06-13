@@ -465,12 +465,27 @@ class PagerClient:
         )
         return data if isinstance(data, list) else []
 
-    async def send_message(self, conv_id: str, text: str) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            "/api/message",
-            json_body={"conversationId": conv_id, "text": text},
-        )
+    async def send_message(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        channel_id: str = "",
+    ) -> dict[str, Any]:
+        ch = (channel_id or "").strip()
+        if not ch:
+            raise PagerAPIError(
+                400,
+                '{"error":"channelId required — pass channel_id from conversation"}',
+            )
+        body: dict[str, Any] = {
+            "conversationId": conv_id,
+            "channelId": ch,
+            "text": text,
+        }
+        if self.org_id:
+            body["organizationId"] = self.org_id
+        return await self._request("POST", "/api/message", json_body=body)
 
     async def patch_status(self, conv_id: str, status_id: str, user_id: str) -> dict[str, Any]:
         return await self._request(

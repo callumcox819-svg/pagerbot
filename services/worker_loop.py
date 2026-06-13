@@ -127,6 +127,9 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
+    async def send(text: str) -> None:
+        await client.send_message(conv_id, text, channel_id=channel_id)
+
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
         await db.save_conversation_state(
@@ -168,10 +171,10 @@ async def _handle_conversation(
 
         if step >= 5 and step < 7:
             if extracted:
-                await client.send_message(conv_id, EXCELLENT)
+                await send(EXCELLENT)
                 await asyncio.sleep(0.8)
                 dep = load_script(geo, "06_deposit")
-                await client.send_message(conv_id, dep)
+                await send(dep)
                 if pager_user_id:
                     await client.patch_status(conv_id, ZM_STATUSES["registration"], pager_user_id)
                 await db.save_conversation_state(
@@ -227,11 +230,11 @@ async def _handle_conversation(
             )
             if pager_user_id:
                 await client.patch_status(conv_id, ZM_STATUSES["deps_pending"], pager_user_id)
-            await client.send_message(conv_id, EXCELLENT)
+            await send(EXCELLENT)
             await asyncio.sleep(0.8)
-            await client.send_message(conv_id, load_script(geo, "08_tg_invite"))
+            await send(load_script(geo, "08_tg_invite"))
             await asyncio.sleep(0.8)
-            await client.send_message(conv_id, load_script(geo, "09_tg_link"))
+            await send(load_script(geo, "09_tg_link"))
             await db.save_conversation_state(
                 account_id, conv_id, step=9, last_processed_msg_id=msg_id
             )
@@ -241,9 +244,9 @@ async def _handle_conversation(
     if intent == Intent.GAME_ID_TEXT:
         gid = extract_id_from_text(text)
         if gid and step >= 5 and step < 7:
-            await client.send_message(conv_id, EXCELLENT)
+            await send(EXCELLENT)
             await asyncio.sleep(0.8)
-            await client.send_message(conv_id, load_script(geo, "06_deposit"))
+            await send(load_script(geo, "06_deposit"))
             if pager_user_id:
                 await client.patch_status(conv_id, ZM_STATUSES["registration"], pager_user_id)
             await db.save_conversation_state(
@@ -272,7 +275,7 @@ async def _handle_conversation(
 
     for key in keys:
         body = load_script(geo, key)
-        await client.send_message(conv_id, body)
+        await send(body)
         actions_sent = True
         await asyncio.sleep(1.0)
 
@@ -282,7 +285,7 @@ async def _handle_conversation(
         if pager_user_id:
             await client.patch_status(conv_id, ZM_STATUSES["in_progress"], pager_user_id)
         await asyncio.sleep(0.5)
-        await client.send_message(conv_id, load_script(geo, "10_reg_screenshot"))
+        await send(load_script(geo, "10_reg_screenshot"))
         if pager_user_id:
             await client.patch_status(conv_id, ZM_STATUSES["wait_id"], pager_user_id)
         new_step = 5
@@ -362,6 +365,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             try:
                 if await _handle_conversation(bot, account, conv, client):
                     handled += 1
+            except PagerAPIError as exc:
+                logger.warning(
+                    "conv API error account=%s conv=%s: %s",
+                    account.get("id"),
+                    conv_id,
+                    exc,
+                )
             except Exception:
                 logger.exception(
                     "conv failed account=%s conv=%s",
