@@ -399,37 +399,50 @@ async def _handle_conversation(
             return True
 
     # --- Script chain (strict funnel order) ---
-    keys = scripts_to_send_after_intent(step, intent.value, geo)
+    keys: list[str] = []
 
-    if no_status and needs_reply and hist_step < 1:
-        keys = ["01_intro"]
-    elif intent == Intent.INTERESTED and step < 1:
-        keys = ["01_intro"]
-    elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
-        keys = ["02_how_it_works", "03_zmw_table"]
-    elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
-        keys = ["04_registration", "05_link"]
-    elif no_status and step < 4 and intent in (
-        Intent.UNKNOWN,
-        Intent.QUESTION,
-        Intent.POSITIVE,
-        Intent.INTERESTED,
-    ):
-        keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
-    elif needs_reply and not keys:
-        keys = (
-            ["01_intro"]
-            if no_status and hist_step < 1
-            else scripts_to_resend_for_step(hist_step)
-        )
+    if no_status and needs_reply:
+        if hist_step < 1 or intent in (
+            Intent.INTERESTED,
+            Intent.UNKNOWN,
+            Intent.QUESTION,
+        ):
+            keys = ["01_intro"]
+        elif hist_step < 2:
+            keys = ["02_how_it_works", "03_zmw_table"]
+        elif hist_step < 4:
+            keys = ["04_registration", "05_link"]
+        elif hist_step < 5:
+            keys = ["10_reg_screenshot"]
+        else:
+            keys = scripts_to_resend_for_step(hist_step)
         if keys:
             logger.info(
-                "conv=%s resend hist_step=%s keys=%s",
+                "conv=%s no_status hist_step=%s keys=%s",
                 conv_id[:8],
                 hist_step,
                 keys,
             )
-    elif intent == Intent.JOINED:
+    else:
+        keys = scripts_to_send_after_intent(step, intent.value, geo)
+
+        if intent == Intent.INTERESTED and step < 1:
+            keys = ["01_intro"]
+        elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
+            keys = ["02_how_it_works", "03_zmw_table"]
+        elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
+            keys = ["04_registration", "05_link"]
+        elif needs_reply and not keys:
+            keys = scripts_to_resend_for_step(hist_step)
+            if keys:
+                logger.info(
+                    "conv=%s resend hist_step=%s keys=%s",
+                    conv_id[:8],
+                    hist_step,
+                    keys,
+                )
+
+    if intent == Intent.JOINED:
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
         )
@@ -567,30 +580,41 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
         ]
 
+        no_status_queue = [c for c in inbound_convs if is_no_status(c)]
+        if no_status_queue:
+            logger.info(
+                "Worker account=%s: focus no_status=%s (skip funnel retries)",
+                account.get("id"),
+                len(no_status_queue),
+            )
+            inbound_convs = no_status_queue
+
         async def _priority(conv: dict) -> tuple[int, str]:
             cid = str(conv.get("id") or "")
             st = await db.get_conversation_state(account_id, cid)
             ts = str(conv.get("lastMessageAt") or "")
             if st.get("pause_scripts") or st.get("human_takeover"):
                 return (3, ts)
-            if is_no_status(conv) and not st.get("last_processed_msg_id"):
+            if is_no_status(conv):
                 return (0, ts)
             if not st.get("last_processed_msg_id"):
                 return (1, ts)
             return (2, ts)
 
-        # Fresh «Без статусу» first, then other new, retries last.
         scored: list[tuple[tuple[int, str], dict]] = []
         for c in inbound_convs:
             scored.append((await _priority(c), c))
-        scored.sort(key=lambda x: x[0])
+        scored.sort(key=lambda x: x[0][0])
         inbound_convs = [c for _, c in scored]
+        inbound_convs.sort(
+            key=lambda c: str(c.get("lastMessageAt") or ""), reverse=True
+        )
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         browser_jobs: list[tuple[str, list[str]]] = []
         state_marks: dict[str, dict[str, Any]] = {}
-        max_replies = 6
+        max_replies = 4
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
