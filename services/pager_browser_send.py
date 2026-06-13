@@ -580,6 +580,94 @@ async def send_message_via_browser(
     return {"ok": "true", "method": "browser_take_then_send", "authorId": user_id}
 
 
+async def send_messages_via_browser_ui(
+    cookies: dict[str, str],
+    *,
+    conv_id: str,
+    texts: Sequence[str],
+    org_id: str,
+    org_slug: str,
+    user_id: str = "",
+    locale: str = "uk",
+) -> None:
+    """Take chat + send via textarea only (operator UI, no REST POST)."""
+    from playwright.async_api import async_playwright
+
+    slug = (org_slug or "").strip()
+    oid = (org_id or "").strip()
+    uid = (user_id or "").strip()
+    if not slug or not oid or not uid:
+        raise RuntimeError("org_slug, org_id, user_id required")
+
+    clean = {k: v for k, v in cookies.items() if not k.startswith("_pager_") and v}
+    if not clean:
+        raise RuntimeError("No session cookies for browser send")
+
+    bodies = [t.strip() for t in texts if (t or "").strip()]
+    if not bodies:
+        raise RuntimeError("No messages to send")
+
+    chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
+    launch_args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=launch_args)
+        context = await browser.new_context(
+            user_agent=UA,
+            locale="uk-UA",
+            viewport={"width": 1280, "height": 720},
+        )
+        await context.add_cookies(
+            [
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".pager.co.ua",
+                    "path": "/",
+                }
+                for name, value in clean.items()
+            ]
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(chat_url, wait_until="networkidle", timeout=90000)
+            if "sign-in" in page.url:
+                raise RuntimeError("Browser session expired (redirected to sign-in)")
+            await _verify_logged_in_operator(page, uid)
+            await _browser_prepare_outbound(
+                page, conv_id=conv_id, org_id=oid, user_id=uid
+            )
+            await page.wait_for_timeout(1000)
+            for i, body in enumerate(bodies):
+                if i:
+                    await page.wait_for_timeout(1200)
+                ui_ok = await _browser_send_via_ui(page, body)
+                if not ui_ok:
+                    raise RuntimeError(
+                        f"UI textarea not found (conv={conv_id[:8]})"
+                    )
+                verify = await _verify_message_delivered(
+                    page,
+                    conv_id=conv_id,
+                    org_id=oid,
+                    user_id=uid,
+                    text=body,
+                    attempts=12,
+                )
+                if not verify.get("ok"):
+                    raise RuntimeError(
+                        f"UI send not verified as operator (conv={conv_id[:8]})"
+                    )
+                logger.info(
+                    "browser UI sent conv=%s author=%s fb=%s",
+                    conv_id[:8],
+                    str(verify.get("authorId") or uid)[:16],
+                    str(verify.get("facebookMessageId") or "")[:12],
+                )
+        finally:
+            await browser.close()
+
+
 async def send_messages_via_browser(
     cookies: dict[str, str],
     *,

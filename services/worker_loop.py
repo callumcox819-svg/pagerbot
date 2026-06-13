@@ -15,6 +15,7 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
+from services.pager_browser_send import send_messages_via_browser_ui
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -202,25 +203,49 @@ async def _handle_conversation(
                         "take chat failed",
                         "channel.findunique",
                         "organization id required",
+                        "imageurl",
                     )
                 )
-                if not retry:
-                    raise
-                fresh = await refresh_pager_session(account)
-                if not fresh:
-                    raise
-                active = PagerClient(
-                    _settings.pager_base_url,
-                    fresh,
+                if retry:
+                    fresh = await refresh_pager_session(account)
+                    if fresh:
+                        active = PagerClient(
+                            _settings.pager_base_url,
+                            fresh,
+                            org_id=oid,
+                            org_slug=slug,
+                            locale=locale,
+                            org_id_fallback=oid,
+                            session_user_id=pager_user_id,
+                        )
+                        await active.warm_session()
+                        client = active
+                        try:
+                            await _send_one(body, active)
+                            continue
+                        except PagerAPIError:
+                            pass
+                logger.warning(
+                    "REST send failed conv=%s, trying browser UI: %s",
+                    conv_id[:8],
+                    exc.body[:120],
+                )
+                await send_messages_via_browser_ui(
+                    _cookies(account),
+                    conv_id=conv_id,
+                    texts=[body],
                     org_id=oid,
                     org_slug=slug,
+                    user_id=pager_user_id,
                     locale=locale,
-                    org_id_fallback=oid,
-                    session_user_id=pager_user_id,
                 )
-                await active.warm_session()
-                client = active
-                await _send_one(body, active)
+            except Exception as exc:
+                logger.warning(
+                    "send failed conv=%s: %s",
+                    conv_id[:8],
+                    exc,
+                )
+                raise
 
         logger.info(
             "REST sent conv=%s count=%s",

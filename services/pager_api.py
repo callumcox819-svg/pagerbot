@@ -632,16 +632,7 @@ class PagerClient:
         uid = (user_id or "").strip()
         if not uid:
             return False
-        if await self._conversation_responsible(conv_id) == uid:
-            return True
-        try:
-            msgs = await self.list_messages(conv_id, page_size=25)
-        except PagerAPIError:
-            msgs = []
-        for m in msgs:
-            if str(m.get("newResponsibleId") or "").strip() == uid:
-                return True
-        return False
+        return await self._conversation_responsible(conv_id) == uid
 
     async def _wait_take(self, conv_id: str, user_id: str, *, attempts: int = 10) -> bool:
         for _ in range(attempts):
@@ -795,10 +786,20 @@ class PagerClient:
             nested = conv_data.get("channel")
             if isinstance(nested, dict):
                 ch = str(nested.get("id") or "").strip()
-        # Single payload — operator UI after take (browser path). No channelId retries.
-        bodies: list[dict[str, Any]] = [
-            {"conversationId": conv_id, "text": text},
-        ]
+        if not ch:
+            raise PagerAPIError(
+                400,
+                json.dumps({"error": "channelId missing", "conv": conv_id[:8]}),
+            )
+
+        # REST requires channelId in body (aiohttp is not browser UI session).
+        body: dict[str, Any] = {
+            "conversationId": conv_id,
+            "text": text,
+            "channelId": ch,
+        }
+        if user_id:
+            body["authorId"] = user_id
 
         params: dict[str, Any] = {"orgId": org_id}
         if user_id:
@@ -807,77 +808,59 @@ class PagerClient:
         logger.info(
             "send conv=%s channel=%s user=%s chars=%s",
             conv_id[:8],
-            (ch or "?")[:8],
+            ch[:8],
             (user_id or "")[:16],
             len(text),
         )
 
-        last_exc: PagerAPIError | None = None
-        for body in bodies:
-            try:
-                result = await self._request(
-                    "POST",
-                    "/api/message",
-                    params=params,
-                    json_body=body,
-                    referer=referer,
-                )
-                if not isinstance(result, dict):
-                    raise PagerAPIError(502, '{"error":"empty message response"}')
-                if message_accepted(result, user_id):
-                    logger.info(
-                        "Pager message sent conv=%s user=%s chars=%s fb=%s",
-                        conv_id[:8],
-                        (user_id or "")[:16],
-                        len(text),
-                        str(result.get("facebookMessageId") or "")[:12],
-                    )
-                    return result
-                if message_delivered(result):
-                    author = str(result.get("authorId") or "null")
-                    logger.error(
-                        "send page-identity conv=%s author=%s fb=%s — not retrying",
-                        conv_id[:8],
-                        author[:16],
-                        str(result.get("facebookMessageId") or "")[:12],
-                    )
-                    raise PagerAPIError(
-                        502,
-                        json.dumps(
-                            {
-                                "error": "Delivered as Facebook page, not operator",
-                                "authorId": author,
-                                "id": str(result.get("id") or ""),
-                            }
-                        ),
-                    )
-                msg_id = str(result.get("id") or "")
-                author = str(result.get("authorId") or "null")
-                raise PagerAPIError(
-                    502,
-                    json.dumps(
-                        {
-                            "error": "Message not accepted",
-                            "id": msg_id,
-                            "authorId": author,
-                            "isDelivered": result.get("isDelivered"),
-                        }
-                    ),
-                )
-            except PagerAPIError as exc:
-                if "Facebook page" in (exc.body or ""):
-                    raise
-                last_exc = exc
-                logger.info(
-                    "send attempt conv=%s ch=%s body=%s -> %s",
-                    conv_id[:8],
-                    (ch or "?")[:8],
-                    sorted(body.keys()),
-                    exc.body[:160],
-                )
-        if last_exc:
-            raise last_exc
-        raise PagerAPIError(400, '{"error":"send_message failed"}')
+        try:
+            result = await self._request(
+                "POST",
+                "/api/message",
+                params=params,
+                json_body=body,
+                referer=referer,
+            )
+        except PagerAPIError as exc:
+            logger.warning(
+                "send failed conv=%s body=%s -> %s",
+                conv_id[:8],
+                sorted(body.keys()),
+                exc.body[:200],
+            )
+            raise
+        if not isinstance(result, dict):
+            raise PagerAPIError(502, '{"error":"empty message response"}')
+        if message_accepted(result, user_id):
+            logger.info(
+                "Pager message sent conv=%s user=%s chars=%s fb=%s",
+                conv_id[:8],
+                (user_id or "")[:16],
+                len(text),
+                str(result.get("facebookMessageId") or "")[:12],
+            )
+            return result
+        if message_delivered(result):
+            author = str(result.get("authorId") or "null")
+            raise PagerAPIError(
+                502,
+                json.dumps(
+                    {
+                        "error": "Delivered as Facebook page, not operator",
+                        "authorId": author,
+                    }
+                ),
+            )
+        raise PagerAPIError(
+            502,
+            json.dumps(
+                {
+                    "error": "Message not accepted",
+                    "authorId": str(result.get("authorId") or ""),
+                    "isDelivered": result.get("isDelivered"),
+                }
+            ),
+        )
 
     async def mark_conversation_read(
         self,
