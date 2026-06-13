@@ -14,7 +14,8 @@ from config import load_settings, resolve_pager_org_id
 from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
-from services.pager_api import PagerAPIError, PagerClient
+from services.pager_api import PagerAPIError, PagerClient, is_session_error
+from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
     load_script,
@@ -50,6 +51,9 @@ def _is_incoming_direction(value: str) -> bool:
 
 def _is_outgoing_direction(value: str) -> bool:
     return (value or "").strip().lower() in ("outgoing", "out")
+
+
+def _escalation_chat(account: dict[str, Any]) -> int:
     cid = int(account.get("escalation_chat_id") or 0)
     return cid or int(account["tg_user_id"])
 
@@ -121,7 +125,7 @@ async def _handle_conversation(
     channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
     folder = ((conv.get("status") or {}) or {}).get("name") or ""
 
-    esc_chat = await _escalation_chat(account)
+    esc_chat = _escalation_chat(account)
 
     # --- Complaints / unclear → TG only ---
     if needs_human(intent, step) and intent != Intent.IMAGE_ONLY:
@@ -312,16 +316,34 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             org_slug=org_slug,
         )
 
-        client = PagerClient(
-            _settings.pager_base_url,
-            cookies,
-            org_id=org_id,
-            org_slug=org_slug,
-            locale=str(account.get("pager_locale") or _settings.pager_locale),
-            org_id_fallback=org_id,
-        )
+        def _make_client(cookie_dict: dict[str, str]) -> PagerClient:
+            return PagerClient(
+                _settings.pager_base_url,
+                cookie_dict,
+                org_id=org_id,
+                org_slug=org_slug,
+                locale=str(account.get("pager_locale") or _settings.pager_locale),
+                org_id_fallback=org_id,
+            )
 
-        convs = await client.collect_conversations(enabled, max_pages=5)
+        client = _make_client(cookies)
+        await client.warm_session()
+
+        try:
+            convs = await client.collect_conversations(enabled, max_pages=5)
+        except PagerAPIError as exc:
+            if not is_session_error(exc):
+                raise
+            logger.warning(
+                "Session stale account=%s, refreshing…",
+                account.get("id"),
+            )
+            fresh = await refresh_pager_session(account)
+            if not fresh:
+                return
+            client = _make_client(fresh)
+            await client.warm_session()
+            convs = await client.collect_conversations(enabled, max_pages=5)
         inbound = sum(
             1
             for c in convs
@@ -359,7 +381,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 session_ok=1,
             )
     except PagerAPIError as exc:
-        if exc.status in (401, 403):
+        if is_session_error(exc):
             await db.upsert_account(
                 int(account["tg_user_id"]),
                 session_ok=0,

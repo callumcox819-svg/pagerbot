@@ -97,7 +97,7 @@ async def _validate_cookies(
     *,
     org_id_hint: str = "",
 ) -> dict[str, str]:
-    from services.pager_api import PagerAPIError, PagerClient
+    from services.pager_api import PagerAPIError, PagerClient, is_session_error
 
     if not cookies:
         raise RuntimeError("После входа cookies пустые")
@@ -120,13 +120,9 @@ async def _validate_cookies(
         if probe.get("org_id"):
             logger.info("Session OK org=%s user=%s", probe.get("org_id"), probe.get("pager_user_id"))
     except PagerAPIError as exc:
-        if exc.status in (401, 403):
+        if is_session_error(exc):
             raise RuntimeError(
-                "Сессия не принята Pager (401). Проверьте email и пароль."
-            ) from exc
-        if "Organization ID required" in exc.body or exc.status == 400:
-            raise RuntimeError(
-                "Вход прошёл, но Pager не отдал orgId. Попробуйте ещё раз или cookies."
+                "Сессия Pager не принята. Перелогиньтесь или обновите cookies."
             ) from exc
         raise RuntimeError(str(exc)) from exc
     logger.info("Login OK, cookie keys: %s", ", ".join(sorted(cookies.keys())))

@@ -10,8 +10,21 @@ from typing import Any
 import aiohttp
 
 from config import DEFAULT_ORG_ID_BY_SLUG, resolve_pager_org_id
+from services.pager_auth import UA
 
 logger = logging.getLogger(__name__)
+
+
+def is_session_error(exc: PagerAPIError) -> bool:
+    """Pager often returns 400 'Organization ID required' when cookies expired."""
+    if exc.status in (401, 403):
+        return True
+    body = (exc.body or "").lower()
+    return exc.status == 400 and "organization id required" in body
+
+
+def _clean_cookies(cookies: dict[str, str]) -> dict[str, str]:
+    return {k: v for k, v in cookies.items() if not k.startswith("_pager_")}
 
 
 class PagerAPIError(Exception):
@@ -124,13 +137,22 @@ class PagerClient:
             referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
         return {
             "Accept": "*/*",
+            "User-Agent": UA,
             "Cookie": self._cookie_header(),
             "Referer": referer,
             "Origin": self.base_url,
         }
 
     def _cookie_header(self) -> str:
-        return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        return "; ".join(f"{k}={v}" for k, v in _clean_cookies(self.cookies).items())
+
+    async def warm_session(self) -> None:
+        """Load org chats page — refreshes cookie context before API calls."""
+        html = await self._fetch_chats_html()
+        if html and not self.org_id:
+            org_id = _org_from_html(html)
+            if org_id:
+                self.org_id = org_id
 
     async def _request(
         self,
@@ -156,11 +178,13 @@ class PagerClient:
             ) as resp:
                 text = await resp.text()
                 if resp.status >= 400:
+                    cookie_keys = sorted(_clean_cookies(self.cookies).keys())
                     logger.warning(
-                        "Pager API %s %s params=%s -> %s",
+                        "Pager API %s %s params=%s cookies=%s -> %s",
                         method,
                         path,
                         params,
+                        cookie_keys,
                         text[:120],
                     )
                     raise PagerAPIError(resp.status, text)
@@ -314,12 +338,19 @@ class PagerClient:
             "pageSize": page_size,
             "page": page,
         }
-        if channel_id:
-            params["channelId"] = channel_id
         if status_id is not None:
             params["statusId"] = status_id
-        data = await self._request("GET", "/api/conversation", params=params)
-        return data if isinstance(data, list) else []
+        try:
+            data = await self._request("GET", "/api/conversation", params=params)
+        except PagerAPIError as exc:
+            if not is_session_error(exc):
+                raise
+            await self.warm_session()
+            data = await self._request("GET", "/api/conversation", params=params)
+        convs = data if isinstance(data, list) else []
+        if channel_id:
+            convs = [c for c in convs if str(c.get("channelId") or "") == channel_id]
+        return convs
 
     async def collect_conversations(
         self,
@@ -345,19 +376,11 @@ class PagerClient:
 
         for channel_id in enabled_channel_ids:
             for page in range(1, max_pages + 1):
-                try:
-                    convs = await self.list_conversations(
-                        page=page,
-                        page_size=50,
-                        channel_id=channel_id,
-                    )
-                except PagerAPIError:
-                    convs = await self.list_conversations(page=page, page_size=50)
-                    convs = [
-                        c
-                        for c in convs
-                        if str(c.get("channelId") or "") == channel_id
-                    ]
+                convs = await self.list_conversations(
+                    page=page,
+                    page_size=50,
+                    channel_id=channel_id,
+                )
                 if not convs:
                     break
                 _add(convs)
