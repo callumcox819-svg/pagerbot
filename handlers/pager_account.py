@@ -24,12 +24,28 @@ _settings = load_settings()
 _secrets = Secrets(_settings.encryption_key)
 
 
+def _pager_client(
+    cookies: dict,
+    *,
+    org_id: str = "",
+    org_slug: str = "",
+    locale: str = "",
+) -> PagerClient:
+    return PagerClient(
+        _settings.pager_base_url,
+        cookies,
+        org_id=org_id,
+        org_slug=org_slug or _settings.pager_org_slug,
+        locale=locale or _settings.pager_locale,
+    )
+
+
 async def _save_session(tg_user_id: int, email: str, password: str, cookies: dict) -> str:
     org_hint = cookies.pop("_pager_org_id", "")
     user_hint = cookies.pop("_pager_user_id", "")
     session_enc = _secrets.encrypt(json.dumps(cookies))
     password_enc = _secrets.encrypt(password) if password else ""
-    client = PagerClient(_settings.pager_base_url, cookies, org_id=org_hint)
+    client = _pager_client(cookies, org_id=org_hint)
     probe = await client.probe_session()
     pager_user_id = probe.get("pager_user_id") or user_hint or ""
     org_slug = probe.get("org_slug") or _settings.pager_org_slug
@@ -202,10 +218,39 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
     await cb.answer("Обновляю…")
     try:
         cookies = json.loads(_secrets.decrypt(acc["session_enc"]))
-        client = PagerClient(_settings.pager_base_url, cookies, org_id=acc.get("org_id") or "")
+        client = _pager_client(
+            cookies,
+            org_id=str(acc.get("org_id") or ""),
+            org_slug=str(acc.get("org_slug") or ""),
+            locale=str(acc.get("pager_locale") or ""),
+        )
+        probe = await client.probe_session()
+        if probe.get("org_id"):
+            await db.upsert_account(
+                cb.from_user.id,
+                org_id=probe["org_id"],
+                org_slug=probe.get("org_slug") or acc.get("org_slug") or "",
+                pager_user_id=probe.get("pager_user_id") or acc.get("pager_user_id") or "",
+                session_ok=1,
+            )
         channels = await client.list_channels_api()
+        if not channels:
+            await cb.message.answer(
+                "Каналы не найдены. Проверьте сессию или добавьте "
+                "PAGER_ORG_SLUG=tehsup в Railway Variables."
+            )
+            return
         await db.sync_channels(int(acc["id"]), channels)
         chs = await db.list_channels(int(acc["id"]))
-        await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
+        enabled = sum(1 for c in chs if c.get("enabled"))
+        hint = f" ({enabled} вкл.)" if enabled else " (все выкл.)"
+        await cb.message.edit_text(
+            f"Каналы{hint} — {len(chs)} шт. Нажмите чтобы вкл/выкл:",
+            reply_markup=channels_kb(chs),
+        )
     except PagerAPIError as exc:
-        await cb.message.answer(f"Ошибка API: {exc}")
+        await cb.message.answer(
+            f"Ошибка API: {exc}\n\n"
+            "Попробуйте перелогиниться (🔐 Pager аккаунт) или задайте "
+            "PAGER_ORG_SLUG=tehsup в Railway."
+        )

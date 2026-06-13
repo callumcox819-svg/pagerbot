@@ -290,6 +290,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             _settings.pager_base_url,
             cookies,
             org_id=str(account.get("org_id") or ""),
+            org_slug=str(account.get("org_slug") or _settings.pager_org_slug),
+            locale=str(account.get("pager_locale") or _settings.pager_locale),
         )
         convs = await client.list_conversations(page_size=40)
         for conv in convs:

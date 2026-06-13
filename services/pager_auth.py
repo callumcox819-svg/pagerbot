@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -87,7 +88,13 @@ async def _validate_cookies(
     if not cookies:
         raise RuntimeError("После входа cookies пустые")
 
-    client = PagerClient(PAGER_BASE, cookies, org_id=org_id_hint)
+    client = PagerClient(
+        PAGER_BASE,
+        cookies,
+        org_id=org_id_hint,
+        org_slug=(os.getenv("PAGER_ORG_SLUG") or "").strip(),
+        locale=(os.getenv("PAGER_LOCALE") or "uk").strip() or "uk",
+    )
     try:
         probe = await client.probe_session()
         if probe.get("org_id"):

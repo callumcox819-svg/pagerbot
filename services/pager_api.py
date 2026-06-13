@@ -85,11 +85,15 @@ class PagerClient:
         base_url: str,
         cookies: dict[str, str],
         org_id: str = "",
+        *,
+        org_slug: str = "",
+        locale: str = "uk",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookies = cookies
         self.org_id = (org_id or "").strip()
-        self.org_slug = ""
+        self.org_slug = (org_slug or "").strip()
+        self.locale = (locale or "uk").strip() or "uk"
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
@@ -130,9 +134,64 @@ class PagerClient:
                 except json.JSONDecodeError:
                     return text
 
+    async def _fetch_chats_html(self) -> str:
+        paths: list[str] = []
+        if self.org_slug:
+            paths.append(f"/{self.locale}/{self.org_slug}/chats")
+        paths.extend([f"/{self.locale}/chats", "/chats"])
+        headers = {
+            "Accept": "text/html",
+            "Cookie": self._cookie_header(),
+            "Referer": f"{self.base_url}/",
+        }
+        async with aiohttp.ClientSession() as session:
+            for path in paths:
+                try:
+                    async with session.get(
+                        f"{self.base_url}{path}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=60),
+                        allow_redirects=True,
+                    ) as resp:
+                        html = await resp.text()
+                        final = str(resp.url)
+                        match = re.search(r"/(?:uk|en)/([^/]+)/chats", final, re.I)
+                        if match and not self.org_slug:
+                            slug = match.group(1).lower()
+                            if slug not in {"chats", "sign-in", "en", "uk", "api"}:
+                                self.org_slug = slug
+                        if html:
+                            return html
+                except Exception as exc:
+                    logger.debug("fetch chats html %s: %s", path, exc)
+        return ""
+
+    async def _try_org_from_conversations(self) -> str:
+        """Some sessions return conversations without orgId query param."""
+        try:
+            data = await self._request(
+                "GET",
+                "/api/conversation",
+                params={"pageSize": 1, "page": 1},
+            )
+            if isinstance(data, list) and data:
+                org_id = str(
+                    data[0].get("organizationId") or data[0].get("orgId") or ""
+                ).strip()
+                if org_id.startswith("org_"):
+                    self.org_id = org_id
+                    return org_id
+        except PagerAPIError as exc:
+            logger.debug("org from conversation (no orgId param): %s", exc)
+        return ""
+
     async def discover_org_id(self) -> str:
         if self.org_id:
             return self.org_id
+
+        org_id = await self._try_org_from_conversations()
+        if org_id:
+            return org_id
 
         for path in ("/api/organization", "/api/organizations"):
             try:
@@ -158,25 +217,18 @@ class PagerClient:
             logger.debug("discover org via channel: %s", exc)
 
         try:
-            url = f"{self.base_url}/chats"
-            headers = {
-                "Accept": "text/html",
-                "Cookie": self._cookie_header(),
-                "Referer": f"{self.base_url}/",
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    html = await resp.text()
-                    org_id = _org_from_html(html)
-                    if org_id:
-                        self.org_id = org_id
-                        return org_id
+            html = await self._fetch_chats_html()
+            if html:
+                org_id = _org_from_html(html)
+                if org_id:
+                    self.org_id = org_id
+                    return org_id
+                if not self.org_slug:
+                    slug = _org_slug_from_html(html)
+                    if slug:
+                        self.org_slug = slug
         except Exception as exc:
-            logger.debug("discover org via /chats html: %s", exc)
+            logger.debug("discover org via chats html: %s", exc)
 
         return ""
 
@@ -202,22 +254,29 @@ class PagerClient:
                 "Referer": f"{self.base_url}/",
             }
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.base_url}/chats",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                    allow_redirects=True,
-                ) as resp:
-                    final_url = str(resp.url)
-                    match = re.search(r"/(?:uk|en)/([^/]+)/chats", final_url, re.I)
-                    if match:
-                        self.org_slug = match.group(1)
-                        return self.org_slug
-                    html = await resp.text()
-                    slug = _org_slug_from_html(html)
-                    if slug:
-                        self.org_slug = slug
-                        return slug
+                paths: list[str] = []
+                if self.org_slug:
+                    paths.append(f"/{self.locale}/{self.org_slug}/chats")
+                paths.extend([f"/{self.locale}/chats", "/chats"])
+                for path in paths:
+                    async with session.get(
+                        f"{self.base_url}{path}",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=60),
+                        allow_redirects=True,
+                    ) as resp:
+                        final_url = str(resp.url)
+                        match = re.search(r"/(?:uk|en)/([^/]+)/chats", final_url, re.I)
+                        if match:
+                            slug = match.group(1).lower()
+                            if slug not in {"chats", "sign-in", "en", "uk", "api"}:
+                                self.org_slug = slug
+                                return slug
+                        html = await resp.text()
+                        slug = _org_slug_from_html(html)
+                        if slug:
+                            self.org_slug = slug
+                            return slug
         except Exception as exc:
             logger.debug("discover org slug via /chats redirect: %s", exc)
 
@@ -267,14 +326,14 @@ class PagerClient:
     async def list_channels_api(self) -> list[dict[str, str]]:
         """All Messenger/IG channels from Pager API."""
         org_id = await self._ensure_org_id()
-        for params in ({"orgId": org_id}, None):
-            try:
-                data = await self._request("GET", "/api/channel", params=params)
-            except PagerAPIError as exc:
-                logger.debug("list_channels_api params=%s: %s", params, exc)
-                continue
-            if not isinstance(data, list):
-                continue
+        try:
+            data = await self._request(
+                "GET", "/api/channel", params={"orgId": org_id}
+            )
+        except PagerAPIError as exc:
+            logger.warning("GET /api/channel orgId=%s: %s", org_id, exc)
+            data = None
+        if isinstance(data, list):
             out: list[dict[str, str]] = []
             for item in data:
                 if not isinstance(item, dict):
@@ -286,7 +345,13 @@ class PagerClient:
             if out:
                 return sorted(out, key=lambda x: x["name"].lower())
         logger.warning("GET /api/channel empty — fallback to conversations")
-        return await self.list_channels_from_conversations()
+        try:
+            return await self.list_channels_from_conversations()
+        except PagerAPIError as exc:
+            raise PagerAPIError(
+                exc.status,
+                f'{exc.body} (orgId={org_id or "missing"})',
+            ) from exc
 
     async def list_channels_from_conversations(self) -> list[dict[str, str]]:
         """Derive unique channels from recent conversations."""
