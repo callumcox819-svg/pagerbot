@@ -133,32 +133,47 @@ async def _handle_conversation(
             return False
         return bool(m.get("isDelivered") or m.get("facebookMessageId"))
 
-    if msg_id and msg_id == state.get("last_processed_msg_id"):
-        last_in_ts = str(last_in.get("createdAt") or "")
-        has_reply_after = any(
+    def _has_operator_reply_after(last_in_ts: str) -> bool:
+        return any(
             _valid_outgoing_reply(m)
             and str(m.get("createdAt") or "") > last_in_ts
             for m in msg_only
         )
-        if has_reply_after:
+
+    last_in_ts = str(last_in.get("createdAt") or "")
+    is_retry = False
+    if msg_id and msg_id == state.get("last_processed_msg_id"):
+        if _has_operator_reply_after(last_in_ts):
             return "done"
         logger.info(
             "conv=%s retry: was marked processed but no reply sent",
             conv_id[:8],
         )
+        is_retry = True
 
     text = (last_in.get("text") or "").strip()
     attachments = last_in.get("attachments") or []
     has_image = bool(attachments)
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
-    step = max(
-        int(state.get("step") or 0),
-        infer_step_from_history(msg_only, pager_user_id),
-    )
+    hist_step = infer_step_from_history(msg_only, pager_user_id)
+    if is_retry and hist_step < 5:
+        step = hist_step
+    else:
+        step = max(int(state.get("step") or 0), hist_step)
+
     intent = classify(text, has_image=has_image, has_ad=has_ad)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
+
+    logger.info(
+        "conv=%s intent=%s step=%s retry=%s text=%r",
+        conv_id[:8],
+        intent.value,
+        step,
+        is_retry,
+        (text or "(photo)")[:40],
+    )
 
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
@@ -178,77 +193,56 @@ async def _handle_conversation(
             org_slug=slug,
         )
         locale = str(account.get("pager_locale") or _settings.pager_locale)
-        active = client
-        await active.warm_session()
+        await client.warm_session()
 
-        async def _send_one(body: str, pager: PagerClient) -> None:
-            await pager.send_message(
-                conv_id,
-                body,
-                channel_id=channel_id,
-                conv=conv,
-                author_id=pager_user_id,
+        if pager_user_id:
+            taken = await client.take_conversation(conv_id, pager_user_id)
+            if not taken:
+                raise PagerAPIError(
+                    502,
+                    '{"error":"take chat failed — operator not assigned"}',
+                )
+
+        async def _browser_send(cookies: dict[str, str]) -> None:
+            await send_messages_via_browser_ui(
+                cookies,
+                conv_id=conv_id,
+                texts=texts,
+                org_id=oid,
+                org_slug=slug,
+                user_id=pager_user_id,
+                locale=locale,
+                skip_take=True,
             )
 
-        for i, body in enumerate(texts):
-            if i:
-                await asyncio.sleep(1.0)
-            try:
-                await _send_one(body, active)
-            except PagerAPIError as exc:
-                body_l = (exc.body or "").lower()
-                retry = is_session_error(exc) or any(
-                    k in body_l
-                    for k in (
-                        "take chat failed",
-                        "channel.findunique",
-                        "organization id required",
-                        "imageurl",
-                    )
-                )
-                if retry:
-                    fresh = await refresh_pager_session(account)
-                    if fresh:
-                        active = PagerClient(
-                            _settings.pager_base_url,
-                            fresh,
-                            org_id=oid,
-                            org_slug=slug,
-                            locale=locale,
-                            org_id_fallback=oid,
-                            session_user_id=pager_user_id,
-                        )
-                        await active.warm_session()
-                        client = active
-                        try:
-                            await _send_one(body, active)
-                            continue
-                        except PagerAPIError:
-                            pass
-                logger.warning(
-                    "REST send failed conv=%s, trying browser UI: %s",
-                    conv_id[:8],
-                    exc.body[:120],
-                )
-                await send_messages_via_browser_ui(
-                    _cookies(account),
-                    conv_id=conv_id,
-                    texts=[body],
-                    org_id=oid,
-                    org_slug=slug,
-                    user_id=pager_user_id,
-                    locale=locale,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "send failed conv=%s: %s",
-                    conv_id[:8],
-                    exc,
-                )
+        cookies = _cookies(account)
+        try:
+            await _browser_send(cookies)
+        except Exception as exc:
+            logger.warning(
+                "browser send failed conv=%s: %s — refreshing session",
+                conv_id[:8],
+                exc,
+            )
+            fresh = await refresh_pager_session(account)
+            if not fresh:
                 raise
+            client = PagerClient(
+                _settings.pager_base_url,
+                fresh,
+                org_id=oid,
+                org_slug=slug,
+                locale=locale,
+                org_id_fallback=oid,
+                session_user_id=pager_user_id,
+            )
+            await client.warm_session()
+            if pager_user_id:
+                await client.take_conversation(conv_id, pager_user_id)
+            await _browser_send(fresh)
 
         logger.info(
-            "REST sent conv=%s count=%s",
+            "browser sent conv=%s count=%s",
             conv_id[:8],
             len(texts),
         )
@@ -256,8 +250,13 @@ async def _handle_conversation(
     async def send(text: str) -> None:
         await _outbound_send([text])
 
-    # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
-    if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
+    # Waiting for game ID / deposit photo — ignore short acks unless retry pending.
+    if (
+        step >= 5
+        and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE)
+        and not has_image
+        and not is_retry
+    ):
         await db.save_conversation_state(
             account_id, conv_id, last_processed_msg_id=msg_id
         )
@@ -396,7 +395,7 @@ async def _handle_conversation(
         keys = ["02_how_it_works", "03_zmw_table"]
     elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
         keys = ["04_registration", "05_link"]
-    elif no_status and step < 3 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+    elif no_status and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE, Intent.INTERESTED):
         keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
     elif intent == Intent.JOINED:
         await db.save_conversation_state(
@@ -419,6 +418,12 @@ async def _handle_conversation(
         bodies.append(body)
 
     if bodies:
+        logger.info(
+            "conv=%s sending %s script(s) keys=%s",
+            conv_id[:8],
+            len(bodies),
+            keys,
+        )
         await _outbound_send(bodies)
         actions_sent = True
 
@@ -529,7 +534,22 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             for c in convs
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
         ]
-        inbound_convs.sort(key=lambda c: c.get("lastMessageAt") or "", reverse=True)
+
+        async def _priority(conv: dict) -> tuple[int, str]:
+            cid = str(conv.get("id") or "")
+            st = await db.get_conversation_state(account_id, cid)
+            if st.get("pause_scripts") or st.get("human_takeover"):
+                return (2, str(conv.get("lastMessageAt") or ""))
+            if st.get("last_processed_msg_id"):
+                return (0, str(conv.get("lastMessageAt") or ""))
+            return (1, str(conv.get("lastMessageAt") or ""))
+
+        # Retry failed sends first, then fresh, then paused last.
+        scored: list[tuple[tuple[int, str], dict]] = []
+        for c in inbound_convs:
+            scored.append((await _priority(c), c))
+        scored.sort(key=lambda x: x[0])
+        inbound_convs = [c for _, c in scored]
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}

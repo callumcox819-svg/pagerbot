@@ -357,67 +357,55 @@ async def _send_one_in_session(
     """POST from browser session — operator UI payload after prepare."""
     qs = f"orgId={org_id}&userId={user_id}"
     post_url = _api(f"/api/message?{qs}")
-    ch = (channel_id or "").strip()
-    bodies: list[dict] = [{"conversationId": conv_id, "text": text}]
-    if ch:
-        bodies.append({"conversationId": conv_id, "text": text, "channelId": ch})
+    body = {"conversationId": conv_id, "text": text}
+    result = await page.evaluate(
+        f"""async ({{url, payload}}) => {{
+            {_SAFE_FETCH}
+            const r = await safeJsonFetch(url, {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify(payload),
+            }});
+            const p = r.data || {{}};
+            const err = typeof p.error === 'string' ? p.error : (r.raw || '').slice(0, 240);
+            return {{
+                status: r.status,
+                html: r.html,
+                error: err,
+                authorId: p.authorId || '',
+                isDelivered: !!p.isDelivered,
+                facebookMessageId: p.facebookMessageId || '',
+            }};
+        }}""",
+        {"url": post_url, "payload": body},
+    )
+    status = int(result.get("status") or 0)
+    author = str(result.get("authorId") or "").strip()
+    fb = str(result.get("facebookMessageId") or "").strip()
+    last_err = str(result.get("error") or "")[:200]
 
-    last_err = ""
-    for body in bodies:
-        result = await page.evaluate(
-            f"""async ({{url, payload}}) => {{
-                {_SAFE_FETCH}
-                const r = await safeJsonFetch(url, {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify(payload),
-                }});
-                const p = r.data || {{}};
-                const err = typeof p.error === 'string' ? p.error : (r.raw || '').slice(0, 240);
-                return {{
-                    status: r.status,
-                    html: r.html,
-                    error: err,
-                    authorId: p.authorId || '',
-                    isDelivered: !!p.isDelivered,
-                    facebookMessageId: p.facebookMessageId || '',
-                    bodyKeys: Object.keys(payload),
-                }};
-            }}""",
-            {"url": post_url, "payload": body},
+    if status >= 400:
+        logger.warning(
+            "browser POST conv=%s status=%s err=%s",
+            conv_id[:8],
+            status,
+            last_err[:120],
         )
-        status = int(result.get("status") or 0)
-        author = str(result.get("authorId") or "").strip()
-        fb = str(result.get("facebookMessageId") or "").strip()
-        last_err = str(result.get("error") or "")[:200]
-
-        if status >= 400:
-            logger.warning(
-                "browser POST conv=%s status=%s keys=%s err=%s",
-                conv_id[:8],
-                status,
-                result.get("bodyKeys"),
-                last_err[:120],
-            )
-            continue
-
-        if author == user_id and (result.get("isDelivered") or fb):
-            logger.info(
-                "browser sent conv=%s author=%s fb=%s",
-                conv_id[:8],
-                author[:16],
-                fb[:12],
-            )
-            return
-
-        if author and author != user_id:
-            logger.warning(
-                "browser POST wrong author conv=%s author=%s",
-                conv_id[:8],
-                author[:16],
-            )
-            continue
-
+    elif author == user_id and (result.get("isDelivered") or fb):
+        logger.info(
+            "browser POST sent conv=%s author=%s fb=%s",
+            conv_id[:8],
+            author[:16],
+            fb[:12],
+        )
+        return
+    elif author and author != user_id:
+        logger.warning(
+            "browser POST wrong author conv=%s author=%s",
+            conv_id[:8],
+            author[:16],
+        )
+    else:
         verify = await _verify_message_delivered(
             page,
             conv_id=conv_id,
@@ -428,7 +416,7 @@ async def _send_one_in_session(
         )
         if verify.get("ok"):
             logger.info(
-                "browser sent conv=%s author=%s fb=%s (verified)",
+                "browser POST sent conv=%s author=%s fb=%s (verified)",
                 conv_id[:8],
                 str(verify.get("authorId") or user_id)[:16],
                 str(verify.get("facebookMessageId") or "")[:12],
@@ -589,8 +577,9 @@ async def send_messages_via_browser_ui(
     org_slug: str,
     user_id: str = "",
     locale: str = "uk",
+    skip_take: bool = False,
 ) -> None:
-    """Take chat + send via textarea only (operator UI, no REST POST)."""
+    """Send via browser session — UI textarea first, then in-page POST (operator payload)."""
     from playwright.async_api import async_playwright
 
     slug = (org_slug or "").strip()
@@ -634,36 +623,59 @@ async def send_messages_via_browser_ui(
             if "sign-in" in page.url:
                 raise RuntimeError("Browser session expired (redirected to sign-in)")
             await _verify_logged_in_operator(page, uid)
-            await _browser_prepare_outbound(
-                page, conv_id=conv_id, org_id=oid, user_id=uid
-            )
-            await page.wait_for_timeout(1000)
-            for i, body in enumerate(bodies):
-                if i:
-                    await page.wait_for_timeout(1200)
-                ui_ok = await _browser_send_via_ui(page, body)
-                if not ui_ok:
-                    raise RuntimeError(
-                        f"UI textarea not found (conv={conv_id[:8]})"
-                    )
-                verify = await _verify_message_delivered(
+            if skip_take:
+                await _browser_prepare_outbound(
+                    page, conv_id=conv_id, org_id=oid, user_id=uid
+                )
+            else:
+                await _browser_take_and_verify(
                     page,
                     conv_id=conv_id,
                     org_id=oid,
                     user_id=uid,
-                    text=body,
-                    attempts=12,
+                    chat_url=chat_url,
                 )
-                if not verify.get("ok"):
-                    raise RuntimeError(
-                        f"UI send not verified as operator (conv={conv_id[:8]})"
+            await page.wait_for_timeout(1000)
+            for i, body in enumerate(bodies):
+                if i:
+                    await page.wait_for_timeout(1200)
+                sent = False
+                ui_ok = await _browser_send_via_ui(page, body)
+                if ui_ok:
+                    verify = await _verify_message_delivered(
+                        page,
+                        conv_id=conv_id,
+                        org_id=oid,
+                        user_id=uid,
+                        text=body,
+                        attempts=12,
                     )
-                logger.info(
-                    "browser UI sent conv=%s author=%s fb=%s",
-                    conv_id[:8],
-                    str(verify.get("authorId") or uid)[:16],
-                    str(verify.get("facebookMessageId") or "")[:12],
-                )
+                    if verify.get("ok"):
+                        logger.info(
+                            "browser UI sent conv=%s author=%s fb=%s",
+                            conv_id[:8],
+                            str(verify.get("authorId") or uid)[:16],
+                            str(verify.get("facebookMessageId") or "")[:12],
+                        )
+                        sent = True
+                    else:
+                        logger.warning(
+                            "UI send unverified conv=%s — trying browser POST",
+                            conv_id[:8],
+                        )
+                else:
+                    logger.warning(
+                        "UI textarea missing conv=%s — trying browser POST",
+                        conv_id[:8],
+                    )
+                if not sent:
+                    await _send_one_in_session(
+                        page,
+                        conv_id=conv_id,
+                        org_id=oid,
+                        user_id=uid,
+                        text=body,
+                    )
         finally:
             await browser.close()
 
