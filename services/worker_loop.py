@@ -151,34 +151,20 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def send(text: str) -> None:
+        slug = str(
+            account.get("org_slug") or _settings.pager_org_slug or ""
+        ).strip()
+        oid = resolve_pager_org_id(
+            str(client.org_id or ""),
+            str(account.get("org_id") or ""),
+            _settings.pager_org_id,
+            org_slug=slug,
+        )
+        browser_cookies = _cookies(account)
+        if not browser_cookies:
+            raise PagerAPIError(401, '{"error":"no session cookies"}')
+
         try:
-            await client.send_message(
-                conv_id,
-                text,
-                channel_id=channel_id,
-                conv=conv,
-                author_id=pager_user_id,
-            )
-        except PagerAPIError as exc:
-            slug = str(
-                account.get("org_slug") or _settings.pager_org_slug or ""
-            ).strip()
-            oid = resolve_pager_org_id(
-                str(client.org_id or ""),
-                str(account.get("org_id") or ""),
-                _settings.pager_org_id,
-                org_slug=slug,
-            )
-            logger.warning(
-                "API send failed conv=%s, browser fallback: %s",
-                conv_id[:8],
-                exc.body[:80],
-            )
-            browser_cookies = _cookies(account)
-            if is_session_error(exc):
-                fresh = await refresh_pager_session(account)
-                if fresh:
-                    browser_cookies = fresh
             await send_message_via_browser(
                 browser_cookies,
                 conv_id=conv_id,
@@ -190,6 +176,24 @@ async def _handle_conversation(
                     account.get("pager_locale") or _settings.pager_locale
                 ),
             )
+        except RuntimeError as exc:
+            msg = str(exc)
+            if "session expired" in msg.lower() or "sign-in" in msg.lower():
+                fresh = await refresh_pager_session(account)
+                if fresh:
+                    await send_message_via_browser(
+                        fresh,
+                        conv_id=conv_id,
+                        text=text,
+                        org_id=oid,
+                        org_slug=slug,
+                        user_id=pager_user_id,
+                        locale=str(
+                            account.get("pager_locale") or _settings.pager_locale
+                        ),
+                    )
+                    return
+            raise PagerAPIError(502, msg) from exc
 
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
@@ -459,7 +463,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 25
+        max_replies = 8
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
