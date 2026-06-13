@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -66,6 +67,12 @@ async def pager_menu(message: Message) -> None:
 @router.callback_query(F.data == "pager:login")
 async def cb_login_start(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("DISABLE_PLAYWRIGHT"):
+        await cb.message.answer(
+            "⚠️ На Railway вход по паролю обычно не работает.\n"
+            "Нажмите 🍪 <b>Импорт cookies</b> — так надёжнее.",
+            parse_mode="HTML",
+        )
     await state.set_state(PagerConnect.email)
     await cb.message.answer("Введите email Pager:")
 
@@ -104,7 +111,8 @@ async def on_password(message: Message, state: FSMContext) -> None:
         )
         await status.edit_text(
             f"❌ Не удалось войти.\n{exc}\n\n"
-            "Попробуйте 🍪 Импорт cookies: скопируйте Cookie из DevTools → Network."
+            "Попробуйте 🍪 Импорт cookies: скопируйте Cookie из DevTools → Network.",
+            parse_mode=None,
         )
     await state.clear()
 
@@ -114,8 +122,15 @@ async def cb_cookies_start(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     await state.set_state(PagerConnect.cookies)
     await cb.message.answer(
-        "Вставьте Cookie из DevTools (Network → любой запрос → Request Headers → Cookie):\n"
-        "или JSON вида {\"__session\": \"...\"}"
+        "Как скопировать cookies:\n"
+        "1. Откройте pager.co.ua в Chrome (вы уже залогинены)\n"
+        "2. F12 → вкладка Network\n"
+        "3. Обновите страницу (F5)\n"
+        "4. Кликните любой запрос к pager.co.ua\n"
+        "5. Request Headers → Cookie → скопируйте всю строку\n\n"
+        "Вставьте сюда Cookie целиком\n"
+        "или JSON: {\"__session\": \"...\"}",
+        parse_mode=None,
     )
 
 
@@ -132,7 +147,7 @@ async def on_cookies(message: Message, state: FSMContext) -> None:
         await _save_session(message.from_user.id, "", "", auth["cookies"])
         await status.edit_text("✅ Сессия сохранена. Откройте 📡 Каналы.")
     except Exception as exc:
-        await status.edit_text(f"❌ {exc}")
+        await status.edit_text(f"❌ {exc}", parse_mode=None)
     await state.clear()
 
 

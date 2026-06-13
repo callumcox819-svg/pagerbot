@@ -26,12 +26,25 @@ def parse_cookie_string(raw: str) -> dict[str, str]:
     return cookies
 
 
+def _playwright_unavailable_message() -> str:
+    return (
+        "Вход по email/паролю на сервере недоступен (нет Chromium).\n"
+        "Используйте 🍪 Импорт cookies — это надёжнее."
+    )
+
+
 async def login_with_playwright(email: str, password: str) -> dict[str, str]:
     """Headless login at pager.co.ua/sign-in. Requires: playwright install chromium."""
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        try:
+            browser = await p.chromium.launch(headless=True)
+        except Exception as exc:
+            msg = str(exc)
+            if "Executable doesn't exist" in msg or "playwright install" in msg.lower():
+                raise RuntimeError(_playwright_unavailable_message()) from exc
+            raise
         context = await browser.new_context()
         page = await context.new_page()
         try:
@@ -83,10 +96,13 @@ async def authenticate(
         try:
             cookies = await login_with_playwright(email, password)
             return {"cookies": cookies, "method": "playwright"}
+        except RuntimeError:
+            raise
         except Exception as exc:
             logger.exception("Playwright login failed")
             raise RuntimeError(
-                f"Login failed: {exc}. Try /import_cookies with Cookie from DevTools."
+                f"Не удалось войти: {exc}\n\n"
+                "Попробуйте 🍪 Импорт cookies из DevTools (Network → Cookie)."
             ) from exc
 
     raise ValueError("Need email+password or cookies")
