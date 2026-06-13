@@ -86,7 +86,7 @@ async def on_password(message: Message, state: FSMContext) -> None:
         await message.delete()
     except Exception:
         pass
-    status = await message.answer("⏳ Вхожу в Pager…")
+    status = await message.answer("⏳ Вхожу в Pager… (до 1–2 мин)")
     try:
         auth = await authenticate(email=email, password=password)
         await _save_session(message.from_user.id, email, password, auth["cookies"])
