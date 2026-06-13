@@ -10,7 +10,7 @@ from typing import Any
 from aiogram import Bot
 
 import database as db
-from config import load_settings
+from config import load_settings, resolve_pager_org_id
 from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
@@ -296,38 +296,44 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         if not enabled:
             return
 
+        org_slug = str(
+            account.get("org_slug") or _settings.pager_org_slug or ""
+        ).strip()
+        org_id = resolve_pager_org_id(
+            str(account.get("org_id") or ""),
+            _settings.pager_org_id,
+            org_slug=org_slug,
+        )
+
         client = PagerClient(
             _settings.pager_base_url,
             cookies,
-            org_id=str(account.get("org_id") or _settings.pager_org_id or ""),
-            org_slug=str(account.get("org_slug") or _settings.pager_org_slug),
+            org_id=org_id,
+            org_slug=org_slug,
             locale=str(account.get("pager_locale") or _settings.pager_locale),
-            org_id_fallback=_settings.pager_org_id,
+            org_id_fallback=org_id,
         )
 
         seen: set[str] = set()
-        for channel_id in enabled:
-            for page in (1, 2, 3):
-                convs = await client.list_conversations(
-                    page=page,
-                    page_size=50,
-                    channel_id=channel_id,
-                )
-                if not convs:
-                    break
-                for conv in convs:
-                    conv_id = str(conv.get("id") or "")
-                    if not conv_id or conv_id in seen:
-                        continue
-                    seen.add(conv_id)
-                    try:
-                        await _handle_conversation(bot, account, conv, client)
-                    except Exception:
-                        logger.exception(
-                            "conv failed account=%s conv=%s",
-                            account.get("id"),
-                            conv_id,
-                        )
+        for page in (1, 2, 3, 4):
+            convs = await client.list_conversations(page=page, page_size=50)
+            if not convs:
+                break
+            for conv in convs:
+                if str(conv.get("channelId") or "") not in enabled:
+                    continue
+                conv_id = str(conv.get("id") or "")
+                if not conv_id or conv_id in seen:
+                    continue
+                seen.add(conv_id)
+                try:
+                    await _handle_conversation(bot, account, conv, client)
+                except Exception:
+                    logger.exception(
+                        "conv failed account=%s conv=%s",
+                        account.get("id"),
+                        conv_id,
+                    )
 
         if client.org_id:
             await db.upsert_account(
@@ -348,7 +354,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
 
 
 async def worker_loop(bot: Bot) -> None:
-    logger.info("Pager worker started, poll=%ss", _settings.poll_sec)
+    settings = load_settings()
+    logger.info(
+        "Pager worker started, poll=%ss, org_id=%s, slug=%s",
+        settings.poll_sec,
+        "ok" if resolve_pager_org_id(settings.pager_org_id, org_slug=settings.pager_org_slug) else "MISSING",
+        settings.pager_org_slug or "—",
+    )
     while True:
         try:
             accounts = await db.list_worker_accounts()

@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import database as db
-from config import load_settings
+from config import load_settings, resolve_pager_org_id
 from handlers.states import PagerConnect
 from keyboards.main_menu import channels_kb, connect_kb
 from services.encryption import Secrets
@@ -32,14 +32,14 @@ def _pager_client(
     locale: str = "",
 ) -> PagerClient:
     slug = org_slug or _settings.pager_org_slug
-    resolved_org = org_id or _settings.pager_org_id
+    resolved_org = resolve_pager_org_id(org_id, _settings.pager_org_id, org_slug=slug)
     return PagerClient(
         _settings.pager_base_url,
         cookies,
         org_id=resolved_org,
         org_slug=slug,
         locale=locale or _settings.pager_locale,
-        org_id_fallback=_settings.pager_org_id,
+        org_id_fallback=resolved_org,
     )
 
 
@@ -227,20 +227,18 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
         client = _pager_client(
             cookies,
             org_id=str(acc.get("org_id") or ""),
-            org_slug=str(acc.get("org_slug") or ""),
+            org_slug=str(acc.get("org_slug") or _settings.pager_org_slug),
             locale=str(acc.get("pager_locale") or ""),
         )
-        probe = await client.probe_session()
-        resolved_org = client.org_id or probe.get("org_id") or _settings.pager_org_id
-        if resolved_org:
+        channels = await client.list_channels_api()
+        if client.org_id:
             await db.upsert_account(
                 cb.from_user.id,
-                org_id=resolved_org,
-                org_slug=probe.get("org_slug") or acc.get("org_slug") or _settings.pager_org_slug,
-                pager_user_id=probe.get("pager_user_id") or acc.get("pager_user_id") or "",
+                org_id=client.org_id,
+                org_slug=client.org_slug or acc.get("org_slug") or _settings.pager_org_slug,
+                pager_user_id=acc.get("pager_user_id") or "",
                 session_ok=1,
             )
-        channels = await client.list_channels_api()
         if not channels:
             await cb.message.answer(
                 "Каналы не найдены. Проверьте сессию или добавьте "

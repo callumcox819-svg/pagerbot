@@ -9,6 +9,8 @@ from typing import Any
 
 import aiohttp
 
+from config import DEFAULT_ORG_ID_BY_SLUG, resolve_pager_org_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,10 +108,26 @@ class PagerClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookies = cookies
-        self.org_id = (org_id or "").strip()
-        self.org_slug = (org_slug or "").strip()
+        slug = (org_slug or "").strip()
+        self.org_slug = slug
         self.locale = (locale or "uk").strip() or "uk"
         self.org_id_fallback = (org_id_fallback or "").strip()
+        self.org_id = resolve_pager_org_id(
+            org_id,
+            org_id_fallback,
+            org_slug=slug,
+        )
+
+    def _api_headers(self) -> dict[str, str]:
+        referer = f"{self.base_url}/"
+        if self.org_slug:
+            referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
+        return {
+            "Accept": "*/*",
+            "Cookie": self._cookie_header(),
+            "Referer": referer,
+            "Origin": self.base_url,
+        }
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
@@ -123,11 +141,7 @@ class PagerClient:
         json_body: dict[str, Any] | None = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
-        headers = {
-            "Accept": "*/*",
-            "Cookie": self._cookie_header(),
-            "Referer": f"{self.base_url}/",
-        }
+        headers = self._api_headers()
         if json_body is not None:
             headers["Content-Type"] = "application/json"
 
@@ -142,6 +156,13 @@ class PagerClient:
             ) as resp:
                 text = await resp.text()
                 if resp.status >= 400:
+                    logger.warning(
+                        "Pager API %s %s params=%s -> %s",
+                        method,
+                        path,
+                        params,
+                        text[:120],
+                    )
                     raise PagerAPIError(resp.status, text)
                 if not text:
                     return None
@@ -226,6 +247,12 @@ class PagerClient:
             self.org_id = self.org_id_fallback
             return self.org_id
 
+        if self.org_slug:
+            known = DEFAULT_ORG_ID_BY_SLUG.get(self.org_slug.lower(), "")
+            if known:
+                self.org_id = known
+                return self.org_id
+
         org_id = await self._try_org_from_conversations()
         if org_id:
             return org_id
@@ -277,8 +304,6 @@ class PagerClient:
         self,
         page: int = 1,
         page_size: int = 30,
-        *,
-        channel_id: str = "",
     ) -> list[dict]:
         org_id = await self._ensure_org_id()
         params: dict[str, Any] = {
@@ -286,8 +311,6 @@ class PagerClient:
             "pageSize": page_size,
             "page": page,
         }
-        if channel_id:
-            params["channelId"] = channel_id
         data = await self._request("GET", "/api/conversation", params=params)
         return data if isinstance(data, list) else []
 

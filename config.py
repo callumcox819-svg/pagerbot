@@ -19,6 +19,21 @@ DEFAULT_ORG_ID_BY_SLUG: dict[str, str] = {
 }
 
 
+def resolve_pager_org_id(*values: str, org_slug: str = "") -> str:
+    """Pick first valid org_ id, else map slug / env."""
+    for raw in values:
+        v = (raw or "").strip()
+        if v.startswith("org_"):
+            return v
+    slug = (org_slug or os.getenv("PAGER_ORG_SLUG") or "").strip().lower()
+    if slug in DEFAULT_ORG_ID_BY_SLUG:
+        return DEFAULT_ORG_ID_BY_SLUG[slug]
+    env = (os.getenv("PAGER_ORG_ID") or "").strip()
+    if env.startswith("org_"):
+        return env
+    return ""
+
+
 @dataclass
 class Settings:
     bot_token: str
