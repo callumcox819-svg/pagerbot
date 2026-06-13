@@ -110,13 +110,33 @@ async def _handle_conversation(
         return False
 
     msg_id = str(last_in.get("id") or "")
+    org_slug = str(
+        account.get("org_slug") or _settings.pager_org_slug or ""
+    ).strip()
+    pager_user_id = resolve_operator_user_id(
+        _settings.pager_user_id,
+        org_slug=org_slug,
+    )
+
+    def _valid_outgoing_reply(m: dict[str, Any]) -> bool:
+        if not _is_outgoing_direction(str(m.get("messageDirection") or "")):
+            return False
+        if "oldStatusId" in m or "oldResponsibleId" in m:
+            return False
+        if not (m.get("text") or m.get("attachments")):
+            return False
+        author = str(m.get("authorId") or "").strip()
+        if pager_user_id and author and author != pager_user_id:
+            return False
+        if author == "" and not m.get("isDelivered") and not m.get("facebookMessageId"):
+            return False
+        return bool(m.get("isDelivered") or m.get("facebookMessageId") or author)
+
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         last_in_ts = str(last_in.get("createdAt") or "")
         has_reply_after = any(
-            _is_outgoing_direction(str(m.get("messageDirection") or ""))
+            _valid_outgoing_reply(m)
             and str(m.get("createdAt") or "") > last_in_ts
-            and "oldStatusId" not in m
-            and "oldResponsibleId" not in m
             for m in msg_only
         )
         if has_reply_after:
@@ -135,13 +155,6 @@ async def _handle_conversation(
     intent = classify(text, has_image=has_image, has_ad=has_ad)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
-    org_slug = str(
-        account.get("org_slug") or _settings.pager_org_slug or ""
-    ).strip()
-    pager_user_id = resolve_operator_user_id(
-        _settings.pager_user_id,
-        org_slug=org_slug,
-    )
 
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
