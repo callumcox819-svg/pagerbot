@@ -15,7 +15,6 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
-from services.pager_browser_send import send_message_via_browser, send_messages_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -162,7 +161,7 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
-    async def _browser_send(texts: list[str]) -> None:
+    async def _rest_send(texts: list[str]) -> None:
         slug = str(
             account.get("org_slug") or _settings.pager_org_slug or ""
         ).strip()
@@ -172,46 +171,51 @@ async def _handle_conversation(
             _settings.pager_org_id,
             org_slug=slug,
         )
-        browser_cookies = _cookies(account)
-        if not browser_cookies:
-            raise PagerAPIError(401, '{"error":"no session cookies"}')
-        locale = str(account.get("pager_locale") or _settings.pager_locale)
+        active = client
 
-        async def _do(cookies: dict[str, str]) -> None:
-            if len(texts) == 1:
-                await send_message_via_browser(
-                    cookies,
-                    conv_id=conv_id,
-                    text=texts[0],
-                    org_id=oid,
-                    org_slug=slug,
-                    user_id=pager_user_id,
-                    locale=locale,
+        async def _send_one(body: str) -> None:
+            nonlocal active
+            try:
+                await active.send_message(
+                    conv_id,
+                    body,
+                    channel_id=channel_id,
+                    conv=conv,
+                    author_id=pager_user_id,
                 )
-            else:
-                await send_messages_via_browser(
-                    cookies,
-                    conv_id=conv_id,
-                    texts=texts,
-                    org_id=oid,
-                    org_slug=slug,
-                    user_id=pager_user_id,
-                    locale=locale,
-                )
-
-        try:
-            await _do(browser_cookies)
-        except RuntimeError as exc:
-            msg = str(exc)
-            if "session expired" in msg.lower() or "sign-in" in msg.lower():
+            except PagerAPIError as exc:
+                if not is_session_error(exc):
+                    raise
                 fresh = await refresh_pager_session(account)
-                if fresh:
-                    await _do(fresh)
-                    return
-            raise PagerAPIError(502, msg) from exc
+                if not fresh:
+                    raise
+                active = PagerClient(
+                    _settings.pager_base_url,
+                    fresh,
+                    org_id=oid,
+                    org_slug=slug,
+                    locale=str(
+                        account.get("pager_locale") or _settings.pager_locale
+                    ),
+                    org_id_fallback=oid,
+                    session_user_id=pager_user_id,
+                )
+                await active.warm_session()
+                await active.send_message(
+                    conv_id,
+                    body,
+                    channel_id=channel_id,
+                    conv=conv,
+                    author_id=pager_user_id,
+                )
+
+        for i, body in enumerate(texts):
+            if i:
+                await asyncio.sleep(1.0)
+            await _send_one(body)
 
     async def send(text: str) -> None:
-        await _browser_send([text])
+        await _rest_send([text])
 
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
@@ -373,7 +377,7 @@ async def _handle_conversation(
         bodies.append(body)
 
     if bodies:
-        await _browser_send(bodies)
+        await _rest_send(bodies)
         actions_sent = True
 
     new_step = step

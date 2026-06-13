@@ -39,6 +39,17 @@ def message_delivered(result: Any) -> bool:
     return bool(fb_id)
 
 
+def message_accepted(result: Any, operator_id: str = "") -> bool:
+    """Delivered + from Support operator (not Facebook page ghost)."""
+    if not message_delivered(result):
+        return False
+    uid = (operator_id or "").strip()
+    if not uid:
+        return True
+    author = str(result.get("authorId") or "").strip()
+    return author == uid
+
+
 def _extract_user_id(data: Any) -> str:
     if isinstance(data, dict):
         for key in ("id", "userId", "pagerUserId"):
@@ -687,68 +698,65 @@ class PagerClient:
             conv_id, conv=conv_data, author_id=author_id
         )
         referer = self._chat_referer(conv_id)
-        ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
 
+        # Minimal body — same as operator UI (conversationId + text).
         bodies: list[dict[str, Any]] = [
-            {"convId": conv_id, "text": text},
             {"conversationId": conv_id, "text": text},
         ]
-        if ch and user_id:
-            bodies.append(
-                {
-                    "conversationId": conv_id,
-                    "text": text,
-                    "channelId": ch,
-                    "authorId": user_id,
-                }
-            )
-        if ch:
-            bodies.append(
-                {"conversationId": conv_id, "text": text, "channelId": ch}
-            )
+
+        params: dict[str, Any] = {"orgId": org_id}
+        if user_id:
+            params["userId"] = user_id
 
         last_exc: PagerAPIError | None = None
+        last_result: dict[str, Any] | None = None
         for body in bodies:
             try:
                 result = await self._request(
                     "POST",
                     "/api/message",
-                    params={"orgId": org_id},
+                    params=params,
                     json_body=body,
                     referer=referer,
                 )
                 if not isinstance(result, dict):
                     raise PagerAPIError(502, '{"error":"empty message response"}')
-                if not message_delivered(result):
-                    msg_id = str(result.get("id") or "")
-                    raise PagerAPIError(
-                        502,
-                        json.dumps(
-                            {
-                                "error": "Message not delivered to Messenger",
-                                "id": msg_id,
-                                "isDelivered": result.get("isDelivered"),
-                            }
-                        ),
+                last_result = result
+                if message_accepted(result, user_id):
+                    logger.info(
+                        "Pager message sent conv=%s user=%s chars=%s fb=%s",
+                        conv_id[:8],
+                        (user_id or "")[:16],
+                        len(text),
+                        str(result.get("facebookMessageId") or "")[:12],
                     )
-                logger.info(
-                    "Pager message sent conv=%s user=%s chars=%s fb=%s",
-                    conv_id[:8],
-                    (user_id or "")[:16],
-                    len(text),
-                    str(result.get("facebookMessageId") or "")[:12],
+                    return result
+                msg_id = str(result.get("id") or "")
+                author = str(result.get("authorId") or "null")
+                raise PagerAPIError(
+                    502,
+                    json.dumps(
+                        {
+                            "error": "Message not accepted",
+                            "id": msg_id,
+                            "authorId": author,
+                            "isDelivered": result.get("isDelivered"),
+                        }
+                    ),
                 )
-                return result
             except PagerAPIError as exc:
                 last_exc = exc
-                logger.debug(
-                    "send attempt conv=%s body=%s -> %s",
+                logger.info(
+                    "send attempt conv=%s params=%s body=%s -> %s",
                     conv_id[:8],
+                    list(params.keys()),
                     sorted(body.keys()),
                     exc.body[:160],
                 )
         if last_exc:
             raise last_exc
+        if last_result:
+            return last_result
         raise PagerAPIError(400, '{"error":"send_message failed"}')
 
     async def mark_conversation_read(
