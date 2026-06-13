@@ -493,32 +493,12 @@ class PagerClient:
         author_id: str = "",
     ) -> dict[str, Any]:
         org_id = await self._ensure_org_id()
-        conv_data = conv or {}
-        ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
-        author = (
-            author_id
-            or str(conv_data.get("responsibleuserId") or "")
-            or str((conv_data.get("responsibleUser") or {}).get("id") or "")
-        ).strip()
-
         params = {"orgId": org_id}
-        base: dict[str, Any] = {"text": text}
-        for key in ("pagePSID", "clientPSID", "clientId"):
-            val = conv_data.get(key)
-            if val:
-                base[key] = val
-        if ch:
-            base["channelId"] = ch
-        if author:
-            base["authorId"] = author
-
-        # Pager GET uses convId; POST accepts convId or conversationId depending on version.
+        # Browser sends only conversationId + text (session cookies carry the rest).
         attempts: list[dict[str, Any]] = [
-            {**base, "convId": conv_id},
-            {**base, "conversationId": conv_id},
+            {"conversationId": conv_id, "text": text},
+            {"convId": conv_id, "text": text},
         ]
-        if not ch and not author:
-            attempts.append({"text": text, "conversationId": conv_id})
 
         last_exc: PagerAPIError | None = None
         for body in attempts:
@@ -534,7 +514,7 @@ class PagerClient:
                 logger.debug(
                     "send_message keys=%s -> %s",
                     sorted(body.keys()),
-                    exc.body[:120],
+                    exc.body[:200],
                 )
         if last_exc:
             raise last_exc

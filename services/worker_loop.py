@@ -129,7 +129,7 @@ async def _handle_conversation(
     attachments = last_in.get("attachments") or []
     has_image = bool(attachments)
 
-    step = infer_step_from_history(msg_only)
+    step = max(int(state.get("step") or 0), infer_step_from_history(msg_only))
     intent = classify(text, has_image=has_image)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
@@ -283,19 +283,17 @@ async def _handle_conversation(
             )
             return True
 
-    # --- Script chain ---
+    # --- Script chain (strict funnel order) ---
     keys = scripts_to_send_after_intent(step, intent.value, geo)
 
-    if intent == Intent.READY and step < 4:
-        keys = ["04_registration", "05_link"]
-    elif intent == Intent.INTERESTED and step < 4:
-        keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
-    elif intent == Intent.POSITIVE and step < 2:
+    if intent == Intent.INTERESTED and step < 1:
+        keys = ["01_intro"]
+    elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
         keys = ["02_how_it_works", "03_zmw_table"]
-    elif intent == Intent.POSITIVE and step < 4:
+    elif intent == Intent.READY and step >= 2 and step < 4:
         keys = ["04_registration", "05_link"]
     elif no_status and step < 3 and intent in (Intent.UNKNOWN, Intent.QUESTION):
-        keys = ["01_intro"]
+        keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
     elif intent == Intent.JOINED:
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
@@ -303,13 +301,24 @@ async def _handle_conversation(
         return True
 
     for key in keys:
-        body = load_script(geo, key)
+        if keys == ["04_registration", "05_link"] and key == "05_link":
+            continue
+        if keys == ["04_registration", "05_link"] and key == "04_registration":
+            body = (
+                load_script(geo, "04_registration")
+                + "\n\n"
+                + load_script(geo, "05_link")
+            )
+        else:
+            body = load_script(geo, key)
         await send(body)
         actions_sent = True
         await asyncio.sleep(1.0)
 
     new_step = step
-    if keys == ["04_registration", "05_link"] or (intent == Intent.READY and step < 4):
+    if keys == ["04_registration", "05_link"] or (
+        intent == Intent.READY and step >= 2 and step < 4
+    ):
         new_step = 4
         if pager_user_id:
             await client.patch_status(conv_id, ZM_STATUSES["in_progress"], pager_user_id)

@@ -28,8 +28,12 @@ _ACK = re.compile(
     r"will do|already done|got it|understood|alright)\b",
     re.I,
 )
-_POSITIVE = re.compile(r"\b(explain|i am)\b", re.I)
-_READY = re.compile(r"\b(yes|ready|am ready|let'?s start|start today)\b", re.I)
+_POSITIVE = re.compile(
+    r"\b(yes|ok|okay|explain|i am|you can|sure|alright|got it)\b", re.I
+)
+_READY = re.compile(
+    r"\b(am ready|i'?m ready|let'?s start|start today|ready to start)\b", re.I
+)
 _JOINED = re.compile(r"\b(have joined|joined|i joined)\b", re.I)
 _COMPLAINT = re.compile(
     r"\b(lost|didn'?t win|scam|taking my money|stop|refund|nothing happened)\b", re.I
@@ -49,7 +53,7 @@ def classify(text: str, *, has_image: bool = False) -> Intent:
         return Intent.POSITIVE
     if _JOINED.search(t):
         return Intent.JOINED
-    if _READY.search(t) and len(t) < 40:
+    if _READY.search(t):
         return Intent.READY
     if _INTERESTED.search(t):
         return Intent.INTERESTED
