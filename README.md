@@ -46,9 +46,13 @@ python bot.py
 
 ## Railway
 
-- `python bot.py`  
-- Variables: `BOT_TOKEN`, `ENCRYPTION_KEY`, `OPENAI_API_KEY` (optional)  
-- Playwright на Railway сложнее — используйте **импорт cookies**
+Деплой через **Dockerfile** (внутри уже Chromium для входа по email/паролю).
+
+Variables: `BOT_TOKEN`, `ENCRYPTION_KEY`, `OPENAI_API_KEY` (optional)
+
+После push в GitHub: Railway → **Redeploy** (сборка ~2–3 мин, образ больше обычного).
+
+Cookies-импорт остаётся запасным вариантом.
 
 ## Структура
 

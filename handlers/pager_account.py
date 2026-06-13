@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -67,12 +66,6 @@ async def pager_menu(message: Message) -> None:
 @router.callback_query(F.data == "pager:login")
 async def cb_login_start(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("DISABLE_PLAYWRIGHT"):
-        await cb.message.answer(
-            "⚠️ На Railway вход по паролю обычно не работает.\n"
-            "Нажмите 🍪 <b>Импорт cookies</b> — так надёжнее.",
-            parse_mode="HTML",
-        )
     await state.set_state(PagerConnect.email)
     await cb.message.answer("Введите email Pager:")
 

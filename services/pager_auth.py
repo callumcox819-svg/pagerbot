@@ -26,29 +26,34 @@ def parse_cookie_string(raw: str) -> dict[str, str]:
     return cookies
 
 
-def _playwright_unavailable_message() -> str:
-    return (
-        "Вход по email/паролю на сервере недоступен (нет Chromium).\n"
-        "Используйте 🍪 Импорт cookies — это надёжнее."
-    )
-
-
 async def login_with_playwright(email: str, password: str) -> dict[str, str]:
-    """Headless login at pager.co.ua/sign-in. Requires: playwright install chromium."""
+    """Headless login at pager.co.ua/sign-in."""
     from playwright.async_api import async_playwright
+
+    launch_args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+    ]
 
     async with async_playwright() as p:
         try:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, args=launch_args)
         except Exception as exc:
             msg = str(exc)
             if "Executable doesn't exist" in msg or "playwright install" in msg.lower():
-                raise RuntimeError(_playwright_unavailable_message()) from exc
+                raise RuntimeError(
+                    "На сервере не установлен Chromium. Пересоберите деплой (Dockerfile)."
+                ) from exc
             raise
         context = await browser.new_context()
         page = await context.new_page()
         try:
-            await page.goto("https://www.pager.co.ua/sign-in", wait_until="networkidle", timeout=90000)
+            await page.goto(
+                "https://www.pager.co.ua/sign-in",
+                wait_until="domcontentloaded",
+                timeout=90000,
+            )
 
             # Clerk sign-in flow (selectors may need adjustment)
             email_input = page.locator('input[name="identifier"], input[type="email"]').first
@@ -101,8 +106,8 @@ async def authenticate(
         except Exception as exc:
             logger.exception("Playwright login failed")
             raise RuntimeError(
-                f"Не удалось войти: {exc}\n\n"
-                "Попробуйте 🍪 Импорт cookies из DevTools (Network → Cookie)."
+                f"Не удалось войти: {exc}\n"
+                "Проверьте email/пароль. Если включена 2FA в Clerk — временно отключите."
             ) from exc
 
     raise ValueError("Need email+password or cookies")
