@@ -280,6 +280,46 @@ async def _wait_for_chat_composer(page, timeout_ms: int = 45000) -> bool:
     return False
 
 
+async def _open_conversation_in_ui(
+    page,
+    *,
+    locale: str,
+    org_slug: str,
+    conv_id: str,
+) -> bool:
+    """Open a chat thread in the Pager messenger SPA (not just the URL)."""
+    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
+    chat_url = f"{inbox}/{conv_id}"
+
+    await page.goto(chat_url, wait_until="networkidle", timeout=90000)
+    await page.wait_for_timeout(2500)
+    if await _wait_for_chat_composer(page, timeout_ms=8000):
+        return True
+
+    await page.goto(inbox, wait_until="networkidle", timeout=90000)
+    await page.wait_for_timeout(2000)
+
+    for sel in (
+        f'a[href*="{conv_id}"]',
+        f'[href$="/chats/{conv_id}"]',
+        f'[data-conversation-id="{conv_id}"]',
+        f'[data-id="{conv_id}"]',
+    ):
+        loc = page.locator(sel).first
+        if await loc.count():
+            try:
+                await loc.click(timeout=10000)
+                await page.wait_for_timeout(2500)
+                if await _wait_for_chat_composer(page, timeout_ms=12000):
+                    return True
+            except Exception as exc:
+                logger.debug("open conv click %s: %s", sel, exc)
+
+    await page.goto(chat_url, wait_until="networkidle", timeout=90000)
+    await page.wait_for_timeout(3000)
+    return await _wait_for_chat_composer(page, timeout_ms=15000)
+
+
 async def _warm_chat_page(
     page,
     *,
@@ -288,14 +328,11 @@ async def _warm_chat_page(
     conv_id: str,
 ) -> None:
     """Open org inbox then target chat so Next.js messenger context is ready."""
-    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
-    chat_url = f"{inbox}/{conv_id}"
-    await page.goto(inbox, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(1500)
-    await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(2000)
-    if not await _wait_for_chat_composer(page):
-        logger.warning("chat composer slow conv=%s — continuing anyway", conv_id[:8])
+    ok = await _open_conversation_in_ui(
+        page, locale=locale, org_slug=org_slug, conv_id=conv_id
+    )
+    if not ok:
+        logger.warning("chat composer missing conv=%s after open", conv_id[:8])
 
 
 async def _browser_send_via_ui(page, text: str) -> bool:
@@ -396,7 +433,10 @@ async def _post_message_payload(
             {_SAFE_FETCH}
             const r = await safeJsonFetch(url, {{
                 method: 'POST',
-                headers: {{'Content-Type': 'application/json'}},
+                headers: {{
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                }},
                 body: JSON.stringify(payload),
             }});
             const p = r.data || {{}};
@@ -444,6 +484,15 @@ async def _send_one_in_session(
         fb = str(result.get("facebookMessageId") or "").strip()
         last_err = str(result.get("error") or result.get("raw") or "")[:400]
         last_status = status
+
+        if result.get("html") or str(last_err).lstrip().startswith("<!DOCTYPE"):
+            logger.warning(
+                "browser POST conv=%s got HTML (session/page not ready) keys=%s",
+                conv_id[:8],
+                result.get("bodyKeys"),
+            )
+            last_err = "HTML response — chat page not active"
+            continue
 
         if status >= 400:
             logger.warning(
@@ -685,6 +734,9 @@ async def send_messages_via_browser_ui(
             if use_login:
                 logger.info("browser login for send conv=%s", conv_id[:8])
                 await playwright_sign_in_on_page(page, email.strip(), password)
+                org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
+                await page.goto(org_inbox, wait_until="networkidle", timeout=90000)
+                await page.wait_for_timeout(1500)
             else:
                 await context.add_cookies(
                     [
@@ -768,6 +820,109 @@ async def send_messages_via_browser_ui(
                     )
         finally:
             await browser.close()
+
+
+async def send_batch_via_browser(
+    jobs: Sequence[tuple[str, list[str]]],
+    *,
+    org_id: str,
+    org_slug: str,
+    user_id: str,
+    locale: str = "uk",
+    email: str = "",
+    password: str = "",
+) -> set[str]:
+    """One Playwright login, send to multiple conversations. Returns successful conv ids."""
+    if not jobs:
+        return set()
+
+    slug = (org_slug or "").strip()
+    oid = (org_id or "").strip()
+    uid = (user_id or "").strip()
+    if not slug or not oid or not uid:
+        raise RuntimeError("org_slug, org_id, user_id required")
+    if not (email or "").strip() or not (password or "").strip():
+        raise RuntimeError("email/password required for batch browser send")
+
+    launch_args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    from playwright.async_api import async_playwright
+
+    ok: set[str] = set()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=launch_args)
+        context = await browser.new_context(
+            user_agent=UA,
+            locale="uk-UA",
+            viewport={"width": 1280, "height": 720},
+        )
+        page = await context.new_page()
+        try:
+            logger.info("browser batch login jobs=%s", len(jobs))
+            await playwright_sign_in_on_page(page, email.strip(), password)
+            org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
+            await page.goto(org_inbox, wait_until="networkidle", timeout=90000)
+            await page.wait_for_timeout(1500)
+            await _verify_logged_in_operator(page, uid)
+
+            for conv_id, texts in jobs:
+                bodies = [t.strip() for t in texts if (t or "").strip()]
+                if not bodies:
+                    continue
+                try:
+                    logger.info(
+                        "browser batch conv=%s texts=%s",
+                        conv_id[:8],
+                        len(bodies),
+                    )
+                    await _open_conversation_in_ui(
+                        page, locale=locale, org_slug=slug, conv_id=conv_id
+                    )
+                    channel_id = await _browser_prepare_outbound(
+                        page, conv_id=conv_id, org_id=oid, user_id=uid
+                    )
+                    await page.wait_for_timeout(800)
+                    for i, body in enumerate(bodies):
+                        if i:
+                            await page.wait_for_timeout(1200)
+                        sent = False
+                        if await _wait_for_chat_composer(page, timeout_ms=10000):
+                            if await _browser_send_via_ui(page, body):
+                                verify = await _verify_message_delivered(
+                                    page,
+                                    conv_id=conv_id,
+                                    org_id=oid,
+                                    user_id=uid,
+                                    text=body,
+                                    attempts=12,
+                                )
+                                if verify.get("ok"):
+                                    logger.info(
+                                        "browser UI sent conv=%s author=%s fb=%s",
+                                        conv_id[:8],
+                                        str(verify.get("authorId") or uid)[:16],
+                                        str(verify.get("facebookMessageId") or "")[:12],
+                                    )
+                                    sent = True
+                        if not sent:
+                            await _send_one_in_session(
+                                page,
+                                conv_id=conv_id,
+                                org_id=oid,
+                                user_id=uid,
+                                text=body,
+                                channel_id=channel_id,
+                            )
+                    ok.add(conv_id)
+                except Exception as exc:
+                    logger.warning(
+                        "browser batch conv=%s failed: %s",
+                        conv_id[:8],
+                        exc,
+                    )
+        finally:
+            await browser.close()
+    return ok
 
 
 async def send_messages_via_browser(

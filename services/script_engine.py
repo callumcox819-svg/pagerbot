@@ -62,6 +62,8 @@ def infer_step_from_history(
             continue
         if not uid and not author:
             continue
+        if not (m.get("isDelivered") or m.get("facebookMessageId")):
+            continue
         outgoing.append(m.get("text") or "")
     outgoing_joined = "\n".join(outgoing).lower()
 

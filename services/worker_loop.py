@@ -15,7 +15,7 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
-from services.pager_browser_send import send_messages_via_browser_ui
+from services.pager_browser_send import send_batch_via_browser, send_messages_via_browser_ui
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -74,6 +74,9 @@ async def _handle_conversation(
     account: dict[str, Any],
     conv: dict[str, Any],
     client: PagerClient,
+    *,
+    browser_jobs: list[tuple[str, list[str]]] | None = None,
+    state_marks: dict[str, dict[str, Any]] | None = None,
 ) -> bool | str:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
@@ -184,6 +187,16 @@ async def _handle_conversation(
     folder = ((conv.get("status") or {}) or {}).get("name") or ""
 
     esc_chat = _escalation_chat(account)
+    defer_send = browser_jobs is not None and state_marks is not None
+
+    async def _mark_progress(**fields: Any) -> bool | str:
+        if defer_send:
+            state_marks[conv_id] = fields  # type: ignore[index]
+            return "queued"
+        await db.save_conversation_state(
+            account_id, conv_id, send_failures=0, **fields
+        )
+        return True
 
     async def _outbound_send(texts: list[str]) -> None:
         nonlocal client
@@ -200,7 +213,7 @@ async def _handle_conversation(
         email = str(account.get("email") or "").strip()
         pwd_enc = str(account.get("password_enc") or "").strip()
         password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
-        use_login = bool(email and password)
+
         await client.warm_session()
 
         if pager_user_id:
@@ -211,6 +224,10 @@ async def _handle_conversation(
                     '{"error":"take chat failed — operator not assigned"}',
                 )
 
+        if defer_send:
+            browser_jobs.append((conv_id, list(texts)))  # type: ignore[union-attr]
+            return
+
         send_cookies = {
             k: v
             for k, v in client.cookies.items()
@@ -220,7 +237,7 @@ async def _handle_conversation(
             send_cookies = _cookies(account)
 
         await send_messages_via_browser_ui(
-            None if use_login else send_cookies,
+            send_cookies,
             conv_id=conv_id,
             texts=texts,
             org_id=oid,
@@ -384,18 +401,27 @@ async def _handle_conversation(
     # --- Script chain (strict funnel order) ---
     keys = scripts_to_send_after_intent(step, intent.value, geo)
 
-    if intent == Intent.INTERESTED and step < 1:
+    if no_status and needs_reply and hist_step < 1:
+        keys = ["01_intro"]
+    elif intent == Intent.INTERESTED and step < 1:
         keys = ["01_intro"]
     elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
         keys = ["02_how_it_works", "03_zmw_table"]
     elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
         keys = ["04_registration", "05_link"]
-    elif no_status and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE, Intent.INTERESTED):
+    elif no_status and step < 4 and intent in (
+        Intent.UNKNOWN,
+        Intent.QUESTION,
+        Intent.POSITIVE,
+        Intent.INTERESTED,
+    ):
         keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
-    elif intent == Intent.INTERESTED and hist_step < 1:
-        keys = ["01_intro"]
     elif needs_reply and not keys:
-        keys = scripts_to_resend_for_step(hist_step)
+        keys = (
+            ["01_intro"]
+            if no_status and hist_step < 1
+            else scripts_to_resend_for_step(hist_step)
+        )
         if keys:
             logger.info(
                 "conv=%s resend hist_step=%s keys=%s",
@@ -458,13 +484,10 @@ async def _handle_conversation(
             await client.mark_conversation_read(conv_id, user_id=pager_user_id)
         except Exception:
             pass
-        await db.save_conversation_state(
-            account_id,
-            conv_id,
+        return await _mark_progress(
             step=new_step,
             last_processed_msg_id=msg_id,
         )
-        return True
     if keys:
         logger.warning(
             "conv=%s intent=%s step=%s keys=%s but nothing sent",
@@ -547,13 +570,16 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         async def _priority(conv: dict) -> tuple[int, str]:
             cid = str(conv.get("id") or "")
             st = await db.get_conversation_state(account_id, cid)
+            ts = str(conv.get("lastMessageAt") or "")
             if st.get("pause_scripts") or st.get("human_takeover"):
-                return (2, str(conv.get("lastMessageAt") or ""))
-            if st.get("last_processed_msg_id"):
-                return (0, str(conv.get("lastMessageAt") or ""))
-            return (1, str(conv.get("lastMessageAt") or ""))
+                return (3, ts)
+            if is_no_status(conv) and not st.get("last_processed_msg_id"):
+                return (0, ts)
+            if not st.get("last_processed_msg_id"):
+                return (1, ts)
+            return (2, ts)
 
-        # Retry failed sends first, then fresh, then paused last.
+        # Fresh «Без статусу» first, then other new, retries last.
         scored: list[tuple[tuple[int, str], dict]] = []
         for c in inbound_convs:
             scored.append((await _priority(c), c))
@@ -562,17 +588,28 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 1
+        browser_jobs: list[tuple[str, list[str]]] = []
+        state_marks: dict[str, dict[str, Any]] = {}
+        max_replies = 6
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
-                result = await _handle_conversation(bot, account, conv, client)
+                result = await _handle_conversation(
+                    bot,
+                    account,
+                    conv,
+                    client,
+                    browser_jobs=browser_jobs,
+                    state_marks=state_marks,
+                )
                 if result == "paused":
                     skipped["paused"] += 1
                 elif result == "done":
                     skipped["done"] += 1
                 elif result == "no_script":
                     skipped["no_script"] += 1
+                elif result == "queued":
+                    pass
                 elif result:
                     handled += 1
             except PagerAPIError as exc:
@@ -597,6 +634,63 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                         fields["pause_scripts"] = 1
                     await db.save_conversation_state(
                         account_id, conv_id, **fields
+                    )
+
+        if browser_jobs:
+            merged: dict[str, list[str]] = {}
+            for cid, texts in browser_jobs:
+                merged.setdefault(cid, []).extend(texts)
+            job_list = list(merged.items())
+            slug = str(
+                account.get("org_slug") or _settings.pager_org_slug or ""
+            ).strip()
+            oid = resolve_pager_org_id(
+                str(account.get("org_id") or ""),
+                _settings.pager_org_id,
+                org_slug=slug,
+            )
+            locale = str(account.get("pager_locale") or _settings.pager_locale)
+            pager_uid = resolve_operator_user_id(
+                _settings.pager_user_id,
+                account.get("pager_user_id"),
+                org_slug=slug,
+            )
+            email = str(account.get("email") or "").strip()
+            pwd_enc = str(account.get("password_enc") or "").strip()
+            password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
+            try:
+                ok_ids = await send_batch_via_browser(
+                    job_list,
+                    org_id=oid,
+                    org_slug=slug,
+                    user_id=pager_uid,
+                    locale=locale,
+                    email=email,
+                    password=password,
+                )
+                for cid in ok_ids:
+                    mark = state_marks.get(cid)
+                    if mark:
+                        await db.save_conversation_state(
+                            account_id, cid, send_failures=0, **mark
+                        )
+                    handled += 1
+                for cid in set(merged) - set(ok_ids):
+                    st = await db.get_conversation_state(account_id, cid)
+                    fails = int(st.get("send_failures") or 0) + 1
+                    await db.save_conversation_state(
+                        account_id,
+                        cid,
+                        send_failures=fails,
+                        pause_scripts=1 if fails >= 5 else st.get("pause_scripts", 0),
+                    )
+            except Exception as exc:
+                logger.warning("browser batch failed account=%s: %s", account.get("id"), exc)
+                for cid in merged:
+                    st = await db.get_conversation_state(account_id, cid)
+                    fails = int(st.get("send_failures") or 0) + 1
+                    await db.save_conversation_state(
+                        account_id, cid, send_failures=fails
                     )
 
         logger.info(
