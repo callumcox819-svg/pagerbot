@@ -289,34 +289,43 @@ async def _send_one_in_session(
     user_id: str,
     text: str,
 ) -> None:
-    """UI send first; POST fallback with userId query."""
-    ui_ok = await _browser_send_via_ui(page, text)
-    if not ui_ok:
-        qs = f"orgId={org_id}&userId={user_id}"
-        post_url = _api(f"/api/message?{qs}")
-        result = await page.evaluate(
-            f"""async ({{url, convId, text}}) => {{
-                {_SAFE_FETCH}
-                const r = await safeJsonFetch(url, {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{ conversationId: convId, text }}),
-                }});
-                const p = r.data || {{}};
-                return {{
-                    status: r.status,
-                    html: r.html,
-                    authorId: p.authorId,
-                    isDelivered: p.isDelivered,
-                    facebookMessageId: p.facebookMessageId,
-                }};
-            }}""",
-            {"url": post_url, "convId": conv_id, "text": text},
+    """POST from browser session only — same as operator UI, never textarea (page identity)."""
+    qs = f"orgId={org_id}&userId={user_id}"
+    post_url = _api(f"/api/message?{qs}")
+    result = await page.evaluate(
+        f"""async ({{url, convId, text}}) => {{
+            {_SAFE_FETCH}
+            const r = await safeJsonFetch(url, {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{ conversationId: convId, text }}),
+            }});
+            const p = r.data || {{}};
+            return {{
+                status: r.status,
+                html: r.html,
+                authorId: p.authorId || '',
+                isDelivered: !!p.isDelivered,
+                facebookMessageId: p.facebookMessageId || '',
+            }};
+        }}""",
+        {"url": post_url, "convId": conv_id, "text": text},
+    )
+    status = int(result.get("status") or 0)
+    author = str(result.get("authorId") or "").strip()
+    fb = str(result.get("facebookMessageId") or "").strip()
+
+    if status >= 400:
+        raise RuntimeError(f"Send POST failed status={status}")
+
+    if author == user_id and (result.get("isDelivered") or fb):
+        logger.info(
+            "browser sent conv=%s author=%s fb=%s",
+            conv_id[:8],
+            author[:16],
+            fb[:12],
         )
-        if int(result.get("status") or 0) >= 400 or result.get("html"):
-            raise RuntimeError(
-                f"Send failed status={result.get('status')}"
-            )
+        return
 
     verify = await _verify_message_delivered(
         page,
@@ -324,17 +333,62 @@ async def _send_one_in_session(
         org_id=org_id,
         user_id=user_id,
         text=text,
+        attempts=12,
     )
-    if not verify.get("ok"):
-        raise RuntimeError(
-            f"Message not delivered to Messenger (conv={conv_id[:8]})"
+    if verify.get("ok"):
+        logger.info(
+            "browser sent conv=%s author=%s fb=%s (verified)",
+            conv_id[:8],
+            str(verify.get("authorId") or user_id)[:16],
+            str(verify.get("facebookMessageId") or "")[:12],
         )
-    logger.info(
-        "browser sent conv=%s author=%s fb=%s",
-        conv_id[:8],
-        str(verify.get("authorId") or user_id)[:16],
-        str(verify.get("facebookMessageId") or "")[:12],
+        return
+
+    page_msg = await _find_outgoing_by_text(
+        page, conv_id=conv_id, org_id=org_id, text=text
     )
+    if page_msg and not page_msg.get("authorId"):
+        raise RuntimeError(
+            f"Message stuck as Facebook page (conv={conv_id[:8]}) — not retrying"
+        )
+
+    raise RuntimeError(
+        f"Message not delivered as operator (conv={conv_id[:8]})"
+    )
+
+
+async def _find_outgoing_by_text(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    text: str,
+) -> dict | None:
+    snippet = (text or "")[:60]
+    api_msg = _api(
+        f"/api/message?convId={conv_id}&orgId={org_id}&pageSize=15&page=1"
+    )
+    hit = await page.evaluate(
+        f"""async ({{msgUrl, snippet}}) => {{
+            {_SAFE_FETCH}
+            const r = await safeJsonFetch(msgUrl);
+            if (r.html) return null;
+            const list = Array.isArray(r.data) ? r.data : [];
+            const m = list.find(x =>
+                x.messageDirection === 'outgoing'
+                && x.text
+                && x.text.startsWith(snippet.slice(0, 40))
+            );
+            if (!m) return null;
+            return {{
+                authorId: m.authorId || '',
+                isDelivered: !!m.isDelivered,
+                facebookMessageId: m.facebookMessageId || '',
+            }};
+        }}""",
+        {"msgUrl": api_msg, "snippet": snippet},
+    )
+    return hit if isinstance(hit, dict) else None
 
 
 async def _run_browser_session(
@@ -396,6 +450,7 @@ async def _run_browser_session(
                 user_id=uid,
                 chat_url=chat_url,
             )
+            await page.wait_for_timeout(1500)
 
             for i, body in enumerate(texts):
                 if i:

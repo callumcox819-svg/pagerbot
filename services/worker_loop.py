@@ -126,11 +126,12 @@ async def _handle_conversation(
         if not (m.get("text") or m.get("attachments")):
             return False
         author = str(m.get("authorId") or "").strip()
-        if pager_user_id and author and author != pager_user_id:
+        if pager_user_id:
+            if author != pager_user_id:
+                return False
+        elif not author:
             return False
-        if author == "" and not m.get("isDelivered") and not m.get("facebookMessageId"):
-            return False
-        return bool(m.get("isDelivered") or m.get("facebookMessageId") or author)
+        return bool(m.get("isDelivered") or m.get("facebookMessageId"))
 
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         last_in_ts = str(last_in.get("createdAt") or "")
@@ -173,10 +174,8 @@ async def _handle_conversation(
             org_slug=slug,
         )
         locale = str(account.get("pager_locale") or _settings.pager_locale)
-        active = client
-        cookies = _cookies(account)
 
-        async def _browser_send() -> None:
+        async def _browser_batch(cookies: dict[str, str]) -> None:
             await send_messages_via_browser(
                 cookies,
                 conv_id=conv_id,
@@ -187,78 +186,31 @@ async def _handle_conversation(
                 locale=locale,
             )
 
-        async def _rest_send_one(body: str) -> None:
-            nonlocal active
-            try:
-                await active.send_message(
-                    conv_id,
-                    body,
-                    channel_id=channel_id,
-                    conv=conv,
-                    author_id=pager_user_id,
-                )
-            except PagerAPIError as exc:
-                if not is_session_error(exc):
-                    raise
-                fresh = await refresh_pager_session(account)
-                if not fresh:
-                    raise
-                active = PagerClient(
-                    _settings.pager_base_url,
-                    fresh,
-                    org_id=oid,
-                    org_slug=slug,
-                    locale=locale,
-                    org_id_fallback=oid,
-                    session_user_id=pager_user_id,
-                )
-                await active.warm_session()
-                await active.send_message(
-                    conv_id,
-                    body,
-                    channel_id=channel_id,
-                    conv=conv,
-                    author_id=pager_user_id,
-                )
-
+        cookies = _cookies(account)
         try:
-            await _browser_send()
-            logger.info(
-                "browser batch sent conv=%s count=%s",
-                conv_id[:8],
-                len(texts),
-            )
-            return
+            await _browser_batch(cookies)
         except Exception as exc:
             msg = str(exc).lower()
-            if "sign-in" in msg or "session expired" in msg:
+            if any(
+                k in msg
+                for k in ("sign-in", "session expired", "session", "wrong pager login")
+            ):
                 fresh = await refresh_pager_session(account)
                 if fresh:
-                    await send_messages_via_browser(
-                        fresh,
-                        conv_id=conv_id,
-                        texts=texts,
-                        org_id=oid,
-                        org_slug=slug,
-                        user_id=pager_user_id,
-                        locale=locale,
-                    )
+                    await _browser_batch(fresh)
                     logger.info(
                         "browser batch sent conv=%s count=%s (after refresh)",
                         conv_id[:8],
                         len(texts),
                     )
                     return
-            logger.warning(
-                "browser send failed conv=%s: %s — REST fallback",
-                conv_id[:8],
-                exc,
-            )
+            raise
 
-        for i, body in enumerate(texts):
-            if i:
-                await asyncio.sleep(1.0)
-            await _rest_send_one(body)
+        logger.info(
+            "browser batch sent conv=%s count=%s",
+            conv_id[:8],
+            len(texts),
+        )
 
     async def send(text: str) -> None:
         await _outbound_send([text])

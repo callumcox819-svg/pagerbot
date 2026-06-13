@@ -733,24 +733,10 @@ class PagerClient:
             nested = conv_data.get("channel")
             if isinstance(nested, dict):
                 ch = str(nested.get("id") or "").strip()
-        # Operator UI sends {conversationId, text} after take — channelId in body
-        # often yields imageUrl 500 or page-identity (authorId=null) duplicates.
+        # Single payload — operator UI after take (browser path). No channelId retries.
         bodies: list[dict[str, Any]] = [
             {"conversationId": conv_id, "text": text},
         ]
-        if ch:
-            bodies.append(
-                {"conversationId": conv_id, "text": text, "channelId": ch},
-            )
-            if user_id:
-                bodies.append(
-                    {
-                        "conversationId": conv_id,
-                        "text": text,
-                        "channelId": ch,
-                        "authorId": user_id,
-                    }
-                )
 
         params: dict[str, Any] = {"orgId": org_id}
         if user_id:
