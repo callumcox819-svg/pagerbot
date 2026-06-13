@@ -47,7 +47,14 @@ def message_accepted(result: Any, operator_id: str = "") -> bool:
     if not uid:
         return True
     author = str(result.get("authorId") or "").strip()
-    return author == uid
+    if author == uid:
+        return True
+    if not author:
+        logger.warning(
+            "message delivered authorId=null (fb=%s)",
+            str(result.get("facebookMessageId") or "")[:12],
+        )
+    return False
 
 
 def _extract_user_id(data: Any) -> str:

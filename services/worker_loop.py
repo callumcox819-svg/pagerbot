@@ -258,12 +258,11 @@ async def _handle_conversation(
 
         if step >= 5 and step < 7:
             if extracted:
-                await send(EXCELLENT)
-                await asyncio.sleep(0.8)
-                dep = load_script(geo, "06_deposit")
-                await send(dep)
+                await _rest_send([EXCELLENT, load_script(geo, "06_deposit")])
                 if pager_user_id:
-                    await client.patch_status(conv_id, ZM_STATUSES["registration"], pager_user_id)
+                    await client.patch_status(
+                        conv_id, ZM_STATUSES["registration"], pager_user_id
+                    )
                 await db.save_conversation_state(
                     account_id,
                     conv_id,
@@ -315,13 +314,17 @@ async def _handle_conversation(
                 conv_id=conv_id,
                 **_escalation_link_kwargs(account, channel_id),
             )
+            await _rest_send(
+                [
+                    EXCELLENT,
+                    load_script(geo, "08_tg_invite"),
+                    load_script(geo, "09_tg_link"),
+                ]
+            )
             if pager_user_id:
-                await client.patch_status(conv_id, ZM_STATUSES["deps_pending"], pager_user_id)
-            await send(EXCELLENT)
-            await asyncio.sleep(0.8)
-            await send(load_script(geo, "08_tg_invite"))
-            await asyncio.sleep(0.8)
-            await send(load_script(geo, "09_tg_link"))
+                await client.patch_status(
+                    conv_id, ZM_STATUSES["deps_pending"], pager_user_id
+                )
             await db.save_conversation_state(
                 account_id, conv_id, step=9, last_processed_msg_id=msg_id
             )
@@ -331,11 +334,11 @@ async def _handle_conversation(
     if intent == Intent.GAME_ID_TEXT:
         gid = extract_id_from_text(text)
         if gid and step >= 5 and step < 7:
-            await send(EXCELLENT)
-            await asyncio.sleep(0.8)
-            await send(load_script(geo, "06_deposit"))
+            await _rest_send([EXCELLENT, load_script(geo, "06_deposit")])
             if pager_user_id:
-                await client.patch_status(conv_id, ZM_STATUSES["registration"], pager_user_id)
+                await client.patch_status(
+                    conv_id, ZM_STATUSES["registration"], pager_user_id
+                )
             await db.save_conversation_state(
                 account_id,
                 conv_id,
@@ -385,12 +388,15 @@ async def _handle_conversation(
         intent == Intent.READY and step >= 2 and step < 4
     ):
         new_step = 4
-        if pager_user_id:
-            await client.patch_status(conv_id, ZM_STATUSES["in_progress"], pager_user_id)
-        await asyncio.sleep(0.5)
         await send(load_script(geo, "10_reg_screenshot"))
         if pager_user_id:
-            await client.patch_status(conv_id, ZM_STATUSES["wait_id"], pager_user_id)
+            await client.patch_status(
+                conv_id, ZM_STATUSES["in_progress"], pager_user_id
+            )
+            await asyncio.sleep(0.5)
+            await client.patch_status(
+                conv_id, ZM_STATUSES["wait_id"], pager_user_id
+            )
         new_step = 5
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
