@@ -13,6 +13,11 @@ load_dotenv()
 ROOT = Path(__file__).resolve().parent
 SCRIPTS_DIR = ROOT / "data" / "scripts"
 
+# Known org for tehsup deployment (override via PAGER_ORG_ID)
+DEFAULT_ORG_ID_BY_SLUG: dict[str, str] = {
+    "tehsup": "org_3Cd5AHJTskSRAzLNkoft2qlfaUw",
+}
+
 
 @dataclass
 class Settings:
@@ -47,6 +52,11 @@ def load_settings() -> Settings:
     db = os.getenv("DATABASE_PATH", "data/bot.db").strip()
     poll = float(os.getenv("PAGER_POLL_SEC", "45"))
 
+    pager_org_slug = (os.getenv("PAGER_ORG_SLUG") or "").strip()
+    pager_org_id = (os.getenv("PAGER_ORG_ID") or "").strip()
+    if not pager_org_id and pager_org_slug:
+        pager_org_id = DEFAULT_ORG_ID_BY_SLUG.get(pager_org_slug.lower(), "")
+
     return Settings(
         bot_token=token,
         encryption_key=enc,
@@ -55,6 +65,6 @@ def load_settings() -> Settings:
         poll_sec=poll,
         db_path=ROOT / db,
         pager_locale=(os.getenv("PAGER_LOCALE") or "uk").strip() or "uk",
-        pager_org_slug=(os.getenv("PAGER_ORG_SLUG") or "").strip(),
-        pager_org_id=(os.getenv("PAGER_ORG_ID") or "").strip(),
+        pager_org_slug=pager_org_slug,
+        pager_org_id=pager_org_id,
     )

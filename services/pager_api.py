@@ -222,6 +222,10 @@ class PagerClient:
         if self.org_id:
             return self.org_id
 
+        if self.org_id_fallback:
+            self.org_id = self.org_id_fallback
+            return self.org_id
+
         org_id = await self._try_org_from_conversations()
         if org_id:
             return org_id
@@ -267,12 +271,25 @@ class PagerClient:
         except Exception as exc:
             logger.debug("discover org via chats html: %s", exc)
 
-        if self.org_id_fallback:
-            logger.info("Using PAGER_ORG_ID fallback org=%s", self.org_id_fallback)
-            self.org_id = self.org_id_fallback
-            return self.org_id
-
         return ""
+
+    async def list_conversations(
+        self,
+        page: int = 1,
+        page_size: int = 30,
+        *,
+        channel_id: str = "",
+    ) -> list[dict]:
+        org_id = await self._ensure_org_id()
+        params: dict[str, Any] = {
+            "orgId": org_id,
+            "pageSize": page_size,
+            "page": page,
+        }
+        if channel_id:
+            params["channelId"] = channel_id
+        data = await self._request("GET", "/api/conversation", params=params)
+        return data if isinstance(data, list) else []
 
     async def discover_org_slug(self) -> str:
         if self.org_slug:
@@ -332,15 +349,6 @@ class PagerClient:
                 '{"error":"Organization ID required — could not auto-detect orgId"}',
             )
         return org_id
-
-    async def list_conversations(self, page: int = 1, page_size: int = 30) -> list[dict]:
-        org_id = await self._ensure_org_id()
-        data = await self._request(
-            "GET",
-            "/api/conversation",
-            params={"orgId": org_id, "pageSize": page_size, "page": page},
-        )
-        return data if isinstance(data, list) else []
 
     async def list_messages(self, conv_id: str, page: int = 1, page_size: int = 50) -> list[dict]:
         data = await self._request(

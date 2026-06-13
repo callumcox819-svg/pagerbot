@@ -31,11 +31,13 @@ def _pager_client(
     org_slug: str = "",
     locale: str = "",
 ) -> PagerClient:
+    slug = org_slug or _settings.pager_org_slug
+    resolved_org = org_id or _settings.pager_org_id
     return PagerClient(
         _settings.pager_base_url,
         cookies,
-        org_id=org_id,
-        org_slug=org_slug or _settings.pager_org_slug,
+        org_id=resolved_org,
+        org_slug=slug,
         locale=locale or _settings.pager_locale,
         org_id_fallback=_settings.pager_org_id,
     )
@@ -207,7 +209,10 @@ async def cb_toggle_channel(cb: CallbackQuery) -> None:
     await db.toggle_channel(int(acc["id"]), channel_id, enabled)
     chs = await db.list_channels(int(acc["id"]))
     await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
-    await cb.answer("OK")
+    if enabled:
+        await cb.answer("Включено — непрочитанные чаты обработаются ~45 сек")
+    else:
+        await cb.answer("Выключено")
 
 
 @router.callback_query(F.data == "ch:refresh")
@@ -226,11 +231,12 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
             locale=str(acc.get("pager_locale") or ""),
         )
         probe = await client.probe_session()
-        if probe.get("org_id"):
+        resolved_org = client.org_id or probe.get("org_id") or _settings.pager_org_id
+        if resolved_org:
             await db.upsert_account(
                 cb.from_user.id,
-                org_id=probe["org_id"],
-                org_slug=probe.get("org_slug") or acc.get("org_slug") or "",
+                org_id=resolved_org,
+                org_slug=probe.get("org_slug") or acc.get("org_slug") or _settings.pager_org_slug,
                 pager_user_id=probe.get("pager_user_id") or acc.get("pager_user_id") or "",
                 session_ok=1,
             )

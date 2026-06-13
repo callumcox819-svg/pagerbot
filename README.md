@@ -51,8 +51,8 @@ python bot.py
 Variables: `BOT_TOKEN`, `ENCRYPTION_KEY`, `OPENAI_API_KEY` (optional)
 
 **Обязательно для API Pager** (orgId не всегда определяется автоматически):
-- `PAGER_ORG_ID=org_3Cd5AHJTskSRAzLNkoft2qlfaUw` — из Network → `status?orgId=...`
-- `PAGER_ORG_SLUG=tehsup` — slug в URL
+- `PAGER_ORG_SLUG=tehsup` — slug в URL (orgId подставится автоматически для tehsup)
+- `PAGER_ORG_ID=org_3Cd5AHJTskSRAzLNkoft2qlfaUw` — явно, если slug другой
 - `PAGER_LOCALE=uk` — язык (по умолчанию `uk`)
 
 Ссылка в TG: `https://www.pager.co.ua/uk/tehsup/chats?channelId=...`  

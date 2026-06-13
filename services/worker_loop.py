@@ -289,30 +289,54 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         cookies = _cookies(account)
         if not cookies:
             return
+        account_id = int(account["id"])
+        enabled = await _enabled_channel_ids(account_id)
+        if enabled is None:
+            return
+        if not enabled:
+            return
+
         client = PagerClient(
             _settings.pager_base_url,
             cookies,
-            org_id=str(account.get("org_id") or ""),
+            org_id=str(account.get("org_id") or _settings.pager_org_id or ""),
             org_slug=str(account.get("org_slug") or _settings.pager_org_slug),
             locale=str(account.get("pager_locale") or _settings.pager_locale),
             org_id_fallback=_settings.pager_org_id,
         )
-        convs = await client.list_conversations(page_size=40)
-        if client.org_id and not account.get("org_id"):
+
+        seen: set[str] = set()
+        for channel_id in enabled:
+            for page in (1, 2, 3):
+                convs = await client.list_conversations(
+                    page=page,
+                    page_size=50,
+                    channel_id=channel_id,
+                )
+                if not convs:
+                    break
+                for conv in convs:
+                    conv_id = str(conv.get("id") or "")
+                    if not conv_id or conv_id in seen:
+                        continue
+                    seen.add(conv_id)
+                    try:
+                        await _handle_conversation(bot, account, conv, client)
+                    except Exception:
+                        logger.exception(
+                            "conv failed account=%s conv=%s",
+                            account.get("id"),
+                            conv_id,
+                        )
+
+        if client.org_id:
             await db.upsert_account(
                 int(account["tg_user_id"]),
                 org_id=client.org_id,
-                org_slug=client.org_slug or account.get("org_slug") or "",
+                org_slug=client.org_slug or account.get("org_slug") or _settings.pager_org_slug,
                 pager_user_id=account.get("pager_user_id") or "",
                 session_ok=1,
             )
-        for conv in convs:
-            try:
-                await _handle_conversation(bot, account, conv, client)
-            except Exception:
-                logger.exception(
-                    "conv failed account=%s conv=%s", account.get("id"), conv.get("id")
-                )
     except PagerAPIError as exc:
         if exc.status in (401, 403):
             await db.upsert_account(
