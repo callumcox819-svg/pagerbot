@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -615,11 +616,49 @@ class PagerClient:
             logger.debug("open conv=%s: %s", conv_id[:8], exc.body[:80])
             return None
 
+    async def _conversation_responsible(self, conv_id: str) -> str:
+        conv = await self.open_conversation(conv_id)
+        if not conv:
+            return ""
+        nested = conv.get("responsibleUser") or {}
+        return str(
+            conv.get("responsibleuserId")
+            or conv.get("responsibleUserId")
+            or nested.get("id")
+            or ""
+        ).strip()
+
+    async def _take_confirmed(self, conv_id: str, user_id: str) -> bool:
+        uid = (user_id or "").strip()
+        if not uid:
+            return False
+        if await self._conversation_responsible(conv_id) == uid:
+            return True
+        try:
+            msgs = await self.list_messages(conv_id, page_size=25)
+        except PagerAPIError:
+            msgs = []
+        for m in msgs:
+            if str(m.get("newResponsibleId") or "").strip() == uid:
+                return True
+        return False
+
+    async def _wait_take(self, conv_id: str, user_id: str, *, attempts: int = 10) -> bool:
+        for _ in range(attempts):
+            if await self._take_confirmed(conv_id, user_id):
+                return True
+            await asyncio.sleep(0.5)
+        return False
+
     async def take_conversation(self, conv_id: str, user_id: str) -> bool:
         """Assign + take chat for operator (UI «Тех Саппорт взяв(-ла) чат»)."""
         uid = (user_id or "").strip()
         if not uid:
             return False
+
+        if await self._take_confirmed(conv_id, uid):
+            logger.info("take conv=%s user=%s (already)", conv_id[:8], uid[:16])
+            return True
 
         org_id = await self._ensure_org_id()
         referer = self._chat_referer(conv_id)
@@ -651,15 +690,25 @@ class PagerClient:
                     json_body=body,
                     referer=referer,
                 )
-                logger.info("take conv=%s user=%s", conv_id[:8], uid[:16])
-                return True
             except PagerAPIError as exc:
                 last_exc = exc
+                continue
+            if await self._wait_take(conv_id, uid):
+                logger.info("take conv=%s user=%s verified", conv_id[:8], uid[:16])
+                return True
+        if await self._take_confirmed(conv_id, uid):
+            return True
         if last_exc:
             logger.warning(
                 "take conv=%s failed: %s",
                 conv_id[:8],
                 last_exc.body[:120],
+            )
+        else:
+            logger.warning(
+                "take conv=%s not verified for user=%s",
+                conv_id[:8],
+                uid[:16],
             )
         return False
 
@@ -679,11 +728,24 @@ class PagerClient:
             conv_data = {**conv_data, **fresh}
 
         if user_id:
-            await self.take_conversation(conv_id, user_id)
+            taken = await self.take_conversation(conv_id, user_id)
+            if not taken:
+                raise PagerAPIError(
+                    502,
+                    json.dumps(
+                        {
+                            "error": "take chat failed — operator not assigned",
+                            "conv": conv_id[:8],
+                        }
+                    ),
+                )
             try:
                 await self.mark_conversation_read(conv_id, user_id=user_id)
             except Exception:
                 pass
+            fresh = await self.open_conversation(conv_id)
+            if fresh:
+                conv_data = {**conv_data, **fresh}
         await self._fetch_conv_chat_page(conv_id)
         try:
             await self.list_messages(conv_id, page_size=1)

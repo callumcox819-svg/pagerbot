@@ -15,7 +15,6 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
-from services.pager_browser_send import send_messages_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -167,6 +166,7 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def _outbound_send(texts: list[str]) -> None:
+        nonlocal client
         slug = str(
             account.get("org_slug") or _settings.pager_org_slug or ""
         ).strip()
@@ -177,72 +177,53 @@ async def _handle_conversation(
             org_slug=slug,
         )
         locale = str(account.get("pager_locale") or _settings.pager_locale)
+        active = client
+        await active.warm_session()
 
-        async def _browser_batch(cookies: dict[str, str]) -> None:
-            await client.take_conversation(conv_id, pager_user_id)
-            await send_messages_via_browser(
-                cookies,
-                conv_id=conv_id,
-                texts=texts,
-                org_id=oid,
-                org_slug=slug,
-                user_id=pager_user_id,
-                locale=locale,
-                skip_take=True,
+        async def _send_one(body: str, pager: PagerClient) -> None:
+            await pager.send_message(
+                conv_id,
+                body,
+                channel_id=channel_id,
+                conv=conv,
+                author_id=pager_user_id,
             )
 
-        cookies = _cookies(account)
-        try:
-            await _browser_batch(cookies)
-        except Exception as exc:
-            msg = str(exc).lower()
-            retryable = any(
-                k in msg
-                for k in (
-                    "sign-in",
-                    "session expired",
-                    "session stale",
-                    "session",
-                    "wrong pager login",
-                    "chat not taken",
-                    "not delivered",
-                    "send post failed",
-                    "status=500",
+        for i, body in enumerate(texts):
+            if i:
+                await asyncio.sleep(1.0)
+            try:
+                await _send_one(body, active)
+            except PagerAPIError as exc:
+                body_l = (exc.body or "").lower()
+                retry = is_session_error(exc) or any(
+                    k in body_l
+                    for k in (
+                        "take chat failed",
+                        "channel.findunique",
+                        "organization id required",
+                    )
                 )
-            )
-            if retryable:
+                if not retry:
+                    raise
                 fresh = await refresh_pager_session(account)
-                if fresh:
-                    fresh_client = PagerClient(
-                        _settings.pager_base_url,
-                        fresh,
-                        org_id=oid,
-                        org_slug=slug,
-                        locale=locale,
-                        org_id_fallback=oid,
-                        session_user_id=pager_user_id,
-                    )
-                    await fresh_client.take_conversation(conv_id, pager_user_id)
-                    await send_messages_via_browser(
-                        fresh,
-                        conv_id=conv_id,
-                        texts=texts,
-                        org_id=oid,
-                        org_slug=slug,
-                        user_id=pager_user_id,
-                        locale=locale,
-                        skip_take=True,
-                    )
-                    logger.info(
-                        "browser batch sent conv=%s count=%s (after refresh)",
-                        conv_id[:8],
-                        len(texts),
-                    )
-                    return
-            raise
+                if not fresh:
+                    raise
+                active = PagerClient(
+                    _settings.pager_base_url,
+                    fresh,
+                    org_id=oid,
+                    org_slug=slug,
+                    locale=locale,
+                    org_id_fallback=oid,
+                    session_user_id=pager_user_id,
+                )
+                await active.warm_session()
+                client = active
+                await _send_one(body, active)
 
         logger.info(
-            "browser batch sent conv=%s count=%s",
+            "REST sent conv=%s count=%s",
             conv_id[:8],
             len(texts),
         )
