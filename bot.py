@@ -14,6 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import load_settings
 from database import init_db
 from handlers import setup_routers
+from services.bot_commands import register_bot_commands
 from services.worker_loop import start_worker
 
 logging.basicConfig(
@@ -35,6 +36,7 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(setup_routers())
 
+    await register_bot_commands(bot)
     start_worker(bot)
     logger.info("Bot + Pager worker running")
     await dp.start_polling(bot)

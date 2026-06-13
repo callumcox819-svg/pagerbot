@@ -20,7 +20,7 @@ async def cmd_start(message: Message) -> None:
         "2. 📡 Каналы — выберите Kelvin Phiri и др.\n"
         "3. Бот сам шлёт скрипты в Messenger\n"
         "4. В Telegram — только когда нужен человек\n\n"
-        "Команды: /pause /resume /status",
+        "Команды: /start /pause /resume /status",
         reply_markup=main_menu(),
     )
 

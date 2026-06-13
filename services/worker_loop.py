@@ -20,7 +20,7 @@ from services.script_engine import (
     load_script,
     scripts_to_send_after_intent,
 )
-from services.status_ids import EXCELLENT, ZM_STATUSES
+from services.status_ids import EXCELLENT, ZM_STATUSES, should_skip_processing
 from services.telegram_notify import notify_escalation
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,9 @@ async def _handle_conversation(
     if enabled is None:
         return
     if not enabled or channel_id not in enabled:
+        return
+
+    if should_skip_processing(conv):
         return
 
     state = await db.get_conversation_state(account_id, conv_id)
