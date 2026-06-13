@@ -39,6 +39,19 @@ def resolve_pager_org_id(*values: str, org_slug: str = "") -> str:
     return ""
 
 
+def resolve_operator_user_id(*values: str, org_slug: str = "") -> str:
+    """Тех Саппорт operator id — never use Clerk/page identity for send."""
+    for raw in values:
+        v = (raw or "").strip()
+        if v.startswith("user_"):
+            return v
+    env = (os.getenv("PAGER_USER_ID") or "").strip()
+    if env.startswith("user_"):
+        return env
+    slug = (org_slug or os.getenv("PAGER_ORG_SLUG") or "").strip().lower()
+    return DEFAULT_USER_ID_BY_SLUG.get(slug, "")
+
+
 @dataclass
 class Settings:
     bot_token: str

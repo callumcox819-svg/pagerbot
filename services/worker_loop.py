@@ -10,7 +10,7 @@ from typing import Any
 from aiogram import Bot
 
 import database as db
-from config import load_settings, resolve_pager_org_id
+from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
 from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
@@ -135,13 +135,12 @@ async def _handle_conversation(
     intent = classify(text, has_image=has_image, has_ad=has_ad)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
-    pager_user_id = str(
-        _settings.pager_user_id
-        or client.session_user_id
-        or account.get("pager_user_id")
-        or conv.get("responsibleuserId")
-        or (conv.get("responsibleUser") or {}).get("id")
-        or ""
+    org_slug = str(
+        account.get("org_slug") or _settings.pager_org_slug or ""
+    ).strip()
+    pager_user_id = resolve_operator_user_id(
+        _settings.pager_user_id,
+        org_slug=org_slug,
     )
 
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
@@ -417,11 +416,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         def _make_client(cookie_dict: dict[str, str]) -> PagerClient:
-            session_uid = str(
-                _settings.pager_user_id
-                or account.get("pager_user_id")
-                or ""
-            ).strip()
+            session_uid = resolve_operator_user_id(
+                _settings.pager_user_id,
+                account.get("pager_user_id"),
+                org_slug=org_slug,
+            )
             return PagerClient(
                 _settings.pager_base_url,
                 cookie_dict,
@@ -503,11 +502,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         if client.org_id:
-            pager_uid = str(
-                _settings.pager_user_id
-                or client.session_user_id
-                or account.get("pager_user_id")
-                or ""
+            pager_uid = resolve_operator_user_id(
+                _settings.pager_user_id,
+                client.session_user_id,
+                account.get("pager_user_id"),
+                org_slug=str(
+                    account.get("org_slug") or _settings.pager_org_slug or ""
+                ),
             )
             if not pager_uid and inbound_convs:
                 pager_uid = str(

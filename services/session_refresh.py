@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 import database as db
-from config import load_settings, resolve_pager_org_id
+from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
 from services.encryption import Secrets
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
 from services.pager_auth import authenticate
@@ -76,9 +76,11 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
         return None
 
     session_enc = _secrets.encrypt(json.dumps(cookies))
-    operator_id = (
-        (_settings.pager_user_id or "").strip()
-        or str(probe.get("pager_user_id") or user_hint or "").strip()
+    operator_id = resolve_operator_user_id(
+        _settings.pager_user_id,
+        user_hint,
+        probe.get("pager_user_id"),
+        org_slug=org_slug,
     )
     await db.upsert_account(
         int(account["tg_user_id"]),

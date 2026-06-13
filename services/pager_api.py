@@ -9,7 +9,7 @@ from typing import Any
 
 import aiohttp
 
-from config import DEFAULT_ORG_ID_BY_SLUG, load_settings, resolve_pager_org_id
+from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
 
 _settings = load_settings()
 from services.pager_auth import UA
@@ -172,11 +172,12 @@ class PagerClient:
         return f"{self.base_url}/"
 
     def operator_user_id(self, author_id: str = "") -> str:
-        """Pager operator for take-chat + send (Тех Саппорт, not Clerk probe guess)."""
-        return (
-            (author_id or "").strip()
-            or (self.session_user_id or "").strip()
-            or (_settings.pager_user_id or "").strip()
+        """Pager operator for take-chat + send (Тех Саппорт only)."""
+        return resolve_operator_user_id(
+            author_id,
+            self.session_user_id,
+            _settings.pager_user_id,
+            org_slug=self.org_slug,
         )
 
     def _api_headers(self) -> dict[str, str]:
