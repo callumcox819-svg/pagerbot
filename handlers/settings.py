@@ -88,7 +88,10 @@ async def cmd_reset_pauses(message: Message) -> None:
     if not acc:
         await message.answer("Pager не подключён.")
         return
-    n = await db.clear_pauses_for_account(int(acc["id"]))
+    aid = int(acc["id"])
+    n = await db.clear_pauses_for_account(aid)
+    deleted = await db.reset_conversation_states(aid)
     await message.answer(
-        f"Сброшено пауз у {n} чат(ов). Бот снова может отвечать в Pager."
+        f"Сброшено: паузы/метки у {n} чат(ов), полный reset {deleted} записей.\n"
+        "Бот снова обработает непрочитанные в «Без статусу»."
     )

@@ -363,7 +363,7 @@ class PagerClient:
         max_pages: int = 5,
     ) -> list[dict]:
         """Chats for enabled channels: «Без статусу» + active funnel folders."""
-        from services.status_ids import ACTIVE_FUNNEL_STATUS_IDS, should_process_conversation
+        from services.status_ids import ACTIVE_FUNNEL_STATUS_IDS, is_no_status, should_process_conversation
 
         seen: dict[str, dict] = {}
 
@@ -388,6 +388,14 @@ class PagerClient:
                 if not convs:
                     break
                 _add(convs)
+
+        # «Без статусу» — extra pass (Pager tab often not in first pages per channel).
+        for page in range(1, max_pages + 1):
+            convs = await self.list_conversations(page=page, page_size=100)
+            no_status = [c for c in convs if is_no_status(c)]
+            if not no_status:
+                break
+            _add(no_status)
 
         for status_id in ACTIVE_FUNNEL_STATUS_IDS:
             for page in range(1, 3):
@@ -462,10 +470,16 @@ class PagerClient:
         return org_id
 
     async def list_messages(self, conv_id: str, page: int = 1, page_size: int = 50) -> list[dict]:
+        org_id = await self._ensure_org_id()
         data = await self._request(
             "GET",
             "/api/message",
-            params={"convId": conv_id, "pageSize": page_size, "page": page},
+            params={
+                "convId": conv_id,
+                "pageSize": page_size,
+                "page": page,
+                "orgId": org_id,
+            },
         )
         return data if isinstance(data, list) else []
 

@@ -19,7 +19,9 @@ class Intent(str, Enum):
 
 
 _INTERESTED = re.compile(
-    r"\b(interested|interest|312|teach me|need help|i am interested)\b", re.I
+    r"\b(interested|interest|312|teach me|need help|i am interested|"
+    r"tell me more|am interested|kindly explain|explain it)\b",
+    re.I,
 )
 _ACK = re.compile(
     r"\b(sure|done|ok|okay|thanks|thank you|i have done|as you said|"
@@ -60,10 +62,12 @@ def classify(text: str, *, has_image: bool = False) -> Intent:
     return Intent.UNKNOWN
 
 
-def needs_human(intent: Intent, step: int) -> bool:
+def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
     if intent == Intent.COMPLAINT:
         return True
-    # Steps 5+ wait for game ID / deposit screenshot — don't spam TG on acks.
+    # New leads in «Без статусу» — always try scripts, never escalate on unknown.
+    if no_status and step < 3 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+        return False
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
     if intent in (Intent.QUESTION, Intent.UNKNOWN):

@@ -21,7 +21,7 @@ from services.script_engine import (
     load_script,
     scripts_to_send_after_intent,
 )
-from services.status_ids import EXCELLENT, ZM_STATUSES, should_process_conversation
+from services.status_ids import EXCELLENT, ZM_STATUSES, is_no_status, should_process_conversation
 from services.telegram_notify import notify_escalation
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ async def _handle_conversation(
     account: dict[str, Any],
     conv: dict[str, Any],
     client: PagerClient,
-) -> bool:
+) -> bool | str:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
     if not conv_id:
@@ -93,7 +93,7 @@ async def _handle_conversation(
 
     state = await db.get_conversation_state(account_id, conv_id)
     if state.get("human_takeover") or state.get("pause_scripts"):
-        return False
+        return "paused"
 
     messages = await client.list_messages(conv_id, page_size=80)
     # API returns newest first — work chronologically
@@ -110,7 +110,20 @@ async def _handle_conversation(
 
     msg_id = str(last_in.get("id") or "")
     if msg_id and msg_id == state.get("last_processed_msg_id"):
-        return False
+        last_in_ts = str(last_in.get("createdAt") or "")
+        has_reply_after = any(
+            _is_outgoing_direction(str(m.get("messageDirection") or ""))
+            and str(m.get("createdAt") or "") > last_in_ts
+            and "oldStatusId" not in m
+            and "oldResponsibleId" not in m
+            for m in msg_only
+        )
+        if has_reply_after:
+            return "done"
+        logger.info(
+            "conv=%s retry: was marked processed but no reply sent",
+            conv_id[:8],
+        )
 
     text = (last_in.get("text") or "").strip()
     attachments = last_in.get("attachments") or []
@@ -119,7 +132,13 @@ async def _handle_conversation(
     step = infer_step_from_history(msg_only)
     intent = classify(text, has_image=has_image)
     geo = account.get("geo") or "zm"
-    pager_user_id = str(account.get("pager_user_id") or "")
+    no_status = is_no_status(conv)
+    pager_user_id = str(
+        conv.get("responsibleuserId")
+        or (conv.get("responsibleUser") or {}).get("id")
+        or account.get("pager_user_id")
+        or ""
+    )
 
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
@@ -141,10 +160,10 @@ async def _handle_conversation(
         await db.save_conversation_state(
             account_id, conv_id, last_processed_msg_id=msg_id
         )
-        return False
+        return "done"
 
     # --- Complaints / unclear → TG only ---
-    if needs_human(intent, step) and intent != Intent.IMAGE_ONLY:
+    if needs_human(intent, step, no_status=no_status) and intent != Intent.IMAGE_ONLY:
         await notify_escalation(
             bot,
             esc_chat,
@@ -269,10 +288,14 @@ async def _handle_conversation(
 
     if intent == Intent.READY and step < 4:
         keys = ["04_registration", "05_link"]
-    elif intent == Intent.INTERESTED and step < 1:
-        keys = ["01_intro"]
+    elif intent == Intent.INTERESTED and step < 4:
+        keys = ["01_intro"] if step < 1 else ["02_how_it_works", "03_zmw_table"]
     elif intent == Intent.POSITIVE and step < 2:
         keys = ["02_how_it_works", "03_zmw_table"]
+    elif intent == Intent.POSITIVE and step < 4:
+        keys = ["04_registration", "05_link"]
+    elif no_status and step < 3 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+        keys = ["01_intro"]
     elif intent == Intent.JOINED:
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
@@ -308,7 +331,15 @@ async def _handle_conversation(
             last_processed_msg_id=msg_id,
         )
         return True
-    return False
+    if keys:
+        logger.warning(
+            "conv=%s intent=%s step=%s keys=%s but nothing sent",
+            conv_id[:8],
+            intent.value,
+            step,
+            keys,
+        )
+    return "no_script"
 
 
 async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
@@ -368,11 +399,19 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound_convs.sort(key=lambda c: c.get("lastMessageAt") or "", reverse=True)
         inbound = len(inbound_convs)
         handled = 0
+        skipped = {"paused": 0, "done": 0, "no_script": 0}
         max_replies = 25
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
-                if await _handle_conversation(bot, account, conv, client):
+                result = await _handle_conversation(bot, account, conv, client)
+                if result == "paused":
+                    skipped["paused"] += 1
+                elif result == "done":
+                    skipped["done"] += 1
+                elif result == "no_script":
+                    skipped["no_script"] += 1
+                elif result:
                     handled += 1
             except PagerAPIError as exc:
                 logger.warning(
@@ -389,13 +428,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 )
 
         logger.info(
-            "Worker account=%s: org=%s channels=%s queue=%s inbound=%s processed=%s",
+            "Worker account=%s: org=%s channels=%s queue=%s inbound=%s "
+            "processed=%s skip=%s",
             account.get("id"),
             (client.org_id or "")[:16],
             len(enabled),
             len(convs),
             inbound,
             handled,
+            skipped,
         )
 
         if client.org_id:

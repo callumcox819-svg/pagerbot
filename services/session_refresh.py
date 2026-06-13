@@ -90,7 +90,7 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
         cleared = await db.clear_pauses_for_account(int(acc["id"]))
         if cleared:
             logger.info(
-                "Session refresh: cleared %s pauses account=%s",
+                "Session refresh: cleared %s paused chats account=%s",
                 cleared,
                 account.get("id"),
             )
