@@ -29,6 +29,8 @@ def load_script(geo: str, key: str) -> str:
     if cache_key in _cache:
         return _cache[cache_key]
     path = SCRIPTS_DIR / geo / f"{key}.txt"
+    if not path.is_file():
+        raise FileNotFoundError(f"Script missing: {path}")
     text = path.read_text(encoding="utf-8").strip()
     _cache[cache_key] = text
     return text
@@ -90,8 +92,6 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
     if intent == "game_id_text" or (intent == "image_only" and step >= 5):
         if step < 7:
             return ["07_game_id"] if step < 6 else []
-    if step == 7:
-        return ["06_deposit"]
     if step >= 8 and intent != "joined":
         return ["08_tg_invite", "09_tg_link"]
     return []

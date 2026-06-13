@@ -21,7 +21,12 @@ class Intent(str, Enum):
 _INTERESTED = re.compile(
     r"\b(interested|interest|312|teach me|need help|i am interested)\b", re.I
 )
-_POSITIVE = re.compile(r"\b(ok|okay|ok\.|explain|i am|alright|got it)\b", re.I)
+_ACK = re.compile(
+    r"\b(sure|done|ok|okay|thanks|thank you|i have done|as you said|"
+    r"will do|already done|got it|understood|alright)\b",
+    re.I,
+)
+_POSITIVE = re.compile(r"\b(explain|i am)\b", re.I)
 _READY = re.compile(r"\b(yes|ready|am ready|let'?s start|start today)\b", re.I)
 _JOINED = re.compile(r"\b(have joined|joined|i joined)\b", re.I)
 _COMPLAINT = re.compile(
@@ -38,6 +43,8 @@ def classify(text: str, *, has_image: bool = False) -> Intent:
         return Intent.GAME_ID_TEXT
     if _COMPLAINT.search(t):
         return Intent.COMPLAINT
+    if _ACK.search(t):
+        return Intent.POSITIVE
     if _JOINED.search(t):
         return Intent.JOINED
     if _READY.search(t) and len(t) < 40:
@@ -54,6 +61,11 @@ def classify(text: str, *, has_image: bool = False) -> Intent:
 
 
 def needs_human(intent: Intent, step: int) -> bool:
-    if intent in (Intent.COMPLAINT, Intent.QUESTION, Intent.UNKNOWN):
+    if intent == Intent.COMPLAINT:
+        return True
+    # Steps 5+ wait for game ID / deposit screenshot — don't spam TG on acks.
+    if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+        return False
+    if intent in (Intent.QUESTION, Intent.UNKNOWN):
         return True
     return False

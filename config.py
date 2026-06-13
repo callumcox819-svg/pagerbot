@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parent
-SCRIPTS_DIR = ROOT / "data" / "scripts"
+SCRIPTS_DIR = ROOT / "scripts"
 
 # Known org for tehsup deployment (override via PAGER_ORG_ID)
 DEFAULT_ORG_ID_BY_SLUG: dict[str, str] = {

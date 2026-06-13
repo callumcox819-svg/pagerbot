@@ -127,6 +127,13 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
+    # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
+    if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
+        await db.save_conversation_state(
+            account_id, conv_id, last_processed_msg_id=msg_id
+        )
+        return False
+
     # --- Complaints / unclear → TG only ---
     if needs_human(intent, step) and intent != Intent.IMAGE_ONLY:
         await notify_escalation(
