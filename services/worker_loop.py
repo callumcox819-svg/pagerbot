@@ -15,6 +15,7 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
+from services.pager_browser_send import send_message_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -149,13 +150,32 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def send(text: str) -> None:
-        await client.send_message(
-            conv_id,
-            text,
-            channel_id=channel_id,
-            conv=conv,
-            author_id=pager_user_id,
-        )
+        try:
+            await client.send_message(
+                conv_id,
+                text,
+                channel_id=channel_id,
+                conv=conv,
+                author_id=pager_user_id,
+            )
+        except PagerAPIError as exc:
+            slug = str(
+                account.get("org_slug") or _settings.pager_org_slug or ""
+            ).strip()
+            logger.warning(
+                "API send failed conv=%s, browser fallback: %s",
+                conv_id[:8],
+                exc.body[:80],
+            )
+            await send_message_via_browser(
+                _cookies(account),
+                conv_id=conv_id,
+                text=text,
+                org_slug=slug,
+                locale=str(
+                    account.get("pager_locale") or _settings.pager_locale
+                ),
+            )
 
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):

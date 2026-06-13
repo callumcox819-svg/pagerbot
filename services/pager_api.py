@@ -165,17 +165,27 @@ class PagerClient:
             return f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
         return f"{self.base_url}/"
 
+    def _session_bearer(self) -> str:
+        for key, val in _clean_cookies(self.cookies).items():
+            if key.startswith("__session") and val:
+                return val
+        return ""
+
     def _api_headers(self) -> dict[str, str]:
         referer = f"{self.base_url}/"
         if self.org_slug:
             referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
-        return {
+        headers = {
             "Accept": "*/*",
             "User-Agent": UA,
             "Cookie": self._cookie_header(),
             "Referer": referer,
             "Origin": self.base_url,
         }
+        bearer = self._session_bearer()
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        return headers
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in _clean_cookies(self.cookies).items())
@@ -583,7 +593,7 @@ class PagerClient:
             return None
 
     async def take_conversation(self, conv_id: str, user_id: str) -> bool:
-        """Assign chat to operator — required before Messenger send (like UI «взяв чат»)."""
+        """Assign + take chat for operator (UI «Тех Саппорт взяв(-ла) чат»)."""
         uid = (user_id or "").strip()
         if not uid:
             return False
@@ -593,11 +603,18 @@ class PagerClient:
         attempts: list[tuple[dict[str, Any], dict[str, Any] | None]] = [
             (
                 {"userId": uid, "orgId": org_id},
+                {
+                    "responsibleUserId": uid,
+                    "conversationState": "read",
+                },
+            ),
+            (
+                {"userId": uid, "orgId": org_id},
                 {"responsibleUserId": uid},
             ),
             (
                 {"userId": uid, "orgId": org_id},
-                {"responsibleuserId": uid},
+                {"responsibleuserId": uid, "conversationState": "read"},
             ),
             ({"userId": uid}, {"responsibleUserId": uid}),
         ]
@@ -611,7 +628,7 @@ class PagerClient:
                     json_body=body,
                     referer=referer,
                 )
-                logger.debug("take conv=%s user=%s", conv_id[:8], uid[:16])
+                logger.info("take conv=%s user=%s", conv_id[:8], uid[:16])
                 return True
             except PagerAPIError as exc:
                 last_exc = exc
@@ -629,27 +646,30 @@ class PagerClient:
         *,
         conv: dict | None = None,
         author_id: str = "",
-    ) -> str:
-        """Warm session, open chat, take it — returns operator user id."""
+    ) -> tuple[str, dict[str, Any]]:
+        """Warm session, open chat, always take it — returns (user_id, conv_data)."""
         await self.warm_session()
         user_id = (
             (author_id or "").strip()
             or self.session_user_id
             or await self.resolve_session_user_id()
         )
-        conv_data = conv or {}
+        conv_data: dict[str, Any] = dict(conv or {})
         fresh = await self.open_conversation(conv_id)
         if fresh:
             conv_data = {**conv_data, **fresh}
 
-        current = str(
-            conv_data.get("responsibleuserId")
-            or (conv_data.get("responsibleUser") or {}).get("id")
-            or ""
-        ).strip()
-        if user_id and current != user_id:
+        if user_id:
             await self.take_conversation(conv_id, user_id)
-        return user_id
+            try:
+                await self.mark_conversation_read(conv_id, user_id=user_id)
+            except Exception:
+                pass
+        try:
+            await self.list_messages(conv_id, page_size=1)
+        except PagerAPIError:
+            pass
+        return user_id, conv_data
 
     async def send_message(
         self,
@@ -661,19 +681,30 @@ class PagerClient:
         author_id: str = "",
     ) -> dict[str, Any]:
         org_id = await self._ensure_org_id()
-        conv_data = conv or {}
-        user_id = await self.prepare_outbound(
+        conv_data = dict(conv or {})
+        user_id, conv_data = await self.prepare_outbound(
             conv_id, conv=conv_data, author_id=author_id
         )
         referer = self._chat_referer(conv_id)
         ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
 
-        # Browser UI sends only conversationId + text (no channelId).
         bodies: list[dict[str, Any]] = [
+            {"convId": conv_id, "text": text},
             {"conversationId": conv_id, "text": text},
         ]
+        if ch and user_id:
+            bodies.append(
+                {
+                    "conversationId": conv_id,
+                    "text": text,
+                    "channelId": ch,
+                    "authorId": user_id,
+                }
+            )
         if ch:
-            bodies.append({"conversationId": conv_id, "text": text, "channelId": ch})
+            bodies.append(
+                {"conversationId": conv_id, "text": text, "channelId": ch}
+            )
 
         last_exc: PagerAPIError | None = None
         for body in bodies:
