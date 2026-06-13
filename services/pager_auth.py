@@ -243,6 +243,65 @@ async def login_with_clerk_http(email: str, password: str) -> dict[str, str]:
         return cookies
 
 
+async def playwright_sign_in_on_page(page, email: str, password: str) -> None:
+    """Complete Pager sign-in on an existing Playwright page."""
+    await page.goto(
+        f"{PAGER_BASE}/sign-in",
+        wait_until="domcontentloaded",
+        timeout=90000,
+    )
+
+    email_input = page.locator(
+        'input[name="identifier"], input[type="email"], #identifier-field'
+    ).first
+    await email_input.wait_for(state="visible", timeout=30000)
+    await email_input.fill(email)
+
+    cont = page.get_by_role(
+        "button", name=re.compile(r"continue|продовж|далі|next", re.I)
+    )
+    if await cont.count():
+        await cont.first.click()
+    else:
+        await page.keyboard.press("Enter")
+
+    pass_input = page.locator(
+        'input[name="password"], input[type="password"], #password-field'
+    ).first
+    await pass_input.wait_for(state="visible", timeout=30000)
+    await pass_input.fill(password)
+
+    sign_in = page.get_by_role(
+        "button",
+        name=re.compile(r"sign in|sign-in|увійти|continue|продовж", re.I),
+    )
+    if await sign_in.count():
+        await sign_in.last.click()
+    else:
+        await page.keyboard.press("Enter")
+
+    try:
+        await page.wait_for_url(re.compile(r"/chats"), timeout=90000)
+    except Exception:
+        path = await page.evaluate("() => window.location.pathname")
+        if "sign-in" in path:
+            err_el = page.locator(
+                '[class*="cl-formFieldErrorText"], [class*="formFieldError"], [role="alert"]'
+            )
+            err_text = ""
+            if await err_el.count():
+                err_text = (await err_el.first.inner_text()).strip()
+            hint = err_text or "Остались на странице входа"
+            raise RuntimeError(f"{hint}. Проверьте email/пароль.")
+        await page.goto(
+            f"{PAGER_BASE}/chats",
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+
+    await page.wait_for_timeout(2000)
+
+
 async def login_with_playwright(email: str, password: str) -> dict[str, str]:
     """Headless browser login — fallback if Clerk HTTP fails."""
     from playwright.async_api import async_playwright
@@ -271,61 +330,7 @@ async def login_with_playwright(email: str, password: str) -> dict[str, str]:
         )
         page = await context.new_page()
         try:
-            await page.goto(
-                f"{PAGER_BASE}/sign-in",
-                wait_until="domcontentloaded",
-                timeout=90000,
-            )
-
-            email_input = page.locator(
-                'input[name="identifier"], input[type="email"], #identifier-field'
-            ).first
-            await email_input.wait_for(state="visible", timeout=30000)
-            await email_input.fill(email)
-
-            cont = page.get_by_role(
-                "button", name=re.compile(r"continue|продовж|далі|next", re.I)
-            )
-            if await cont.count():
-                await cont.first.click()
-            else:
-                await page.keyboard.press("Enter")
-
-            pass_input = page.locator(
-                'input[name="password"], input[type="password"], #password-field'
-            ).first
-            await pass_input.wait_for(state="visible", timeout=30000)
-            await pass_input.fill(password)
-
-            sign_in = page.get_by_role(
-                "button",
-                name=re.compile(r"sign in|sign-in|увійти|continue|продовж", re.I),
-            )
-            if await sign_in.count():
-                await sign_in.last.click()
-            else:
-                await page.keyboard.press("Enter")
-
-            try:
-                await page.wait_for_url(re.compile(r"/chats"), timeout=90000)
-            except Exception:
-                path = await page.evaluate("() => window.location.pathname")
-                if "sign-in" in path:
-                    err_el = page.locator(
-                        '[class*="cl-formFieldErrorText"], [class*="formFieldError"], [role="alert"]'
-                    )
-                    err_text = ""
-                    if await err_el.count():
-                        err_text = (await err_el.first.inner_text()).strip()
-                    hint = err_text or "Остались на странице входа"
-                    raise RuntimeError(f"{hint}. Проверьте email/пароль.")
-                await page.goto(
-                    f"{PAGER_BASE}/chats",
-                    wait_until="domcontentloaded",
-                    timeout=60000,
-                )
-
-            await page.wait_for_timeout(2000)
+            await playwright_sign_in_on_page(page, email, password)
             cookies_list = await context.cookies()
             cookies = {c["name"]: c["value"] for c in cookies_list}
             return await _validate_cookies(cookies)

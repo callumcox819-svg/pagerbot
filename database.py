@@ -66,6 +66,7 @@ async def init_db() -> None:
         for stmt in (
             "ALTER TABLE pager_accounts ADD COLUMN org_slug TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE pager_accounts ADD COLUMN pager_locale TEXT NOT NULL DEFAULT 'uk'",
+            "ALTER TABLE conversation_states ADD COLUMN send_failures INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 await db.execute(stmt)
@@ -309,9 +310,10 @@ async def clear_pauses_for_account(account_id: int) -> int:
             SET pause_scripts = 0,
                 human_takeover = 0,
                 last_processed_msg_id = '',
+                send_failures = 0,
                 updated_at = datetime('now')
             WHERE account_id = ?
-              AND (pause_scripts = 1 OR human_takeover = 1)
+              AND (pause_scripts = 1 OR human_takeover = 1 OR send_failures > 0)
             """,
             (account_id,),
         )
@@ -348,6 +350,7 @@ async def get_conversation_state(account_id: int, conversation_id: str) -> dict[
         "pause_scripts": 0,
         "extracted_game_id": "",
         "last_processed_msg_id": "",
+        "send_failures": 0,
     }
 
 
@@ -363,14 +366,16 @@ async def save_conversation_state(
             """
             INSERT INTO conversation_states (
                 account_id, conversation_id, step, human_takeover,
-                pause_scripts, extracted_game_id, last_processed_msg_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                pause_scripts, extracted_game_id, last_processed_msg_id,
+                send_failures, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(account_id, conversation_id) DO UPDATE SET
                 step = excluded.step,
                 human_takeover = excluded.human_takeover,
                 pause_scripts = excluded.pause_scripts,
                 extracted_game_id = excluded.extracted_game_id,
                 last_processed_msg_id = excluded.last_processed_msg_id,
+                send_failures = excluded.send_failures,
                 updated_at = datetime('now')
             """,
             (
@@ -381,6 +386,7 @@ async def save_conversation_state(
                 st.get("pause_scripts", 0),
                 st.get("extracted_game_id", ""),
                 st.get("last_processed_msg_id", ""),
+                int(st.get("send_failures") or 0),
             ),
         )
         await db.commit()

@@ -96,6 +96,8 @@ async def _handle_conversation(
     state = await db.get_conversation_state(account_id, conv_id)
     if state.get("human_takeover") or state.get("pause_scripts"):
         return "paused"
+    if int(state.get("send_failures") or 0) >= 5:
+        return "paused"
 
     messages = await client.list_messages(conv_id, page_size=80)
     # API returns newest first — work chronologically
@@ -195,6 +197,10 @@ async def _handle_conversation(
             org_slug=slug,
         )
         locale = str(account.get("pager_locale") or _settings.pager_locale)
+        email = str(account.get("email") or "").strip()
+        pwd_enc = str(account.get("password_enc") or "").strip()
+        password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
+        use_login = bool(email and password)
         await client.warm_session()
 
         if pager_user_id:
@@ -205,18 +211,6 @@ async def _handle_conversation(
                     '{"error":"take chat failed — operator not assigned"}',
                 )
 
-        async def _browser_send(cookie_dict: dict[str, str]) -> None:
-            await send_messages_via_browser_ui(
-                cookie_dict,
-                conv_id=conv_id,
-                texts=texts,
-                org_id=oid,
-                org_slug=slug,
-                user_id=pager_user_id,
-                locale=locale,
-                skip_take=True,
-            )
-
         send_cookies = {
             k: v
             for k, v in client.cookies.items()
@@ -224,33 +218,23 @@ async def _handle_conversation(
         }
         if not send_cookies:
             send_cookies = _cookies(account)
-        try:
-            await _browser_send(send_cookies)
-        except Exception as exc:
-            logger.warning(
-                "browser send failed conv=%s: %s — refreshing session",
-                conv_id[:8],
-                exc,
-            )
-            fresh = await refresh_pager_session(account)
-            if not fresh:
-                raise
-            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
-            if acc:
-                account.update(acc)
-            client = PagerClient(
-                _settings.pager_base_url,
-                fresh,
-                org_id=oid,
-                org_slug=slug,
-                locale=locale,
-                org_id_fallback=oid,
-                session_user_id=pager_user_id,
-            )
-            await client.warm_session()
-            if pager_user_id:
-                await client.take_conversation(conv_id, pager_user_id)
-            await _browser_send(fresh)
+
+        await send_messages_via_browser_ui(
+            None if use_login else send_cookies,
+            conv_id=conv_id,
+            texts=texts,
+            org_id=oid,
+            org_slug=slug,
+            user_id=pager_user_id,
+            locale=locale,
+            skip_take=True,
+            email=email,
+            password=password,
+        )
+
+        await db.save_conversation_state(
+            account_id, conv_id, send_failures=0
+        )
 
         logger.info(
             "browser sent conv=%s count=%s",
@@ -578,7 +562,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 5
+        max_replies = 1
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
@@ -598,12 +582,22 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                     conv_id,
                     exc,
                 )
-            except Exception:
-                logger.exception(
-                    "conv failed account=%s conv=%s",
+            except Exception as exc:
+                logger.warning(
+                    "conv failed account=%s conv=%s: %s",
                     account.get("id"),
                     conv_id,
+                    exc,
                 )
+                if conv_id:
+                    st = await db.get_conversation_state(account_id, conv_id)
+                    fails = int(st.get("send_failures") or 0) + 1
+                    fields: dict[str, Any] = {"send_failures": fails}
+                    if fails >= 5:
+                        fields["pause_scripts"] = 1
+                    await db.save_conversation_state(
+                        account_id, conv_id, **fields
+                    )
 
         logger.info(
             "Worker account=%s: org=%s channels=%s queue=%s inbound=%s "
