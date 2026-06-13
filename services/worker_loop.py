@@ -15,7 +15,7 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
-from services.pager_browser_send import send_messages_via_browser_ui
+from services.pager_browser_send import send_batch_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -31,6 +31,100 @@ _settings = load_settings()
 _secrets = Secrets(_settings.encryption_key)
 
 _worker_task: asyncio.Task | None = None
+
+
+class _CycleSendBuffer:
+    """Queue outbound texts for one Playwright login per worker cycle."""
+
+    def __init__(
+        self,
+        account: dict[str, Any],
+        *,
+        org_id: str,
+        org_slug: str,
+        locale: str,
+        pager_user_id: str,
+        client: PagerClient,
+    ) -> None:
+        self.account = account
+        self.org_id = org_id
+        self.org_slug = org_slug
+        self.locale = locale
+        self.pager_user_id = pager_user_id
+        self.client = client
+        self._jobs: dict[str, list[str]] = {}
+        self._commits: list[tuple[str, dict[str, Any]]] = []
+
+    def queue_send(self, conv_id: str, texts: list[str]) -> None:
+        bodies = [t.strip() for t in texts if (t or "").strip()]
+        if not bodies:
+            return
+        bucket = self._jobs.setdefault(conv_id, [])
+        bucket.extend(bodies)
+
+    def queue_commit(self, conv_id: str, **kwargs: Any) -> None:
+        for i, (cid, fields) in enumerate(self._commits):
+            if cid == conv_id:
+                self._commits[i] = (cid, {**fields, **kwargs})
+                return
+        self._commits.append((conv_id, dict(kwargs)))
+
+    async def flush(self) -> set[str]:
+        if not self._jobs:
+            return set()
+
+        email = str(self.account.get("email") or "").strip()
+        pwd_enc = str(self.account.get("password_enc") or "").strip()
+        password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
+        if not email or not password:
+            raise RuntimeError(
+                "Account email/password required — reconnect Pager in Telegram bot"
+            )
+
+        jobs = list(self._jobs.items())
+        timeout = 90.0 + 50.0 * len(jobs)
+        logger.info(
+            "browser batch flush jobs=%s texts=%s",
+            len(jobs),
+            sum(len(t) for _, t in jobs),
+        )
+        ok = await asyncio.wait_for(
+            send_batch_via_browser(
+                jobs,
+                org_id=self.org_id,
+                org_slug=self.org_slug,
+                user_id=self.pager_user_id,
+                locale=self.locale,
+                email=email,
+                password=password,
+            ),
+            timeout=timeout,
+        )
+
+        account_id = int(self.account["id"])
+        uid = self.pager_user_id
+        for conv_id, fields in self._commits:
+            if conv_id in ok:
+                try:
+                    await self.client.mark_conversation_read(
+                        conv_id, user_id=uid
+                    )
+                except Exception:
+                    pass
+                await db.save_conversation_state(
+                    account_id, conv_id, send_failures=0, **fields
+                )
+            else:
+                st = await db.get_conversation_state(account_id, conv_id)
+                fails = int(st.get("send_failures") or 0) + 1
+                patch: dict[str, Any] = {"send_failures": fails}
+                if fails >= 5:
+                    patch["pause_scripts"] = 1
+                await db.save_conversation_state(account_id, conv_id, **patch)
+
+        self._jobs.clear()
+        self._commits.clear()
+        return ok
 
 
 def _cookies(account: dict[str, Any]) -> dict[str, str]:
@@ -74,6 +168,7 @@ async def _handle_conversation(
     account: dict[str, Any],
     conv: dict[str, Any],
     client: PagerClient,
+    send_buf: _CycleSendBuffer,
 ) -> bool | str:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
@@ -186,107 +281,10 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def _outbound_send(texts: list[str]) -> None:
-        nonlocal client
-        slug = str(
-            account.get("org_slug") or _settings.pager_org_slug or ""
-        ).strip()
-        oid = resolve_pager_org_id(
-            str(client.org_id or ""),
-            str(account.get("org_id") or ""),
-            _settings.pager_org_id,
-            org_slug=slug,
-        )
-        locale = str(account.get("pager_locale") or _settings.pager_locale)
-
-        async def _rebuild_client(cookies: dict[str, str]) -> PagerClient:
-            return PagerClient(
-                _settings.pager_base_url,
-                cookies,
-                org_id=oid,
-                org_slug=slug,
-                locale=locale,
-                org_id_fallback=oid,
-                session_user_id=pager_user_id,
-            )
-
-        for i, body in enumerate(texts):
-            if i:
-                await asyncio.sleep(0.8)
-            sent = False
-            last_exc: Exception | None = None
-            for attempt in range(2):
-                try:
-                    await client.warm_session()
-                    await client.send_operator_message(
-                        conv_id,
-                        body,
-                        conv=conv,
-                        author_id=pager_user_id,
-                    )
-                    sent = True
-                    break
-                except PagerAPIError as exc:
-                    last_exc = exc
-                    body_l = (exc.body or "").lower()
-                    retry = is_session_error(exc) or "organization id required" in body_l
-                    if retry and attempt == 0:
-                        logger.warning(
-                            "operator send session stale conv=%s — refresh",
-                            conv_id[:8],
-                        )
-                        fresh = await refresh_pager_session(account)
-                        if fresh:
-                            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
-                            if acc:
-                                account.update(acc)
-                            client = await _rebuild_client(fresh)
-                            continue
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    break
-
-            if not sent:
-                logger.warning(
-                    "REST send failed conv=%s, browser fallback: %s",
-                    conv_id[:8],
-                    last_exc,
-                )
-                email = str(account.get("email") or "").strip()
-                pwd_enc = str(account.get("password_enc") or "").strip()
-                password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
-                cookies = {
-                    k: v
-                    for k, v in client.cookies.items()
-                    if not k.startswith("_pager_") and v
-                }
-                await asyncio.wait_for(
-                    send_messages_via_browser_ui(
-                        cookies,
-                        conv_id=conv_id,
-                        texts=[body],
-                        org_id=oid,
-                        org_slug=slug,
-                        user_id=pager_user_id,
-                        locale=locale,
-                        skip_take=True,
-                        email=email,
-                        password=password,
-                    ),
-                    timeout=90.0,
-                )
-
-        await db.save_conversation_state(
-            account_id, conv_id, send_failures=0
-        )
-        logger.info(
-            "sent conv=%s count=%s",
-            conv_id[:8],
-            len(texts),
-        )
+        send_buf.queue_send(conv_id, texts)
 
     async def send(text: str) -> None:
-        await _outbound_send([text])
+        send_buf.queue_send(conv_id, [text])
 
     # Waiting for game ID / deposit photo — ignore short acks once operator replied.
     if (
@@ -339,8 +337,7 @@ async def _handle_conversation(
                     await client.patch_status(
                         conv_id, ZM_STATUSES["registration"], pager_user_id
                     )
-                await db.save_conversation_state(
-                    account_id,
+                send_buf.queue_commit(
                     conv_id,
                     step=7,
                     extracted_game_id=extracted,
@@ -401,8 +398,8 @@ async def _handle_conversation(
                 await client.patch_status(
                     conv_id, ZM_STATUSES["deps_pending"], pager_user_id
                 )
-            await db.save_conversation_state(
-                account_id, conv_id, step=9, last_processed_msg_id=msg_id
+            send_buf.queue_commit(
+                conv_id, step=9, last_processed_msg_id=msg_id
             )
             return True
 
@@ -415,8 +412,7 @@ async def _handle_conversation(
                 await client.patch_status(
                     conv_id, ZM_STATUSES["registration"], pager_user_id
                 )
-            await db.save_conversation_state(
-                account_id,
+            send_buf.queue_commit(
                 conv_id,
                 step=7,
                 extracted_game_id=gid,
@@ -515,12 +511,7 @@ async def _handle_conversation(
         new_step = max(new_step, 2)
 
     if actions_sent:
-        try:
-            await client.mark_conversation_read(conv_id, user_id=pager_user_id)
-        except Exception:
-            pass
-        await db.save_conversation_state(
-            account_id,
+        send_buf.queue_commit(
             conv_id,
             step=new_step,
             last_processed_msg_id=msg_id,
@@ -547,6 +538,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         if enabled is None:
             return
         if not enabled:
+            logger.warning(
+                "Worker account=%s: no enabled channels — enable in Telegram bot",
+                account.get("id"),
+            )
             return
 
         org_slug = str(
@@ -605,14 +600,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
         ]
 
-        no_status_queue = [c for c in inbound_convs if is_no_status(c)]
-        if no_status_queue:
+        no_status_count = sum(1 for c in inbound_convs if is_no_status(c))
+        if inbound_convs:
             logger.info(
-                "Worker account=%s: focus no_status=%s (skip funnel retries)",
+                "Worker account=%s: inbound=%s no_status=%s funnel=%s",
                 account.get("id"),
-                len(no_status_queue),
+                len(inbound_convs),
+                no_status_count,
+                len(inbound_convs) - no_status_count,
             )
-            inbound_convs = no_status_queue
 
         async def _priority(conv: dict) -> tuple[int, str]:
             cid = str(conv.get("id") or "")
@@ -635,9 +631,22 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             key=lambda c: str(c.get("lastMessageAt") or ""), reverse=True
         )
         inbound = len(inbound_convs)
-        handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 3
+        max_replies = 5
+        pager_user_id = resolve_operator_user_id(
+            _settings.pager_user_id,
+            account.get("pager_user_id"),
+            org_slug=org_slug,
+        )
+        send_buf = _CycleSendBuffer(
+            account,
+            org_id=org_id,
+            org_slug=org_slug,
+            locale=str(account.get("pager_locale") or _settings.pager_locale),
+            pager_user_id=pager_user_id,
+            client=client,
+        )
+        planned = 0
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:
@@ -646,6 +655,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                     account,
                     conv,
                     client,
+                    send_buf,
                 )
                 if result == "paused":
                     skipped["paused"] += 1
@@ -654,7 +664,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 elif result == "no_script":
                     skipped["no_script"] += 1
                 elif result:
-                    handled += 1
+                    planned += 1
             except PagerAPIError as exc:
                 logger.warning(
                     "conv API error account=%s conv=%s: %s",
@@ -662,44 +672,46 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                     conv_id,
                     exc,
                 )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "browser timeout account=%s conv=%s",
-                    account.get("id"),
-                    conv_id,
-                )
-                if conv_id:
-                    st = await db.get_conversation_state(account_id, conv_id)
-                    fails = int(st.get("send_failures") or 0) + 1
-                    await db.save_conversation_state(
-                        account_id, conv_id, send_failures=fails
-                    )
             except Exception as exc:
                 logger.warning(
-                    "conv failed account=%s conv=%s: %s",
+                    "conv plan failed account=%s conv=%s: %s",
                     account.get("id"),
                     conv_id,
                     exc,
                 )
-                if conv_id:
-                    st = await db.get_conversation_state(account_id, conv_id)
-                    fails = int(st.get("send_failures") or 0) + 1
-                    fields: dict[str, Any] = {"send_failures": fails}
-                    if fails >= 5:
-                        fields["pause_scripts"] = 1
-                    await db.save_conversation_state(
-                        account_id, conv_id, **fields
-                    )
+
+        delivered = 0
+        try:
+            ok_ids = await send_buf.flush()
+            delivered = len(ok_ids)
+            if ok_ids:
+                logger.info(
+                    "Worker account=%s delivered convs=%s",
+                    account.get("id"),
+                    [c[:8] for c in ok_ids],
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "browser batch timeout account=%s",
+                account.get("id"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "browser batch failed account=%s: %s",
+                account.get("id"),
+                exc,
+            )
 
         logger.info(
             "Worker account=%s: org=%s channels=%s queue=%s inbound=%s "
-            "processed=%s skip=%s",
+            "planned=%s delivered=%s skip=%s",
             account.get("id"),
             (client.org_id or "")[:16],
             len(enabled),
             len(convs),
             inbound,
-            handled,
+            planned,
+            delivered,
             skipped,
         )
 

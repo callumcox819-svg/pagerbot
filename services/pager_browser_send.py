@@ -443,6 +443,12 @@ async def _browser_prepare_outbound(
         raise RuntimeError(
             f"Browser session stale preparing conv={conv_id[:8]}"
         )
+    if not result.get("responsibleOk"):
+        rid = str(result.get("responsibleId") or "")
+        raise RuntimeError(
+            f"Take chat not verified conv={conv_id[:8]} "
+            f"want={uid[:16]} got={rid[:16] or 'none'}"
+        )
     ch = str(result.get("channelId") or "").strip()
     logger.info(
         "browser prepared conv=%s patch=%s resp=%s channel=%s",
@@ -840,8 +846,10 @@ async def send_messages_via_browser_ui(
             if use_login:
                 logger.info("browser login for send conv=%s", conv_id[:8])
                 await playwright_sign_in_on_page(page, email.strip(), password)
-                org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
-                await page.goto(org_inbox, wait_until="domcontentloaded", timeout=60000)
+                chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
+                await page.goto(
+                    chat_url, wait_until="domcontentloaded", timeout=60000
+                )
                 await page.wait_for_timeout(1500)
             else:
                 await context.add_cookies(
@@ -964,6 +972,14 @@ async def send_batch_via_browser(
                             "batch conv=%s composer not ready — trying send",
                             conv_id[:8],
                         )
+                    chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
+                    await _browser_take_and_verify(
+                        page,
+                        conv_id=conv_id,
+                        org_id=oid,
+                        user_id=uid,
+                        chat_url=chat_url,
+                    )
                     await _browser_prepare_outbound(
                         page, conv_id=conv_id, org_id=oid, user_id=uid
                     )
