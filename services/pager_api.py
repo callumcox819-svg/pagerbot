@@ -304,6 +304,9 @@ class PagerClient:
         self,
         page: int = 1,
         page_size: int = 30,
+        *,
+        channel_id: str = "",
+        status_id: str | None = None,
     ) -> list[dict]:
         org_id = await self._ensure_org_id()
         params: dict[str, Any] = {
@@ -311,8 +314,66 @@ class PagerClient:
             "pageSize": page_size,
             "page": page,
         }
+        if channel_id:
+            params["channelId"] = channel_id
+        if status_id is not None:
+            params["statusId"] = status_id
         data = await self._request("GET", "/api/conversation", params=params)
         return data if isinstance(data, list) else []
+
+    async def collect_conversations(
+        self,
+        enabled_channel_ids: set[str],
+        *,
+        max_pages: int = 5,
+    ) -> list[dict]:
+        """Chats for enabled channels: «Без статусу» + active funnel folders."""
+        from services.status_ids import ACTIVE_FUNNEL_STATUS_IDS, should_process_conversation
+
+        seen: dict[str, dict] = {}
+
+        def _add(convs: list[dict]) -> None:
+            for conv in convs:
+                ch = str(conv.get("channelId") or "")
+                if ch not in enabled_channel_ids:
+                    continue
+                if not should_process_conversation(conv):
+                    continue
+                cid = str(conv.get("id") or "")
+                if cid:
+                    seen[cid] = conv
+
+        for channel_id in enabled_channel_ids:
+            for page in range(1, max_pages + 1):
+                try:
+                    convs = await self.list_conversations(
+                        page=page,
+                        page_size=50,
+                        channel_id=channel_id,
+                    )
+                except PagerAPIError:
+                    convs = await self.list_conversations(page=page, page_size=50)
+                    convs = [
+                        c
+                        for c in convs
+                        if str(c.get("channelId") or "") == channel_id
+                    ]
+                if not convs:
+                    break
+                _add(convs)
+
+        for status_id in ACTIVE_FUNNEL_STATUS_IDS:
+            for page in range(1, 3):
+                convs = await self.list_conversations(
+                    page=page,
+                    page_size=50,
+                    status_id=status_id,
+                )
+                if not convs:
+                    break
+                _add(convs)
+
+        return list(seen.values())
 
     async def discover_org_slug(self) -> str:
         if self.org_slug:

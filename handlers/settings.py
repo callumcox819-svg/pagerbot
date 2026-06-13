@@ -74,7 +74,11 @@ async def cmd_status(message: Message) -> None:
         + f"Paused: {bool(acc.get('paused'))}\n"
         f"Auto-reply: {bool(acc.get('auto_reply'))}\n"
         f"Escalation chat: {acc.get('escalation_chat_id') or acc.get('tg_user_id')}\n\n"
-        "Бот обрабатывает только включённые каналы (не вкладку «Всі» целиком)."
+        "Обрабатывает канал Kelvin (и др. включённые):\n"
+        "• «Без статусу» — новые лиды, шлёт intro/скрипты\n"
+        "• Воронка — В процесі / Чекаю ID / Реєстрація\n"
+        "Не трогает: Завершено, Депи не дійшли, Скасовано.\n"
+        "/reset_pauses — сбросить паузу после эскалаций."
     )
 
 

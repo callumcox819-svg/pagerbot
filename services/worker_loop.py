@@ -20,7 +20,7 @@ from services.script_engine import (
     load_script,
     scripts_to_send_after_intent,
 )
-from services.status_ids import EXCELLENT, ZM_STATUSES, should_skip_processing
+from services.status_ids import EXCELLENT, ZM_STATUSES, should_process_conversation
 from services.telegram_notify import notify_escalation
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,7 @@ async def _handle_conversation(
     if not enabled or channel_id not in enabled:
         return False
 
-    if should_skip_processing(conv):
+    if not should_process_conversation(conv):
         return False
 
     state = await db.get_conversation_state(account_id, conv_id)
@@ -321,38 +321,31 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             org_id_fallback=org_id,
         )
 
-        seen: set[str] = set()
-        inbound = 0
+        convs = await client.collect_conversations(enabled, max_pages=5)
+        inbound = sum(
+            1
+            for c in convs
+            if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
+        )
         handled = 0
-        for page in (1, 2, 3, 4):
-            convs = await client.list_conversations(page=page, page_size=50)
-            if not convs:
-                break
-            for conv in convs:
-                if str(conv.get("channelId") or "") not in enabled:
-                    continue
-                conv_id = str(conv.get("id") or "")
-                if not conv_id or conv_id in seen:
-                    continue
-                seen.add(conv_id)
-                if _is_incoming_direction(str(conv.get("lastMessageDirection") or "")):
-                    inbound += 1
-                try:
-                    if await _handle_conversation(bot, account, conv, client):
-                        handled += 1
-                except Exception:
-                    logger.exception(
-                        "conv failed account=%s conv=%s",
-                        account.get("id"),
-                        conv_id,
-                    )
+        for conv in convs:
+            conv_id = str(conv.get("id") or "")
+            try:
+                if await _handle_conversation(bot, account, conv, client):
+                    handled += 1
+            except Exception:
+                logger.exception(
+                    "conv failed account=%s conv=%s",
+                    account.get("id"),
+                    conv_id,
+                )
 
         logger.info(
-            "Worker account=%s: org=%s channels=%s scanned=%s inbound=%s processed=%s",
+            "Worker account=%s: org=%s channels=%s queue=%s inbound=%s processed=%s",
             account.get("id"),
             (client.org_id or "")[:16],
             len(enabled),
-            len(seen),
+            len(convs),
             inbound,
             handled,
         )

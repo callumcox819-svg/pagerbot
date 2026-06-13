@@ -11,9 +11,18 @@ ZM_STATUSES = {
     "deps_pending": "da62404d-c4f2-4281-bcfe-9ed5d2cbf593",  # Депи не дійшли
 }
 
+# Funnel folders where bot continues scripts (after «Без статусу»).
+ACTIVE_FUNNEL_STATUS_IDS: frozenset[str] = frozenset(
+    {
+        ZM_STATUSES["in_progress"],
+        ZM_STATUSES["wait_id"],
+        ZM_STATUSES["registration"],
+    }
+)
+
 EXCELLENT = "Excellent 👍"
 
-# Do not auto-reply in these folders; patch_status INTO them is still allowed.
+# Terminal folders — do not auto-reply; patch_status INTO them is still allowed.
 SKIP_PROCESSING_STATUS_IDS: frozenset[str] = frozenset(
     {
         ZM_STATUSES["deps_pending"],
@@ -30,13 +39,36 @@ _SKIP_NAME_FRAGMENTS = (
     "заверш",
     "completed",
     "finished",
+    "скасован",
+    "cancelled",
+    "думают",
+    "думають",
+    "немає грошей",
 )
 
 
+def is_no_status(conv: dict) -> bool:
+    """«Без статусу» — new / unprocessed leads."""
+    if conv.get("statusId") in (None, ""):
+        return True
+    name = ((conv.get("status") or {}).get("name") or "").strip().lower()
+    return "без статус" in name or name in ("", "—", "-")
+
+
 def should_skip_processing(conv: dict) -> bool:
-    """Skip chats already in terminal / handoff folders."""
+    """Skip chats in terminal / handoff folders."""
     status_id = str(conv.get("statusId") or "").strip()
     if status_id and status_id in SKIP_PROCESSING_STATUS_IDS:
         return True
     name = ((conv.get("status") or {}).get("name") or "").strip().lower()
     return any(frag in name for frag in _SKIP_NAME_FRAGMENTS)
+
+
+def should_process_conversation(conv: dict) -> bool:
+    """Process Kelvin (etc.) chats in «Без статусу» + active funnel folders."""
+    if should_skip_processing(conv):
+        return False
+    if is_no_status(conv):
+        return True
+    status_id = str(conv.get("statusId") or "").strip()
+    return status_id in ACTIVE_FUNNEL_STATUS_IDS
