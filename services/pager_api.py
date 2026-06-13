@@ -684,11 +684,34 @@ class PagerClient:
                 await self.mark_conversation_read(conv_id, user_id=user_id)
             except Exception:
                 pass
+        await self._fetch_conv_chat_page(conv_id)
         try:
             await self.list_messages(conv_id, page_size=1)
         except PagerAPIError:
             pass
         return user_id, conv_data
+
+    async def _fetch_conv_chat_page(self, conv_id: str) -> None:
+        """Open chat URL — same context as browser UI before POST /api/message."""
+        if not self.org_slug or not conv_id:
+            return
+        path = f"/{self.locale}/{self.org_slug}/chats/{conv_id}"
+        headers = {
+            "Accept": "text/html",
+            "Cookie": self._cookie_header(),
+            "Referer": self._chat_referer(),
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.base_url}{path}",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=45),
+                    allow_redirects=True,
+                ) as resp:
+                    await resp.text()
+        except Exception as exc:
+            logger.debug("fetch conv chat page %s: %s", conv_id[:8], exc)
 
     async def send_message(
         self,
@@ -710,26 +733,24 @@ class PagerClient:
             nested = conv_data.get("channel")
             if isinstance(nested, dict):
                 ch = str(nested.get("id") or "").strip()
-        if not ch:
-            raise PagerAPIError(
-                400,
-                json.dumps({"error": "channelId missing", "conv": conv_id[:8]}),
-            )
-
-        # Pager requires channelId — without it: prisma channel.findUnique id undefined.
+        # Operator UI sends {conversationId, text} after take — channelId in body
+        # often yields imageUrl 500 or page-identity (authorId=null) duplicates.
         bodies: list[dict[str, Any]] = [
-            {"conversationId": conv_id, "text": text, "channelId": ch},
+            {"conversationId": conv_id, "text": text},
         ]
-        if user_id:
+        if ch:
             bodies.append(
-                {
-                    "conversationId": conv_id,
-                    "text": text,
-                    "channelId": ch,
-                    "authorId": user_id,
-                }
+                {"conversationId": conv_id, "text": text, "channelId": ch},
             )
-        bodies.append({"convId": conv_id, "text": text, "channelId": ch})
+            if user_id:
+                bodies.append(
+                    {
+                        "conversationId": conv_id,
+                        "text": text,
+                        "channelId": ch,
+                        "authorId": user_id,
+                    }
+                )
 
         params: dict[str, Any] = {"orgId": org_id}
         if user_id:
@@ -738,13 +759,12 @@ class PagerClient:
         logger.info(
             "send conv=%s channel=%s user=%s chars=%s",
             conv_id[:8],
-            ch[:8],
+            (ch or "?")[:8],
             (user_id or "")[:16],
             len(text),
         )
 
         last_exc: PagerAPIError | None = None
-        last_result: dict[str, Any] | None = None
         for body in bodies:
             try:
                 result = await self._request(
@@ -756,7 +776,6 @@ class PagerClient:
                 )
                 if not isinstance(result, dict):
                     raise PagerAPIError(502, '{"error":"empty message response"}')
-                last_result = result
                 if message_accepted(result, user_id):
                     logger.info(
                         "Pager message sent conv=%s user=%s chars=%s fb=%s",
@@ -766,6 +785,24 @@ class PagerClient:
                         str(result.get("facebookMessageId") or "")[:12],
                     )
                     return result
+                if message_delivered(result):
+                    author = str(result.get("authorId") or "null")
+                    logger.error(
+                        "send page-identity conv=%s author=%s fb=%s — not retrying",
+                        conv_id[:8],
+                        author[:16],
+                        str(result.get("facebookMessageId") or "")[:12],
+                    )
+                    raise PagerAPIError(
+                        502,
+                        json.dumps(
+                            {
+                                "error": "Delivered as Facebook page, not operator",
+                                "authorId": author,
+                                "id": str(result.get("id") or ""),
+                            }
+                        ),
+                    )
                 msg_id = str(result.get("id") or "")
                 author = str(result.get("authorId") or "null")
                 raise PagerAPIError(
@@ -780,18 +817,18 @@ class PagerClient:
                     ),
                 )
             except PagerAPIError as exc:
+                if "Facebook page" in (exc.body or ""):
+                    raise
                 last_exc = exc
                 logger.info(
                     "send attempt conv=%s ch=%s body=%s -> %s",
                     conv_id[:8],
-                    ch[:8],
+                    (ch or "?")[:8],
                     sorted(body.keys()),
                     exc.body[:160],
                 )
         if last_exc:
             raise last_exc
-        if last_result:
-            return last_result
         raise PagerAPIError(400, '{"error":"send_message failed"}')
 
     async def mark_conversation_read(

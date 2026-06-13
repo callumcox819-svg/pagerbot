@@ -15,6 +15,7 @@ from services.ai_intent import Intent, classify, needs_human
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
+from services.pager_browser_send import send_messages_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
@@ -161,7 +162,7 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
-    async def _rest_send(texts: list[str]) -> None:
+    async def _outbound_send(texts: list[str]) -> None:
         slug = str(
             account.get("org_slug") or _settings.pager_org_slug or ""
         ).strip()
@@ -171,9 +172,22 @@ async def _handle_conversation(
             _settings.pager_org_id,
             org_slug=slug,
         )
+        locale = str(account.get("pager_locale") or _settings.pager_locale)
         active = client
+        cookies = _cookies(account)
 
-        async def _send_one(body: str) -> None:
+        async def _browser_send() -> None:
+            await send_messages_via_browser(
+                cookies,
+                conv_id=conv_id,
+                texts=texts,
+                org_id=oid,
+                org_slug=slug,
+                user_id=pager_user_id,
+                locale=locale,
+            )
+
+        async def _rest_send_one(body: str) -> None:
             nonlocal active
             try:
                 await active.send_message(
@@ -194,9 +208,7 @@ async def _handle_conversation(
                     fresh,
                     org_id=oid,
                     org_slug=slug,
-                    locale=str(
-                        account.get("pager_locale") or _settings.pager_locale
-                    ),
+                    locale=locale,
                     org_id_fallback=oid,
                     session_user_id=pager_user_id,
                 )
@@ -209,13 +221,47 @@ async def _handle_conversation(
                     author_id=pager_user_id,
                 )
 
+        try:
+            await _browser_send()
+            logger.info(
+                "browser batch sent conv=%s count=%s",
+                conv_id[:8],
+                len(texts),
+            )
+            return
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "sign-in" in msg or "session expired" in msg:
+                fresh = await refresh_pager_session(account)
+                if fresh:
+                    await send_messages_via_browser(
+                        fresh,
+                        conv_id=conv_id,
+                        texts=texts,
+                        org_id=oid,
+                        org_slug=slug,
+                        user_id=pager_user_id,
+                        locale=locale,
+                    )
+                    logger.info(
+                        "browser batch sent conv=%s count=%s (after refresh)",
+                        conv_id[:8],
+                        len(texts),
+                    )
+                    return
+            logger.warning(
+                "browser send failed conv=%s: %s — REST fallback",
+                conv_id[:8],
+                exc,
+            )
+
         for i, body in enumerate(texts):
             if i:
                 await asyncio.sleep(1.0)
-            await _send_one(body)
+            await _rest_send_one(body)
 
     async def send(text: str) -> None:
-        await _rest_send([text])
+        await _outbound_send([text])
 
     # Waiting for game ID / deposit photo — ignore short acks, don't re-escalate.
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION, Intent.POSITIVE):
@@ -258,7 +304,7 @@ async def _handle_conversation(
 
         if step >= 5 and step < 7:
             if extracted:
-                await _rest_send([EXCELLENT, load_script(geo, "06_deposit")])
+                await _outbound_send([EXCELLENT, load_script(geo, "06_deposit")])
                 if pager_user_id:
                     await client.patch_status(
                         conv_id, ZM_STATUSES["registration"], pager_user_id
@@ -314,7 +360,7 @@ async def _handle_conversation(
                 conv_id=conv_id,
                 **_escalation_link_kwargs(account, channel_id),
             )
-            await _rest_send(
+            await _outbound_send(
                 [
                     EXCELLENT,
                     load_script(geo, "08_tg_invite"),
@@ -334,7 +380,7 @@ async def _handle_conversation(
     if intent == Intent.GAME_ID_TEXT:
         gid = extract_id_from_text(text)
         if gid and step >= 5 and step < 7:
-            await _rest_send([EXCELLENT, load_script(geo, "06_deposit")])
+            await _outbound_send([EXCELLENT, load_script(geo, "06_deposit")])
             if pager_user_id:
                 await client.patch_status(
                     conv_id, ZM_STATUSES["registration"], pager_user_id
@@ -380,7 +426,7 @@ async def _handle_conversation(
         bodies.append(body)
 
     if bodies:
-        await _rest_send(bodies)
+        await _outbound_send(bodies)
         actions_sent = True
 
     new_step = step
