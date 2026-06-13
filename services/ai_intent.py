@@ -20,7 +20,8 @@ class Intent(str, Enum):
 
 _INTERESTED = re.compile(
     r"\b(interested|interest|312|teach me|need help|i am interested|"
-    r"tell me more|am interested|kindly explain|explain it)\b",
+    r"tell me more|am interested|kindly explain|explain it|"
+    r"your help|help me|go ahead|hi go ahead)\b",
     re.I,
 )
 _ACK = re.compile(

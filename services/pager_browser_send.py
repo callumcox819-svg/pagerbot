@@ -203,8 +203,9 @@ async def _browser_take_and_verify(
         )
         return
 
-    raise RuntimeError(
-        f"Chat not taken for {uid[:16]} (conv={conv_id[:8]})"
+    logger.warning(
+        "browser take unverified conv=%s — proceeding after PATCH attempt",
+        conv_id[:8],
     )
 
 
@@ -400,6 +401,7 @@ async def _run_browser_session(
     org_slug: str,
     user_id: str,
     locale: str,
+    skip_take: bool = False,
 ) -> None:
     from playwright.async_api import async_playwright
 
@@ -443,13 +445,16 @@ async def _run_browser_session(
                 raise RuntimeError("Browser session expired (redirected to sign-in)")
 
             await _verify_logged_in_operator(page, uid)
-            await _browser_take_and_verify(
-                page,
-                conv_id=conv_id,
-                org_id=oid,
-                user_id=uid,
-                chat_url=chat_url,
-            )
+            if skip_take:
+                logger.info("browser skip take conv=%s (REST already took)", conv_id[:8])
+            else:
+                await _browser_take_and_verify(
+                    page,
+                    conv_id=conv_id,
+                    org_id=oid,
+                    user_id=uid,
+                    chat_url=chat_url,
+                )
             await page.wait_for_timeout(1500)
 
             for i, body in enumerate(texts):
@@ -497,6 +502,7 @@ async def send_messages_via_browser(
     org_slug: str,
     user_id: str = "",
     locale: str = "uk",
+    skip_take: bool = False,
 ) -> dict[str, str]:
     """Take chat once, send multiple messages in one browser session."""
     bodies = [t.strip() for t in texts if (t or "").strip()]
@@ -510,5 +516,6 @@ async def send_messages_via_browser(
         org_slug=org_slug,
         user_id=user_id,
         locale=locale,
+        skip_take=skip_take,
     )
     return {"ok": "true", "count": str(len(bodies))}

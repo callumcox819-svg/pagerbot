@@ -152,7 +152,10 @@ async def _handle_conversation(
     has_image = bool(attachments)
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
-    step = max(int(state.get("step") or 0), infer_step_from_history(msg_only))
+    step = max(
+        int(state.get("step") or 0),
+        infer_step_from_history(msg_only, pager_user_id),
+    )
     intent = classify(text, has_image=has_image, has_ad=has_ad)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
@@ -176,6 +179,7 @@ async def _handle_conversation(
         locale = str(account.get("pager_locale") or _settings.pager_locale)
 
         async def _browser_batch(cookies: dict[str, str]) -> None:
+            await client.take_conversation(conv_id, pager_user_id)
             await send_messages_via_browser(
                 cookies,
                 conv_id=conv_id,
@@ -184,6 +188,7 @@ async def _handle_conversation(
                 org_slug=slug,
                 user_id=pager_user_id,
                 locale=locale,
+                skip_take=True,
             )
 
         cookies = _cookies(account)
@@ -191,13 +196,40 @@ async def _handle_conversation(
             await _browser_batch(cookies)
         except Exception as exc:
             msg = str(exc).lower()
-            if any(
+            retryable = any(
                 k in msg
-                for k in ("sign-in", "session expired", "session", "wrong pager login")
-            ):
+                for k in (
+                    "sign-in",
+                    "session expired",
+                    "session",
+                    "wrong pager login",
+                    "chat not taken",
+                    "not delivered",
+                )
+            )
+            if retryable:
                 fresh = await refresh_pager_session(account)
                 if fresh:
-                    await _browser_batch(fresh)
+                    fresh_client = PagerClient(
+                        _settings.pager_base_url,
+                        fresh,
+                        org_id=oid,
+                        org_slug=slug,
+                        locale=locale,
+                        org_id_fallback=oid,
+                        session_user_id=pager_user_id,
+                    )
+                    await fresh_client.take_conversation(conv_id, pager_user_id)
+                    await send_messages_via_browser(
+                        fresh,
+                        conv_id=conv_id,
+                        texts=texts,
+                        org_id=oid,
+                        org_slug=slug,
+                        user_id=pager_user_id,
+                        locale=locale,
+                        skip_take=True,
+                    )
                     logger.info(
                         "browser batch sent conv=%s count=%s (after refresh)",
                         conv_id[:8],
@@ -492,7 +524,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         handled = 0
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 8
+        max_replies = 12
         for conv in inbound_convs[:max_replies]:
             conv_id = str(conv.get("id") or "")
             try:

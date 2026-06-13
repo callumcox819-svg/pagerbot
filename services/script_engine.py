@@ -46,14 +46,23 @@ def script_sent_in_history(outgoing_texts: list[str], snippet: str) -> bool:
     return False
 
 
-def infer_step_from_history(messages: list[dict]) -> int:
+def infer_step_from_history(
+    messages: list[dict], operator_id: str = ""
+) -> int:
     """0=new … 9=TG link sent, 10=subscriber games phase."""
-    outgoing = [
-        (m.get("text") or "")
-        for m in messages
-        if (m.get("messageDirection") or "").lower() in ("outgoing", "out")
-        and m.get("text")
-    ]
+    uid = (operator_id or "").strip()
+    outgoing: list[str] = []
+    for m in messages:
+        if (m.get("messageDirection") or "").lower() not in ("outgoing", "out"):
+            continue
+        if not m.get("text"):
+            continue
+        author = str(m.get("authorId") or "").strip()
+        if uid and author != uid:
+            continue
+        if not uid and not author:
+            continue
+        outgoing.append(m.get("text") or "")
     outgoing_joined = "\n".join(outgoing).lower()
 
     if "t.me/+" in outgoing_joined or "vhfjiofy" in outgoing_joined:
