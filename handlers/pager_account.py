@@ -45,9 +45,9 @@ async def _save_session(tg_user_id: int, email: str, password: str, cookies: dic
         session_ok=1,
         last_error="",
     )
-    channels = await client.list_channels_from_conversations()
+    channels = await client.list_channels_api()
     if channels:
-        await db.replace_channels(account_id, channels)
+        await db.sync_channels(account_id, channels, default_enabled=False)
     return probe.get("pager_user_id") or "ok"
 
 
@@ -98,7 +98,7 @@ async def on_password(message: Message, state: FSMContext) -> None:
         await _save_session(message.from_user.id, email, password, auth["cookies"])
         await status.edit_text(
             "✅ Pager подключён.\n"
-            "Откройте 📡 Каналы и включите нужные (например Kelvin Phiri)."
+            "Откройте 📡 Каналы — включите нужные (по умолчанию все выключены)."
         )
     except Exception as exc:
         logger.exception("login")
@@ -165,9 +165,16 @@ async def channels_menu(message: Message) -> None:
         return
     chs = await db.list_channels(int(acc["id"]))
     if not chs:
-        await message.answer("Каналы не найдены. Нужны чаты в Pager — откройте пару диалогов и нажмите 🔄.")
+        await message.answer(
+            "Каналы не найдены. Нажмите 🔄 в меню каналов или переподключите Pager."
+        )
         return
-    await message.answer("Каналы (нажмите чтобы вкл/выкл):", reply_markup=channels_kb(chs))
+    enabled = sum(1 for c in chs if c.get("enabled"))
+    hint = f" ({enabled} вкл.)" if enabled else " (все выкл — нажмите чтобы включить)"
+    await message.answer(
+        f"Каналы{hint} — нажмите чтобы вкл/выкл:",
+        reply_markup=channels_kb(chs),
+    )
 
 
 @router.callback_query(F.data.startswith("ch:toggle:"))
@@ -196,8 +203,8 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
     try:
         cookies = json.loads(_secrets.decrypt(acc["session_enc"]))
         client = PagerClient(_settings.pager_base_url, cookies, org_id=acc.get("org_id") or "")
-        channels = await client.list_channels_from_conversations()
-        await db.replace_channels(int(acc["id"]), channels)
+        channels = await client.list_channels_api()
+        await db.sync_channels(int(acc["id"]), channels)
         chs = await db.list_channels(int(acc["id"]))
         await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
     except PagerAPIError as exc:

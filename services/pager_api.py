@@ -264,6 +264,30 @@ class PagerClient:
             json_body={"statusId": status_id},
         )
 
+    async def list_channels_api(self) -> list[dict[str, str]]:
+        """All Messenger/IG channels from Pager API."""
+        org_id = await self._ensure_org_id()
+        for params in ({"orgId": org_id}, None):
+            try:
+                data = await self._request("GET", "/api/channel", params=params)
+            except PagerAPIError as exc:
+                logger.debug("list_channels_api params=%s: %s", params, exc)
+                continue
+            if not isinstance(data, list):
+                continue
+            out: list[dict[str, str]] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                cid = str(item.get("id") or item.get("channelId") or "").strip()
+                name = str(item.get("name") or cid).strip()
+                if cid:
+                    out.append({"channel_id": cid, "name": name})
+            if out:
+                return sorted(out, key=lambda x: x["name"].lower())
+        logger.warning("GET /api/channel empty — fallback to conversations")
+        return await self.list_channels_from_conversations()
+
     async def list_channels_from_conversations(self) -> list[dict[str, str]]:
         """Derive unique channels from recent conversations."""
         seen: dict[str, str] = {}

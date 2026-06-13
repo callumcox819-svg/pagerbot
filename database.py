@@ -206,18 +206,53 @@ async def list_worker_accounts() -> list[dict[str, Any]]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def sync_channels(
+    account_id: int,
+    channels: list[dict[str, str]],
+    *,
+    default_enabled: bool = False,
+) -> None:
+    """Upsert channels; keep enabled state for existing rows."""
+    existing = {
+        c["channel_id"]: int(c.get("enabled") or 0)
+        for c in await list_channels(account_id)
+    }
+    incoming_ids = {ch["channel_id"] for ch in channels}
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        for cid in set(existing) - incoming_ids:
+            await db.execute(
+                "DELETE FROM pager_channels WHERE account_id = ? AND channel_id = ?",
+                (account_id, cid),
+            )
+        for ch in channels:
+            cid = ch["channel_id"]
+            name = ch.get("name", "")
+            if cid in existing:
+                await db.execute(
+                    """
+                    UPDATE pager_channels SET name = ?
+                    WHERE account_id = ? AND channel_id = ?
+                    """,
+                    (name, account_id, cid),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT INTO pager_channels (account_id, channel_id, name, enabled)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (account_id, cid, name, 1 if default_enabled else 0),
+                )
+        await db.commit()
+
+
 async def replace_channels(account_id: int, channels: list[dict[str, str]]) -> None:
+    """Legacy: full replace, all disabled by default."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM pager_channels WHERE account_id = ?", (account_id,))
-        for ch in channels:
-            await db.execute(
-                """
-                INSERT INTO pager_channels (account_id, channel_id, name, enabled)
-                VALUES (?, ?, ?, 1)
-                """,
-                (account_id, ch["channel_id"], ch.get("name", "")),
-            )
         await db.commit()
+    await sync_channels(account_id, channels, default_enabled=False)
 
 
 async def list_channels(account_id: int) -> list[dict[str, Any]]:

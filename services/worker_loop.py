@@ -37,10 +37,10 @@ def _cookies(account: dict[str, Any]) -> dict[str, str]:
     return json.loads(_secrets.decrypt(raw))
 
 
-async def _enabled_channel_ids(account_id: int) -> set[str]:
+async def _enabled_channel_ids(account_id: int) -> set[str] | None:
     chs = await db.list_channels(account_id)
     if not chs:
-        return set()
+        return None
     return {c["channel_id"] for c in chs if c.get("enabled")}
 
 
@@ -74,7 +74,9 @@ async def _handle_conversation(
 
     enabled = await _enabled_channel_ids(account_id)
     channel_id = str(conv.get("channelId") or "")
-    if enabled and channel_id not in enabled:
+    if enabled is None:
+        return
+    if not enabled or channel_id not in enabled:
         return
 
     state = await db.get_conversation_state(account_id, conv_id)
