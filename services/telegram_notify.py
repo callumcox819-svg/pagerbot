@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -9,12 +11,15 @@ PAGER_BASE = "https://www.pager.co.ua"
 
 
 def pager_conversation_url(conv_id: str, base_url: str = PAGER_BASE) -> str:
-    """Deep link to a specific Pager chat (opens after login if needed)."""
+    """Deep link to a specific Pager chat.
+
+    Pager uses query param convId (not /chats/{uuid} — that route 404s).
+    """
     root = base_url.rstrip("/")
     cid = (conv_id or "").strip()
     if not cid:
-        return f"{root}/chats"
-    return f"{root}/chats/{cid}"
+        return f"{root}/en/chats"
+    return f"{root}/en/chats?{urlencode({'convId': cid})}"
 
 
 async def notify_escalation(
