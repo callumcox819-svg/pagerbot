@@ -63,6 +63,14 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_channels_account ON pager_channels(account_id);
             """
         )
+        for stmt in (
+            "ALTER TABLE pager_accounts ADD COLUMN org_slug TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE pager_accounts ADD COLUMN pager_locale TEXT NOT NULL DEFAULT 'uk'",
+        ):
+            try:
+                await db.execute(stmt)
+            except aiosqlite.OperationalError:
+                pass
         await db.commit()
 
 
@@ -83,6 +91,8 @@ async def upsert_account(
     password_enc: str = "",
     session_enc: str = "",
     org_id: str = "",
+    org_slug: str = "",
+    pager_locale: str = "",
     pager_user_id: str = "",
     session_ok: int = 0,
     last_error: str = "",
@@ -101,6 +111,8 @@ async def upsert_account(
                     password_enc = COALESCE(NULLIF(?, ''), password_enc),
                     session_enc = COALESCE(NULLIF(?, ''), session_enc),
                     org_id = COALESCE(NULLIF(?, ''), org_id),
+                    org_slug = COALESCE(NULLIF(?, ''), org_slug),
+                    pager_locale = COALESCE(NULLIF(?, ''), pager_locale),
                     pager_user_id = COALESCE(NULLIF(?, ''), pager_user_id),
                     session_ok = ?,
                     last_error = ?,
@@ -112,6 +124,8 @@ async def upsert_account(
                     password_enc,
                     session_enc,
                     org_id,
+                    org_slug,
+                    pager_locale,
                     pager_user_id,
                     session_ok,
                     last_error,
@@ -123,8 +137,8 @@ async def upsert_account(
                 """
                 INSERT INTO pager_accounts (
                     tg_user_id, email, password_enc, session_enc,
-                    org_id, pager_user_id, session_ok, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    org_id, org_slug, pager_locale, pager_user_id, session_ok, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tg_user_id,
@@ -132,6 +146,8 @@ async def upsert_account(
                     password_enc,
                     session_enc,
                     org_id,
+                    org_slug,
+                    pager_locale or "uk",
                     pager_user_id,
                     session_ok,
                     last_error,

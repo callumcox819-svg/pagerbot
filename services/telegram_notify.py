@@ -10,16 +10,28 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 PAGER_BASE = "https://www.pager.co.ua"
 
 
-def pager_conversation_url(conv_id: str, base_url: str = PAGER_BASE) -> str:
-    """Deep link to a specific Pager chat.
+def pager_channel_url(
+    channel_id: str,
+    *,
+    org_slug: str,
+    locale: str = "uk",
+    base_url: str = PAGER_BASE,
+) -> str:
+    """Link to Pager inbox for a channel.
 
-    Pager uses query param convId (not /chats/{uuid} — that route 404s).
+    Pager does not expose per-conversation URLs — only channelId in the path
+    https://www.pager.co.ua/uk/{orgSlug}/chats?channelId=...
     """
     root = base_url.rstrip("/")
-    cid = (conv_id or "").strip()
-    if not cid:
-        return f"{root}/en/chats"
-    return f"{root}/en/chats?{urlencode({'convId': cid})}"
+    cid = (channel_id or "").strip()
+    slug = (org_slug or "").strip()
+    loc = (locale or "uk").strip() or "uk"
+    if slug and cid:
+        path = f"{root}/{loc}/{slug}/chats"
+        return f"{path}?{urlencode({'channelId': cid})}"
+    if slug:
+        return f"{root}/{loc}/{slug}/chats"
+    return f"{root}/{loc}/chats"
 
 
 async def notify_escalation(
@@ -33,6 +45,9 @@ async def notify_escalation(
     reason: str,
     last_message: str,
     conv_id: str,
+    channel_id: str = "",
+    org_slug: str = "",
+    locale: str = "uk",
     extra: str = "",
     pager_base_url: str = PAGER_BASE,
 ) -> None:
@@ -43,12 +58,18 @@ async def notify_escalation(
         f"📁 {folder or '—'}\n"
         f"💬 {last_message[:500]}\n"
         f"ℹ️ {reason}\n"
+        f"\n🔍 В Pager найди клиента: <b>{client_name}</b>"
     )
     if extra:
         text += f"\n🆔 {extra}\n"
     text += f"\n<code>{conv_id}</code>"
 
-    chat_url = pager_conversation_url(conv_id, pager_base_url)
+    chat_url = pager_channel_url(
+        channel_id,
+        org_slug=org_slug,
+        locale=locale,
+        base_url=pager_base_url,
+    )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [

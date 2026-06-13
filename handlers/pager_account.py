@@ -32,12 +32,15 @@ async def _save_session(tg_user_id: int, email: str, password: str, cookies: dic
     client = PagerClient(_settings.pager_base_url, cookies, org_id=org_hint)
     probe = await client.probe_session()
     pager_user_id = probe.get("pager_user_id") or user_hint or ""
+    org_slug = probe.get("org_slug") or _settings.pager_org_slug
     account_id = await db.upsert_account(
         tg_user_id,
         email=email,
         password_enc=password_enc,
         session_enc=session_enc,
         org_id=probe.get("org_id") or org_hint,
+        org_slug=org_slug,
+        pager_locale=_settings.pager_locale,
         pager_user_id=pager_user_id,
         session_ok=1,
         last_error="",

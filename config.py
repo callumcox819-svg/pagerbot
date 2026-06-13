@@ -23,6 +23,8 @@ class Settings:
     poll_sec: float
     db_path: Path
     pager_base_url: str = "https://www.pager.co.ua"
+    pager_locale: str = "uk"
+    pager_org_slug: str = ""
 
 
 def load_settings() -> Settings:
@@ -51,4 +53,6 @@ def load_settings() -> Settings:
         admin_ids=admin_ids,
         poll_sec=poll,
         db_path=ROOT / db,
+        pager_locale=(os.getenv("PAGER_LOCALE") or "uk").strip() or "uk",
+        pager_org_slug=(os.getenv("PAGER_ORG_SLUG") or "").strip(),
     )

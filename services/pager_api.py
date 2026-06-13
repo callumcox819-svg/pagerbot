@@ -48,6 +48,37 @@ def _org_from_html(html: str) -> str:
     return ""
 
 
+def _org_slug_from_html(html: str) -> str:
+    for pattern in (
+        r"/(?:uk|en)/([a-z0-9_-]+)/chats",
+        r'"slug"\s*:\s*"([a-z0-9_-]+)"',
+        r'"orgSlug"\s*:\s*"([a-z0-9_-]+)"',
+    ):
+        match = re.search(pattern, html, re.I)
+        if match:
+            slug = match.group(1).lower()
+            if slug not in {"chats", "sign-in", "en", "uk", "api"}:
+                return slug
+    return ""
+
+
+def _extract_org_slug_from_payload(data: Any) -> str:
+    if isinstance(data, dict):
+        for key in ("slug", "orgSlug", "organizationSlug"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        for key in ("organization", "org"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                found = _extract_org_slug_from_payload(nested)
+                if found:
+                    return found
+    if isinstance(data, list) and data:
+        return _extract_org_slug_from_payload(data[0])
+    return ""
+
+
 class PagerClient:
     def __init__(
         self,
@@ -58,6 +89,7 @@ class PagerClient:
         self.base_url = base_url.rstrip("/")
         self.cookies = cookies
         self.org_id = (org_id or "").strip()
+        self.org_slug = ""
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
@@ -148,6 +180,49 @@ class PagerClient:
 
         return ""
 
+    async def discover_org_slug(self) -> str:
+        if self.org_slug:
+            return self.org_slug
+
+        if self.org_id:
+            for path in (f"/api/organization?orgId={self.org_id}", "/api/organization"):
+                try:
+                    data = await self._request("GET", path)
+                    slug = _extract_org_slug_from_payload(data)
+                    if slug:
+                        self.org_slug = slug
+                        return slug
+                except PagerAPIError as exc:
+                    logger.debug("discover org slug via %s: %s", path, exc)
+
+        try:
+            headers = {
+                "Accept": "text/html",
+                "Cookie": self._cookie_header(),
+                "Referer": f"{self.base_url}/",
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.base_url}/chats",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                    allow_redirects=True,
+                ) as resp:
+                    final_url = str(resp.url)
+                    match = re.search(r"/(?:uk|en)/([^/]+)/chats", final_url, re.I)
+                    if match:
+                        self.org_slug = match.group(1)
+                        return self.org_slug
+                    html = await resp.text()
+                    slug = _org_slug_from_html(html)
+                    if slug:
+                        self.org_slug = slug
+                        return slug
+        except Exception as exc:
+            logger.debug("discover org slug via /chats redirect: %s", exc)
+
+        return ""
+
     async def _ensure_org_id(self) -> str:
         org_id = await self.discover_org_id()
         if not org_id:
@@ -204,6 +279,7 @@ class PagerClient:
 
     async def probe_session(self) -> dict[str, Any]:
         org_id = await self._ensure_org_id()
+        org_slug = await self.discover_org_slug()
         pager_user_id = ""
         convs = await self.list_conversations(page_size=1)
         if convs:
@@ -211,4 +287,11 @@ class PagerClient:
             self.org_id = org_id
             ru = convs[0].get("responsibleUser") or {}
             pager_user_id = str(ru.get("id") or convs[0].get("responsibleuserId") or "")
-        return {"ok": True, "org_id": org_id, "pager_user_id": pager_user_id}
+        if not org_slug:
+            org_slug = await self.discover_org_slug()
+        return {
+            "ok": True,
+            "org_id": org_id,
+            "org_slug": org_slug,
+            "pager_user_id": pager_user_id,
+        }

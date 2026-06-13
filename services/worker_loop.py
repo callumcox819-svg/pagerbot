@@ -49,6 +49,15 @@ async def _escalation_chat(account: dict[str, Any]) -> int:
     return cid or int(account["tg_user_id"])
 
 
+def _escalation_link_kwargs(account: dict[str, Any], channel_id: str) -> dict[str, str]:
+    return {
+        "channel_id": channel_id,
+        "org_slug": str(account.get("org_slug") or _settings.pager_org_slug or ""),
+        "locale": str(account.get("pager_locale") or _settings.pager_locale or "uk"),
+        "pager_base_url": _settings.pager_base_url,
+    }
+
+
 async def _handle_conversation(
     bot: Bot,
     account: dict[str, Any],
@@ -116,6 +125,7 @@ async def _handle_conversation(
             reason=f"Intent: {intent.value}, step {step}",
             last_message=text or "(photo)",
             conv_id=conv_id,
+            **_escalation_link_kwargs(account, channel_id),
         )
         await db.save_conversation_state(
             account_id, conv_id, pause_scripts=1, last_processed_msg_id=msg_id
@@ -161,6 +171,7 @@ async def _handle_conversation(
                     last_message=text or "(photo)",
                     conv_id=conv_id,
                     extra=f"ID: {extracted}",
+                    **_escalation_link_kwargs(account, channel_id),
                 )
                 return
             await notify_escalation(
@@ -173,6 +184,7 @@ async def _handle_conversation(
                 reason="Нужен оператор",
                 last_message="(photo)",
                 conv_id=conv_id,
+                **_escalation_link_kwargs(account, channel_id),
             )
             await db.save_conversation_state(
                 account_id, conv_id, last_processed_msg_id=msg_id, pause_scripts=1
@@ -190,6 +202,7 @@ async def _handle_conversation(
                 reason="Подтвердите депозит вручную",
                 last_message="(photo)",
                 conv_id=conv_id,
+                **_escalation_link_kwargs(account, channel_id),
             )
             if pager_user_id:
                 await client.patch_status(conv_id, ZM_STATUSES["deps_pending"], pager_user_id)
