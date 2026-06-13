@@ -82,7 +82,7 @@ class _CycleSendBuffer:
             )
 
         jobs = list(self._jobs.items())
-        timeout = 90.0 + 50.0 * len(jobs)
+        timeout = min(240.0, 60.0 + 45.0 * len(jobs))
         logger.info(
             "browser batch flush jobs=%s texts=%s",
             len(jobs),
@@ -190,8 +190,19 @@ async def _handle_conversation(
 
     state = await db.get_conversation_state(account_id, conv_id)
     if state.get("human_takeover") or state.get("pause_scripts"):
+        logger.info(
+            "conv=%s skipped paused=%s human=%s",
+            conv_id[:8],
+            bool(state.get("pause_scripts")),
+            bool(state.get("human_takeover")),
+        )
         return "paused"
     if int(state.get("send_failures") or 0) >= 5:
+        logger.info(
+            "conv=%s skipped send_failures=%s (use /reset_pauses)",
+            conv_id[:8],
+            state.get("send_failures"),
+        )
         return "paused"
 
     messages = await client.list_messages(conv_id, page_size=80)
@@ -528,21 +539,54 @@ async def _handle_conversation(
     return "no_script"
 
 
+async def _ensure_enabled_channels(
+    account_id: int, client: PagerClient
+) -> set[str] | None:
+    """Return enabled channel ids; sync from API and auto-enable if none on."""
+    chs = await db.list_channels(account_id)
+    if not chs:
+        try:
+            api_chs = await client.list_channels_api()
+        except Exception as exc:
+            logger.warning(
+                "Worker account=%s: channel sync failed: %s",
+                account_id,
+                exc,
+            )
+            return None
+        if not api_chs:
+            return None
+        await db.sync_channels(account_id, api_chs, default_enabled=True)
+        return {c["channel_id"] for c in api_chs}
+
+    enabled = {c["channel_id"] for c in chs if c.get("enabled")}
+    if not enabled:
+        n = await db.enable_all_channels(account_id)
+        logger.info(
+            "Worker account=%s: auto-enabled %s channel(s)",
+            account_id,
+            n,
+        )
+        return {c["channel_id"] for c in chs}
+    return enabled
+
+
 async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
     try:
+        account_id = int(account["id"])
         cookies = _cookies(account)
         if not cookies:
-            return
-        account_id = int(account["id"])
-        enabled = await _enabled_channel_ids(account_id)
-        if enabled is None:
-            return
-        if not enabled:
             logger.warning(
-                "Worker account=%s: no enabled channels — enable in Telegram bot",
-                account.get("id"),
+                "Worker account=%s: no cookies — refreshing session",
+                account_id,
             )
-            return
+            fresh = await refresh_pager_session(account)
+            if not fresh:
+                return
+            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+            if acc:
+                account.update(acc)
+            cookies = _cookies(account)
 
         org_slug = str(
             account.get("org_slug") or _settings.pager_org_slug or ""
@@ -570,6 +614,36 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             )
 
         client = _make_client(cookies)
+        try:
+            probe = await client.probe_session()
+        except PagerAPIError:
+            probe = None
+        if not probe:
+            logger.warning(
+                "Worker account=%s: session stale — refreshing",
+                account_id,
+            )
+            fresh = await refresh_pager_session(account)
+            if not fresh:
+                return
+            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+            if acc:
+                account.update(acc)
+            client = _make_client(fresh)
+
+        enabled = await _ensure_enabled_channels(account_id, client)
+        if enabled is None:
+            logger.warning(
+                "Worker account=%s: no channels — refresh in Telegram bot",
+                account_id,
+            )
+            return
+        if not enabled:
+            logger.warning(
+                "Worker account=%s: no enabled channels",
+                account_id,
+            )
+            return
         await client.warm_session()
         if not client.session_user_id:
             uid = await client.resolve_session_user_id()
@@ -632,7 +706,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 5
+        max_replies = 2
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
@@ -758,8 +832,23 @@ async def worker_loop(bot: Bot) -> None:
     while True:
         try:
             accounts = await db.list_worker_accounts()
+            if not accounts:
+                logger.warning(
+                    "Worker tick: no accounts (need auto_reply=1, paused=0)"
+                )
+            else:
+                logger.info("Worker tick: accounts=%s", len(accounts))
             for acc in accounts:
-                await _process_account(bot, acc)
+                try:
+                    await asyncio.wait_for(
+                        _process_account(bot, acc),
+                        timeout=300.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Worker account=%s: cycle timeout 300s",
+                        acc.get("id"),
+                    )
         except Exception:
             logger.exception("worker tick failed")
         await asyncio.sleep(_settings.poll_sec)

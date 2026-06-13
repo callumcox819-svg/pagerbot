@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -444,11 +445,32 @@ async def _browser_prepare_outbound(
             f"Browser session stale preparing conv={conv_id[:8]}"
         )
     if not result.get("responsibleOk"):
-        rid = str(result.get("responsibleId") or "")
-        raise RuntimeError(
-            f"Take chat not verified conv={conv_id[:8]} "
-            f"want={uid[:16]} got={rid[:16] or 'none'}"
-        )
+        for attempt in range(4):
+            await page.wait_for_timeout(600)
+            check = await _poll_take_state(
+                page, conv_id=conv_id, org_id=oid, user_id=uid
+            )
+            if check.get("responsibleOk") or check.get("alreadyTaken"):
+                logger.info(
+                    "browser prepare conv=%s take ok after poll %s",
+                    conv_id[:8],
+                    attempt,
+                )
+                break
+        else:
+            rid = str(result.get("responsibleId") or "")
+            patch_st = int(result.get("patchStatus") or 0)
+            if patch_st in (200, 204) and rid == uid:
+                logger.warning(
+                    "browser prepare conv=%s proceeding after PATCH %s",
+                    conv_id[:8],
+                    patch_st,
+                )
+            else:
+                raise RuntimeError(
+                    f"Take chat not verified conv={conv_id[:8]} "
+                    f"want={uid[:16]} got={rid[:16] or 'none'}"
+                )
     ch = str(result.get("channelId") or "").strip()
     logger.info(
         "browser prepared conv=%s patch=%s resp=%s channel=%s",
@@ -949,7 +971,10 @@ async def send_batch_via_browser(
         page = await context.new_page()
         try:
             logger.info("browser batch login jobs=%s", len(jobs))
-            await playwright_sign_in_on_page(page, email.strip(), password)
+            await asyncio.wait_for(
+                playwright_sign_in_on_page(page, email.strip(), password),
+                timeout=120.0,
+            )
             org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
             await page.goto(org_inbox, wait_until="domcontentloaded", timeout=90000)
             await page.wait_for_timeout(1500)

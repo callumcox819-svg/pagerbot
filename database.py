@@ -206,7 +206,7 @@ async def list_worker_accounts() -> list[dict[str, Any]]:
                 SELECT COALESCE(NULLIF(email, ''), 'tg:' || tg_user_id) AS grp,
                        MAX(id) AS max_id
                 FROM pager_accounts
-                WHERE session_ok = 1 AND paused = 0 AND auto_reply = 1
+                WHERE paused = 0 AND auto_reply = 1
                 GROUP BY grp
             ) latest ON a.id = latest.max_id
             """
@@ -290,6 +290,17 @@ async def list_channels(account_id: int) -> list[dict[str, Any]]:
             (account_id,),
         )
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def enable_all_channels(account_id: int) -> int:
+    """Turn on every channel for an account. Returns rows updated."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE pager_channels SET enabled = 1 WHERE account_id = ?",
+            (account_id,),
+        )
+        await db.commit()
+        return cur.rowcount or 0
 
 
 async def toggle_channel(account_id: int, channel_id: str, enabled: bool) -> None:
