@@ -76,12 +76,16 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
         return None
 
     session_enc = _secrets.encrypt(json.dumps(cookies))
+    operator_id = (
+        (_settings.pager_user_id or "").strip()
+        or str(probe.get("pager_user_id") or user_hint or "").strip()
+    )
     await db.upsert_account(
         int(account["tg_user_id"]),
         session_enc=session_enc,
         org_id=probe.get("org_id") or org_id,
         org_slug=probe.get("org_slug") or org_slug,
-        pager_user_id=probe.get("pager_user_id") or user_hint,
+        pager_user_id=operator_id,
         session_ok=1,
         last_error="",
     )

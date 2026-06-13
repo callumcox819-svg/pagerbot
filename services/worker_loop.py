@@ -129,15 +129,16 @@ async def _handle_conversation(
     text = (last_in.get("text") or "").strip()
     attachments = last_in.get("attachments") or []
     has_image = bool(attachments)
+    has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
     step = max(int(state.get("step") or 0), infer_step_from_history(msg_only))
-    intent = classify(text, has_image=has_image)
+    intent = classify(text, has_image=has_image, has_ad=has_ad)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
     pager_user_id = str(
-        account.get("pager_user_id")
-        or _settings.pager_user_id
+        _settings.pager_user_id
         or client.session_user_id
+        or account.get("pager_user_id")
         or conv.get("responsibleuserId")
         or (conv.get("responsibleUser") or {}).get("id")
         or ""
@@ -162,16 +163,29 @@ async def _handle_conversation(
             slug = str(
                 account.get("org_slug") or _settings.pager_org_slug or ""
             ).strip()
+            oid = resolve_pager_org_id(
+                str(client.org_id or ""),
+                str(account.get("org_id") or ""),
+                _settings.pager_org_id,
+                org_slug=slug,
+            )
             logger.warning(
                 "API send failed conv=%s, browser fallback: %s",
                 conv_id[:8],
                 exc.body[:80],
             )
+            browser_cookies = _cookies(account)
+            if is_session_error(exc):
+                fresh = await refresh_pager_session(account)
+                if fresh:
+                    browser_cookies = fresh
             await send_message_via_browser(
-                _cookies(account),
+                browser_cookies,
                 conv_id=conv_id,
                 text=text,
+                org_id=oid,
                 org_slug=slug,
+                user_id=pager_user_id,
                 locale=str(
                     account.get("pager_locale") or _settings.pager_locale
                 ),
@@ -400,8 +414,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
 
         def _make_client(cookie_dict: dict[str, str]) -> PagerClient:
             session_uid = str(
-                account.get("pager_user_id")
-                or _settings.pager_user_id
+                _settings.pager_user_id
+                or account.get("pager_user_id")
                 or ""
             ).strip()
             return PagerClient(
@@ -486,9 +500,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
 
         if client.org_id:
             pager_uid = str(
-                client.session_user_id
+                _settings.pager_user_id
+                or client.session_user_id
                 or account.get("pager_user_id")
-                or _settings.pager_user_id
                 or ""
             )
             if not pager_uid and inbound_convs:

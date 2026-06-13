@@ -9,18 +9,24 @@ from typing import Any
 
 import aiohttp
 
-from config import DEFAULT_ORG_ID_BY_SLUG, resolve_pager_org_id
+from config import DEFAULT_ORG_ID_BY_SLUG, load_settings, resolve_pager_org_id
+
+_settings = load_settings()
 from services.pager_auth import UA
 
 logger = logging.getLogger(__name__)
 
 
 def is_session_error(exc: PagerAPIError) -> bool:
-    """Pager often returns 400 'Organization ID required' when cookies expired."""
+    """Detect stale Clerk session — triggers Playwright re-login."""
     if exc.status in (401, 403):
         return True
     body = (exc.body or "").lower()
-    return exc.status == 400 and "organization id required" in body
+    if exc.status == 400 and "organization id required" in body:
+        return True
+    if "invalid or expired token" in body:
+        return True
+    return False
 
 
 def message_delivered(result: Any) -> bool:
@@ -165,27 +171,25 @@ class PagerClient:
             return f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
         return f"{self.base_url}/"
 
-    def _session_bearer(self) -> str:
-        for key, val in _clean_cookies(self.cookies).items():
-            if key.startswith("__session") and val:
-                return val
-        return ""
+    def operator_user_id(self, author_id: str = "") -> str:
+        """Pager operator for take-chat + send (Тех Саппорт, not Clerk probe guess)."""
+        return (
+            (author_id or "").strip()
+            or (self.session_user_id or "").strip()
+            or (_settings.pager_user_id or "").strip()
+        )
 
     def _api_headers(self) -> dict[str, str]:
         referer = f"{self.base_url}/"
         if self.org_slug:
             referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
-        headers = {
+        return {
             "Accept": "*/*",
             "User-Agent": UA,
             "Cookie": self._cookie_header(),
             "Referer": referer,
             "Origin": self.base_url,
         }
-        bearer = self._session_bearer()
-        if bearer:
-            headers["Authorization"] = f"Bearer {bearer}"
-        return headers
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in _clean_cookies(self.cookies).items())
@@ -649,11 +653,7 @@ class PagerClient:
     ) -> tuple[str, dict[str, Any]]:
         """Warm session, open chat, always take it — returns (user_id, conv_data)."""
         await self.warm_session()
-        user_id = (
-            (author_id or "").strip()
-            or self.session_user_id
-            or await self.resolve_session_user_id()
-        )
+        user_id = self.operator_user_id(author_id)
         conv_data: dict[str, Any] = dict(conv or {})
         fresh = await self.open_conversation(conv_id)
         if fresh:

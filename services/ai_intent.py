@@ -41,8 +41,12 @@ _COMPLAINT = re.compile(
 _GAME_ID = re.compile(r"\b16\d{6,}\b")
 
 
-def classify(text: str, *, has_image: bool = False) -> Intent:
+def classify(
+    text: str, *, has_image: bool = False, has_ad: bool = False
+) -> Intent:
     t = (text or "").strip()
+    if has_ad and not t and not has_image:
+        return Intent.INTERESTED
     if has_image and not t:
         return Intent.IMAGE_ONLY
     if _GAME_ID.search(t):
