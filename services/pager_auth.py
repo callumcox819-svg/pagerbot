@@ -45,21 +45,63 @@ def _jar_to_dict(jar: aiohttp.CookieJar) -> dict[str, str]:
     return out
 
 
-async def _validate_cookies(cookies: dict[str, str]) -> dict[str, str]:
+def extract_clerk_session_info(payload: dict[str, Any]) -> dict[str, str]:
+    """Read org/user ids from Clerk client payload after login."""
+    client = payload.get("response") or payload.get("meta", {}).get("client") or {}
+    sessions = client.get("sessions") or []
+    org_id = ""
+    pager_user_id = ""
+
+    if sessions:
+        sess = sessions[0]
+        user = sess.get("user") or {}
+        pager_user_id = str(user.get("id") or "")
+
+        for membership in user.get("organization_memberships") or []:
+            org = membership.get("organization") or {}
+            if org.get("id"):
+                org_id = str(org["id"])
+                break
+
+        if not org_id:
+            meta = user.get("public_metadata") or user.get("publicMetadata") or {}
+            org_id = str(meta.get("orgId") or meta.get("organizationId") or "")
+
+        if not org_id:
+            org_id = str(
+                sess.get("last_active_organization_id")
+                or sess.get("active_organization_id")
+                or ""
+            )
+
+    return {"org_id": org_id, "pager_user_id": pager_user_id}
+
+
+async def _validate_cookies(
+    cookies: dict[str, str],
+    *,
+    org_id_hint: str = "",
+) -> dict[str, str]:
     from services.pager_api import PagerAPIError, PagerClient
 
     if not cookies:
         raise RuntimeError("После входа cookies пустые")
 
-    client = PagerClient(PAGER_BASE, cookies)
+    client = PagerClient(PAGER_BASE, cookies, org_id=org_id_hint)
     try:
-        await client.probe_session()
+        probe = await client.probe_session()
+        if probe.get("org_id"):
+            logger.info("Session OK org=%s user=%s", probe.get("org_id"), probe.get("pager_user_id"))
     except PagerAPIError as exc:
         if exc.status in (401, 403):
             raise RuntimeError(
                 "Сессия не принята Pager (401). Проверьте email и пароль."
             ) from exc
-        logger.warning("probe_session returned %s, keeping cookies anyway", exc.status)
+        if "Organization ID required" in exc.body or exc.status == 400:
+            raise RuntimeError(
+                "Вход прошёл, но Pager не отдал orgId. Попробуйте ещё раз или cookies."
+            ) from exc
+        raise RuntimeError(str(exc)) from exc
     logger.info("Login OK, cookie keys: %s", ", ".join(sorted(cookies.keys())))
     return cookies
 
@@ -113,6 +155,7 @@ async def login_with_clerk_http(email: str, password: str) -> dict[str, str]:
         sign_in = data.get("response") or data
         sign_in_id = sign_in.get("id")
         status = sign_in.get("status") or ""
+        result: dict[str, Any] = data
         if not sign_in_id:
             raise RuntimeError(f"Clerk: no sign_in id in {data}")
 
@@ -140,18 +183,34 @@ async def login_with_clerk_http(email: str, password: str) -> dict[str, str]:
                     )
                 raise RuntimeError(f"Clerk: вход не завершён (status={status})")
 
+        org_id_hint = ""
+        pager_user_hint = ""
+        meta = result.get("meta") or data.get("meta") or {}
+        clerk_info = extract_clerk_session_info(meta)
+        org_id_hint = clerk_info.get("org_id") or ""
+        pager_user_hint = clerk_info.get("pager_user_id") or ""
+
+        async with session.get(
+            f"{CLERK_BASE}/v1/client",
+            params=params,
+            headers=headers,
+        ) as resp:
+            if resp.status == 200:
+                clerk_client = await resp.json()
+                info = extract_clerk_session_info(clerk_client)
+                org_id_hint = org_id_hint or info.get("org_id") or ""
+                pager_user_hint = pager_user_hint or info.get("pager_user_id") or ""
+
         async with session.get(f"{PAGER_BASE}/chats", headers=headers) as resp:
             await resp.text()
 
-        async with session.get(
-            f"{PAGER_BASE}/api/conversation",
-            params={"pageSize": 1, "page": 1},
-            headers=headers,
-        ) as resp:
-            if resp.status == 401:
-                raise RuntimeError("Pager API 401 после входа.")
-
-        return await _validate_cookies(_jar_to_dict(jar))
+        cookies = _jar_to_dict(jar)
+        await _validate_cookies(cookies, org_id_hint=org_id_hint)
+        if org_id_hint:
+            cookies["_pager_org_id"] = org_id_hint
+        if pager_user_hint:
+            cookies["_pager_user_id"] = pager_user_hint
+        return cookies
 
 
 async def login_with_playwright(email: str, password: str) -> dict[str, str]:

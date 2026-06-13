@@ -25,17 +25,20 @@ _secrets = Secrets(_settings.encryption_key)
 
 
 async def _save_session(tg_user_id: int, email: str, password: str, cookies: dict) -> str:
+    org_hint = cookies.pop("_pager_org_id", "")
+    user_hint = cookies.pop("_pager_user_id", "")
     session_enc = _secrets.encrypt(json.dumps(cookies))
     password_enc = _secrets.encrypt(password) if password else ""
-    client = PagerClient(_settings.pager_base_url, cookies)
+    client = PagerClient(_settings.pager_base_url, cookies, org_id=org_hint)
     probe = await client.probe_session()
+    pager_user_id = probe.get("pager_user_id") or user_hint or ""
     account_id = await db.upsert_account(
         tg_user_id,
         email=email,
         password_enc=password_enc,
         session_enc=session_enc,
-        org_id=probe.get("org_id") or "",
-        pager_user_id=probe.get("pager_user_id") or "",
+        org_id=probe.get("org_id") or org_hint,
+        pager_user_id=pager_user_id,
         session_ok=1,
         last_error="",
     )
@@ -189,7 +192,7 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
     await cb.answer("Обновляю…")
     try:
         cookies = json.loads(_secrets.decrypt(acc["session_enc"]))
-        client = PagerClient(_settings.pager_base_url, cookies)
+        client = PagerClient(_settings.pager_base_url, cookies, org_id=acc.get("org_id") or "")
         channels = await client.list_channels_from_conversations()
         await db.replace_channels(int(acc["id"]), channels)
         chs = await db.list_channels(int(acc["id"]))

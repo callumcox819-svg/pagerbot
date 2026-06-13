@@ -271,7 +271,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         cookies = _cookies(account)
         if not cookies:
             return
-        client = PagerClient(_settings.pager_base_url, cookies)
+        client = PagerClient(
+            _settings.pager_base_url,
+            cookies,
+            org_id=str(account.get("org_id") or ""),
+        )
         convs = await client.list_conversations(page_size=40)
         for conv in convs:
             try:
