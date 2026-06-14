@@ -105,7 +105,7 @@ class _CycleSendBuffer:
             )
             for cid, texts in self._jobs.items()
         ]
-        timeout = min(540.0, 90.0 + 75.0 * len(jobs))
+        timeout = min(540.0, 120.0 + 90.0 * len(jobs))
         logger.info(
             "browser batch flush jobs=%s texts=%s",
             len(jobs),
