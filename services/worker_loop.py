@@ -25,6 +25,7 @@ from services.script_engine import (
     scripts_for_positive_reply,
     scripts_to_resend_for_step,
     scripts_to_send_after_intent,
+    filter_auto_script_keys,
 )
 from services.status_ids import EXCELLENT, ZM_STATUSES, is_no_status, should_process_conversation
 from services.telegram_notify import notify_escalation
@@ -566,23 +567,11 @@ async def _handle_conversation(
     keys: list[str] = []
 
     if no_status and needs_reply:
-        if intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED) and hist_step >= 1:
+        if intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED):
             keys = scripts_for_positive_reply(hist_step)
         elif hist_step < 1:
             keys = ["01_intro"]
-        elif hist_step < 2:
-            keys = ["02_how_it_works", "03_zmw_table"]
-        elif hist_step < 4:
-            keys = ["04_registration", "05_link"]
-        elif hist_step < 5:
-            keys = ["10_reg_screenshot"]
-        elif intent in (
-            Intent.POSITIVE,
-            Intent.INTERESTED,
-            Intent.READY,
-            Intent.IMAGE_ONLY,
-            Intent.GAME_ID_TEXT,
-        ):
+        elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
             keys = scripts_to_resend_for_step(hist_step)
         if keys:
             logger.info(
@@ -636,6 +625,8 @@ async def _handle_conversation(
                         keys,
                     )
 
+    keys = filter_auto_script_keys(keys)
+
     if intent == Intent.JOINED:
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
@@ -662,18 +653,11 @@ async def _handle_conversation(
         intent == Intent.READY and step >= 2 and step < 4
     ):
         new_step = 4
-        send_buf.queue_script_send(
-            conv_id,
-            ["10_reg_screenshot"],
-            client_name=client_name,
-            channel_id=channel_id,
-        )
         if pager_user_id:
             send_buf.queue_status_patch(
                 conv_id, ZM_STATUSES["in_progress"]
             )
             send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])
-        new_step = 5
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
     elif keys == ["02_how_it_works", "03_zmw_table"]:

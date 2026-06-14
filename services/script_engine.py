@@ -35,7 +35,8 @@ SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "10_reg_screenshot": "ibb.co",
 }
 
-SAVED_REPLY_FOLDER_NAMES = ("Замбія", "Замбия", "Zambia", "Замб")
+# Never auto-send to clients (Russian internal note / manual-only in Pager).
+AUTO_SKIP_SCRIPT_KEYS: frozenset[str] = frozenset({"10_reg_screenshot"})
 
 _cache: dict[str, str] = {}
 
@@ -143,9 +144,11 @@ def scripts_for_positive_reply(hist_step: int) -> list[str]:
         return ["02_how_it_works", "03_zmw_table"]
     if hist_step < 4:
         return ["04_registration", "05_link"]
-    if hist_step < 5:
-        return ["10_reg_screenshot"]
-    return scripts_to_resend_for_step(hist_step)
+    return []
+
+
+def filter_auto_script_keys(keys: list[str]) -> list[str]:
+    return [k for k in keys if k not in AUTO_SKIP_SCRIPT_KEYS]
 
 
 def scripts_to_resend_for_step(hist_step: int) -> list[str]:
@@ -156,8 +159,6 @@ def scripts_to_resend_for_step(hist_step: int) -> list[str]:
         return ["02_how_it_works", "03_zmw_table"]
     if hist_step < 4:
         return ["04_registration", "05_link"]
-    if hist_step < 5:
-        return ["10_reg_screenshot"]
     if hist_step < 6:
         return ["07_game_id"]
     if hist_step < 7:
@@ -175,8 +176,6 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
         return ["02_how_it_works", "03_zmw_table"]
     if intent in ("positive", "ready") and 2 <= step < 4:
         return ["04_registration", "05_link"]
-    if step == 4:
-        return ["10_reg_screenshot"]
     if intent == "game_id_text" or (intent == "image_only" and step >= 5):
         if step < 7:
             return ["07_game_id"] if step < 6 else []
