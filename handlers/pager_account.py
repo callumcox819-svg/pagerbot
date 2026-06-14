@@ -44,9 +44,9 @@ def _pager_client(
 
 
 async def _save_session(tg_user_id: int, email: str, password: str, cookies: dict) -> str:
-    org_hint = cookies.pop("_pager_org_id", "")
-    user_hint = cookies.pop("_pager_user_id", "")
-    session_enc = _secrets.encrypt(json.dumps(cookies))
+    org_hint = str(cookies.get("_pager_org_id") or "").strip()
+    user_hint = str(cookies.get("_pager_user_id") or "").strip()
+    session_enc = _secrets.encrypt(json.dumps(dict(cookies)))
     password_enc = _secrets.encrypt(password) if password else ""
     client = _pager_client(cookies, org_id=org_hint)
     probe = await client.probe_session()

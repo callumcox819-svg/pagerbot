@@ -44,8 +44,16 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
         return None
 
     cookies = dict(result["cookies"])
-    org_hint = cookies.pop("_pager_org_id", "")
-    user_hint = cookies.pop("_pager_user_id", "")
+    org_hint = str(
+        cookies.get("_pager_org_id")
+        or account.get("org_id")
+        or ""
+    ).strip()
+    user_hint = str(
+        cookies.get("_pager_user_id")
+        or account.get("pager_user_id")
+        or ""
+    ).strip()
     org_slug = str(account.get("org_slug") or _settings.pager_org_slug or "").strip()
     org_id = resolve_pager_org_id(
         org_hint or str(account.get("org_id") or ""),

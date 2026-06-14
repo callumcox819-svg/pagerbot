@@ -827,24 +827,26 @@ async def _browser_post_message_spa(
     text: str,
     locale: str,
     org_slug: str,
+    channel_hint: str = "",
 ) -> dict:
     """POST /api/message with the same JSON body Pager SPA uses (fixes imageUrl 500)."""
     uid = (user_id or "").strip()
     oid = (org_id or "").strip()
+    ch_hint = (channel_hint or "").strip()
     ref = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
     conv_url = _api(f"/api/conversation/{conv_id}?orgId={oid}")
-    members_url = _api("/api/organizationMember")
+    members_url = _api(f"/api/organizationMember?orgId={oid}")
     post_url = _api(f"/api/message?orgId={oid}&userId={uid}")
 
     result = await page.evaluate(
-        f"""async ({{convUrl, membersUrl, postUrl, referer, convId, userId, text}}) => {{
+        f"""async ({{convUrl, membersUrl, postUrl, referer, convId, userId, text, channelHint}}) => {{
             {_SAFE_FETCH}
             const convR = await safeJsonFetch(convUrl);
             if (convR.html || !convR.ok) {{
                 return {{ status: convR.status, error: 'conv fetch failed', html: convR.html }};
             }}
             const conv = convR.data || {{}};
-            const channelId = conv.channelId || (conv.channel && conv.channel.id) || '';
+            const channelId = conv.channelId || (conv.channel && conv.channel.id) || channelHint || '';
             const recipient = conv.clientPSID || conv.clientPsid || conv.recipient
                 || (conv.client && (conv.client.psid || conv.client.PSID)) || '';
             let imageUrl = '';
@@ -912,6 +914,7 @@ async def _browser_post_message_spa(
             "convId": conv_id,
             "userId": uid,
             "text": text,
+            "channelHint": ch_hint,
         },
     )
 
@@ -934,12 +937,33 @@ async def _browser_post_message_spa(
             conv_id[:8],
             author[:16],
             fb[:12],
-            str(result.get("channelId") or "")[:8],
+            str(result.get("channelId") or ch_hint)[:8],
         )
         return result
 
+    if status < 400:
+        verify = await _verify_message_delivered(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+            text=text[:80],
+            attempts=15,
+        )
+        if verify.get("ok"):
+            logger.info(
+                "browser SPA POST verified conv=%s author=%s fb=%s",
+                conv_id[:8],
+                str(verify.get("authorId") or uid)[:16],
+                str(verify.get("facebookMessageId") or "")[:12],
+            )
+            return result
+
     raise RuntimeError(
-        f"SPA POST failed conv={conv_id[:8]} status={status}: {err[:200]}"
+        f"SPA POST failed conv={conv_id[:8]} status={status} "
+        f"ch={str(result.get('channelId') or ch_hint)[:8]} "
+        f"recipient={result.get('hadRecipient')} imageUrl={result.get('hadImageUrl')}: "
+        f"{err[:200]}"
     )
 
 
@@ -1087,6 +1111,7 @@ async def _send_via_saved_reply(
     user_id: str,
     locale: str = "uk",
     org_slug: str = "",
+    channel_hint: str = "",
 ) -> None:
     """Send canned reply: load text from /api/reply (Замбія), POST like Pager SPA."""
     uid = (user_id or "").strip()
@@ -1112,6 +1137,7 @@ async def _send_via_saved_reply(
         text=text,
         locale=locale,
         org_slug=org_slug,
+        channel_hint=channel_hint,
     )
 
     verify = await _verify_message_delivered(
@@ -1188,6 +1214,7 @@ async def _send_from_open_chat(
     locale: str,
     org_slug: str,
     skip_ui: bool = False,
+    channel_hint: str = "",
 ) -> None:
     """Send like operator UI: composer first, then in-page POST {conversationId, text} only."""
     uid = (user_id or "").strip()
@@ -1248,6 +1275,7 @@ async def _send_from_open_chat(
             text=text,
             locale=locale,
             org_slug=org_slug,
+            channel_hint=channel_hint,
         )
         return
     except Exception as spa_exc:
@@ -1419,6 +1447,7 @@ async def _batch_send_one_conv(
                 user_id=uid,
                 locale=locale,
                 org_slug=slug,
+                channel_hint=ch,
             )
         except Exception as exc:
             logger.warning(
@@ -1436,6 +1465,7 @@ async def _batch_send_one_conv(
                 text=body,
                 locale=locale,
                 org_slug=slug,
+                channel_hint=ch,
             )
             verify = await _verify_message_delivered(
                 page,
@@ -1462,6 +1492,7 @@ async def _batch_send_one_conv(
             locale=locale,
             org_slug=slug,
             skip_ui=True,
+            channel_hint=ch,
         )
 
     patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
@@ -1502,7 +1533,6 @@ async def _browser_prepare_outbound(
                 headers: {{'Content-Type': 'application/json'}},
                 body: JSON.stringify({{
                     responsibleUserId: userId,
-                    conversationState: 'read',
                 }}),
             }});
             const convR = await safeJsonFetch(convUrl);
