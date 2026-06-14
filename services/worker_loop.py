@@ -578,8 +578,6 @@ async def _handle_conversation(
             keys = ["01_intro"]
         elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and hist_step >= 1:
             keys = scripts_for_positive_reply(hist_step)
-        elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
-            keys = ["02_how_it_works", "03_zmw_table"]
         elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
             keys = ["04_registration", "05_link"]
         elif needs_reply and not keys:
@@ -641,6 +639,10 @@ async def _handle_conversation(
 
     new_step = step
     if keys == ["04_registration", "05_link"] or (
+        intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY)
+        and hist_step >= 1
+        and hist_step < 4
+    ) or (
         intent == Intent.READY and step >= 2 and step < 4
     ):
         new_step = 4

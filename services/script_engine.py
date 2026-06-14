@@ -139,11 +139,9 @@ def infer_step_from_history(
 
 
 def scripts_for_positive_reply(hist_step: int) -> list[str]:
-    """After client says Yes/OK — next scripts in funnel order."""
+    """After intro — any positive reply goes straight to registration."""
     if hist_step < 1:
         return ["01_intro"]
-    if hist_step < 2:
-        return ["02_how_it_works", "03_zmw_table"]
     if hist_step < 4:
         return ["04_registration", "05_link"]
     return []
@@ -157,8 +155,6 @@ def scripts_to_resend_for_step(hist_step: int) -> list[str]:
     """Resend scripts when a prior attempt was marked processed but never delivered."""
     if hist_step < 1:
         return ["01_intro"]
-    if hist_step < 2:
-        return ["02_how_it_works", "03_zmw_table"]
     if hist_step < 4:
         return ["04_registration", "05_link"]
     if hist_step < 6:
@@ -174,9 +170,9 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
     """Return script keys to POST in order."""
     if intent == "interested" and step < 1:
         return ["01_intro"]
-    if intent == "positive" and step < 2:
-        return ["02_how_it_works", "03_zmw_table"]
-    if intent in ("positive", "ready") and 2 <= step < 4:
+    if intent in ("interested", "positive", "ready") and 1 <= step < 4:
+        return ["04_registration", "05_link"]
+    if intent in ("positive", "ready") and step >= 2 and step < 4:
         return ["04_registration", "05_link"]
     if intent == "game_id_text" or (intent == "image_only" and step >= 5):
         if step < 7:
