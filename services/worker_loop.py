@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from aiogram import Bot
@@ -32,6 +33,9 @@ _settings = load_settings()
 _secrets = Secrets(_settings.encryption_key)
 
 _worker_task: asyncio.Task | None = None
+# In-process Clerk cookies — DB copy often loses org context between ticks.
+_session_cache: dict[int, tuple[float, dict[str, str]]] = {}
+_SESSION_CACHE_TTL = 3600.0
 
 
 class _CycleSendBuffer:
@@ -198,7 +202,7 @@ class _CycleSendBuffer:
                         conv_id, user_id=uid
                     )
                 except Exception:
-                    pass
+                    pass  # browser batch already marks read via in-page PATCH
                 await db.save_conversation_state(
                     account_id, conv_id, send_failures=0, **fields
                 )
@@ -569,7 +573,13 @@ async def _handle_conversation(
             keys = ["04_registration", "05_link"]
         elif hist_step < 5:
             keys = ["10_reg_screenshot"]
-        else:
+        elif intent in (
+            Intent.POSITIVE,
+            Intent.INTERESTED,
+            Intent.READY,
+            Intent.IMAGE_ONLY,
+            Intent.GAME_ID_TEXT,
+        ):
             keys = scripts_to_resend_for_step(hist_step)
         if keys:
             logger.info(
@@ -588,14 +598,38 @@ async def _handle_conversation(
         elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
             keys = ["04_registration", "05_link"]
         elif needs_reply and not keys:
-            keys = scripts_to_resend_for_step(hist_step)
-            if keys:
-                logger.info(
-                    "conv=%s resend hist_step=%s keys=%s",
-                    conv_id[:8],
-                    hist_step,
-                    keys,
+            if intent in (Intent.QUESTION, Intent.UNKNOWN) and step >= 3:
+                await notify_escalation(
+                    bot,
+                    esc_chat,
+                    title="Нужен оператор",
+                    client_name=client_name,
+                    channel_name=channel_name,
+                    folder=folder,
+                    reason=f"Вопрос на шаге {step}: {intent.value}",
+                    last_message=text or "(photo)",
+                    conv_id=conv_id,
+                    **_escalation_link_kwargs(account, channel_id),
                 )
+                await db.save_conversation_state(
+                    account_id, conv_id, last_processed_msg_id=msg_id
+                )
+                return True
+            if intent in (
+                Intent.POSITIVE,
+                Intent.INTERESTED,
+                Intent.READY,
+                Intent.IMAGE_ONLY,
+                Intent.GAME_ID_TEXT,
+            ):
+                keys = scripts_to_resend_for_step(hist_step)
+                if keys:
+                    logger.info(
+                        "conv=%s resend hist_step=%s keys=%s",
+                        conv_id[:8],
+                        hist_step,
+                        keys,
+                    )
 
     if intent == Intent.JOINED:
         await db.save_conversation_state(
@@ -694,6 +728,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
     try:
         account_id = int(account["id"])
         cookies = _cookies(account)
+        cached = _session_cache.get(account_id)
+        if cached and (time.time() - cached[0]) < _SESSION_CACHE_TTL:
+            cookies = cached[1]
         if not cookies:
             logger.warning(
                 "Worker account=%s: no cookies — refreshing session",
@@ -702,10 +739,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             fresh = await refresh_pager_session(account)
             if not fresh:
                 return
+            _session_cache[account_id] = (time.time(), dict(fresh))
             acc = await db.get_account_by_tg(int(account["tg_user_id"]))
             if acc:
                 account.update(acc)
-            cookies = _cookies(account)
+            cookies = fresh
 
         org_slug = str(
             account.get("org_slug") or _settings.pager_org_slug or ""
@@ -734,27 +772,27 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
 
         client = _make_client(cookies)
         await client.warm_session()
-        probe: dict[str, Any] | None = None
+        session_ok = False
         for attempt in range(2):
             try:
-                probe = await client.probe_session()
+                await client.list_conversations(page_size=1)
+                session_ok = True
                 break
             except PagerAPIError as exc:
                 if attempt == 0 and is_session_error(exc):
                     logger.info(
-                        "Worker account=%s: API probe retry after warm",
+                        "Worker account=%s: poll retry after warm",
                         account_id,
                     )
                     await client.warm_session()
                     continue
                 logger.warning(
-                    "Worker account=%s: API probe failed: %s",
+                    "Worker account=%s: poll failed: %s",
                     account_id,
                     exc,
                 )
-                probe = None
                 break
-        if not probe:
+        if not session_ok:
             logger.warning(
                 "Worker account=%s: session stale — refreshing",
                 account_id,
@@ -762,11 +800,14 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             fresh = await refresh_pager_session(account)
             if not fresh:
                 return
+            _session_cache[account_id] = (time.time(), dict(fresh))
             acc = await db.get_account_by_tg(int(account["tg_user_id"]))
             if acc:
                 account.update(acc)
             client = _make_client(fresh)
             await client.warm_session()
+        else:
+            _session_cache[account_id] = (time.time(), dict(client.cookies))
 
         enabled = await _ensure_enabled_channels(account_id, client)
         if enabled is None:
@@ -858,12 +899,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             ts = _last_msg_ts(conv)
             if st.get("pause_scripts") or st.get("human_takeover"):
                 return (3, ts)
-            # Active funnel dialogs and follow-ups beat cold backlog intros.
-            if not is_no_status(conv):
+            # «Без статусу» always beats funnel folders (new leads first).
+            if is_no_status(conv):
                 return (0, ts)
-            if int(st.get("step") or 0) >= 1:
-                return (0, ts)
-            return (1, ts)
+            return (2, ts)
 
         scored: list[tuple[tuple[int, float], dict]] = []
         for c in inbound_convs:
