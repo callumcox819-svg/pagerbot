@@ -54,6 +54,7 @@ class _CycleSendBuffer:
         self.pager_user_id = pager_user_id
         self.client = client
         self._jobs: dict[str, list[str]] = {}
+        self._script_keys: dict[str, list[str]] = {}
         self._clients: dict[str, str] = {}
         self._channels: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
@@ -63,19 +64,41 @@ class _CycleSendBuffer:
         conv_id: str,
         texts: list[str],
         *,
+        script_keys: list[str] | None = None,
         client_name: str = "",
         channel_id: str = "",
     ) -> None:
         bodies = [t.strip() for t in texts if (t or "").strip()]
-        if not bodies:
+        keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
+        if not bodies and not keys:
             return
-        bucket = self._jobs.setdefault(conv_id, [])
-        bucket.extend(bodies)
+        if bodies:
+            bucket = self._jobs.setdefault(conv_id, [])
+            bucket.extend(bodies)
+        if keys:
+            sk = self._script_keys.setdefault(conv_id, [])
+            sk.extend(keys)
         if client_name:
             self._clients[conv_id] = client_name.strip()
         ch = (channel_id or "").strip()
         if ch:
             self._channels[conv_id] = ch
+
+    def queue_script_send(
+        self,
+        conv_id: str,
+        script_keys: list[str],
+        *,
+        client_name: str = "",
+        channel_id: str = "",
+    ) -> None:
+        self.queue_send(
+            conv_id,
+            [],
+            script_keys=script_keys,
+            client_name=client_name,
+            channel_id=channel_id,
+        )
 
     def queue_commit(self, conv_id: str, **kwargs: Any) -> None:
         for i, (cid, fields) in enumerate(self._commits):
@@ -85,7 +108,8 @@ class _CycleSendBuffer:
         self._commits.append((conv_id, dict(kwargs)))
 
     async def flush(self) -> set[str]:
-        if not self._jobs:
+        conv_ids = set(self._jobs) | set(self._script_keys)
+        if not conv_ids:
             return set()
 
         email = str(self.account.get("email") or "").strip()
@@ -99,17 +123,20 @@ class _CycleSendBuffer:
         jobs = [
             (
                 cid,
-                texts,
+                self._jobs.get(cid, []),
                 self._clients.get(cid, ""),
                 self._channels.get(cid, ""),
+                self._script_keys.get(cid, []),
             )
-            for cid, texts in self._jobs.items()
+            for cid in conv_ids
         ]
-        timeout = min(540.0, 120.0 + 90.0 * len(jobs))
+        timeout = min(720.0, 150.0 + 120.0 * len(jobs))
+        n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
-            "browser batch flush jobs=%s texts=%s",
+            "browser batch flush jobs=%s texts=%s script_keys=%s",
             len(jobs),
             sum(len(job[1]) for job in jobs),
+            n_keys,
         )
         ok, fresh_cookies = await asyncio.wait_for(
             send_batch_via_browser(
@@ -156,6 +183,7 @@ class _CycleSendBuffer:
                 await db.save_conversation_state(account_id, conv_id, **patch)
 
         self._jobs.clear()
+        self._script_keys.clear()
         self._clients.clear()
         self._commits.clear()
         return ok
@@ -353,9 +381,15 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
-    async def _outbound_send(texts: list[str]) -> None:
+    async def _outbound_send(
+        texts: list[str], *, script_keys: list[str] | None = None
+    ) -> None:
         send_buf.queue_send(
-            conv_id, texts, client_name=client_name, channel_id=channel_id
+            conv_id,
+            texts,
+            script_keys=script_keys,
+            client_name=client_name,
+            channel_id=channel_id,
         )
 
     async def send(text: str) -> None:
@@ -409,7 +443,7 @@ async def _handle_conversation(
 
         if step >= 5 and step < 7:
             if extracted:
-                await _outbound_send([EXCELLENT, load_script(geo, "06_deposit")])
+                await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
                 if pager_user_id:
                     await client.patch_status(
                         conv_id, ZM_STATUSES["registration"], pager_user_id
@@ -465,11 +499,8 @@ async def _handle_conversation(
                 **_escalation_link_kwargs(account, channel_id),
             )
             await _outbound_send(
-                [
-                    EXCELLENT,
-                    load_script(geo, "08_tg_invite"),
-                    load_script(geo, "09_tg_link"),
-                ]
+                [EXCELLENT],
+                script_keys=["08_tg_invite", "09_tg_link"],
             )
             if pager_user_id:
                 await client.patch_status(
@@ -484,7 +515,7 @@ async def _handle_conversation(
     if intent == Intent.GAME_ID_TEXT:
         gid = extract_id_from_text(text)
         if gid and step >= 5 and step < 7:
-            await _outbound_send([EXCELLENT, load_script(geo, "06_deposit")])
+            await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
             if pager_user_id:
                 await client.patch_status(
                     conv_id, ZM_STATUSES["registration"], pager_user_id
@@ -543,28 +574,19 @@ async def _handle_conversation(
         )
         return True
 
-    bodies: list[str] = []
-    for key in keys:
-        if keys == ["04_registration", "05_link"] and key == "05_link":
-            continue
-        if keys == ["04_registration", "05_link"] and key == "04_registration":
-            body = (
-                load_script(geo, "04_registration")
-                + "\n\n"
-                + load_script(geo, "05_link")
-            )
-        else:
-            body = load_script(geo, key)
-        bodies.append(body)
-
-    if bodies:
+    if keys:
         logger.info(
-            "conv=%s sending %s script(s) keys=%s",
+            "conv=%s sending %s saved reply(s) keys=%s",
             conv_id[:8],
-            len(bodies),
+            len(keys),
             keys,
         )
-        await _outbound_send(bodies)
+        send_buf.queue_script_send(
+            conv_id,
+            keys,
+            client_name=client_name,
+            channel_id=channel_id,
+        )
         actions_sent = True
 
     new_step = step
@@ -572,7 +594,12 @@ async def _handle_conversation(
         intent == Intent.READY and step >= 2 and step < 4
     ):
         new_step = 4
-        await send(load_script(geo, "10_reg_screenshot"))
+        send_buf.queue_script_send(
+            conv_id,
+            ["10_reg_screenshot"],
+            client_name=client_name,
+            channel_id=channel_id,
+        )
         if pager_user_id:
             await client.patch_status(
                 conv_id, ZM_STATUSES["in_progress"], pager_user_id

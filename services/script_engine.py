@@ -21,7 +21,42 @@ SCRIPT_KEYS = [
     "09_tg_link",
 ]
 
+# Unique substrings to find the right row in Pager saved-replies sidebar (Замбія).
+SCRIPT_UI_SNIPPETS: dict[str, str] = {
+    "01_intro": "Hi! I want to show you",
+    "02_how_it_works": "How it works:",
+    "03_zmw_table": "30 ZMW - 300 ZMW",
+    "04_registration": "promo code ZAM577",
+    "05_link": "tinyurl.com/ZAM577",
+    "06_deposit": "click \"Deposit\"",
+    "07_game_id": "begins with 16",
+    "08_tg_invite": "private Telegram channel",
+    "09_tg_link": "t.me/+",
+    "10_reg_screenshot": "ibb.co",
+}
+
+SAVED_REPLY_FOLDER_NAMES = ("Замбія", "Замбия", "Zambia", "Замб")
+
 _cache: dict[str, str] = {}
+
+
+def script_ui_snippet(key: str) -> str:
+    """Text needle for locating a saved reply in Pager UI."""
+    sn = SCRIPT_UI_SNIPPETS.get(key, "").strip()
+    if sn:
+        return sn
+    try:
+        return load_script("zm", key)[:48].strip()
+    except FileNotFoundError:
+        return key
+
+
+def script_verify_snippet(key: str, geo: str = "zm") -> str:
+    """Substring used to verify delivery in message history."""
+    sn = SCRIPT_UI_SNIPPETS.get(key, "").strip()
+    if sn:
+        return sn
+    return load_script(geo, key)[:80].strip()
 
 
 def load_script(geo: str, key: str) -> str:

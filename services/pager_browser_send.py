@@ -10,6 +10,13 @@ from typing import Sequence
 
 from services.pager_auth import PAGER_BASE, UA, playwright_sign_in_on_page
 
+from services.script_engine import (
+    SAVED_REPLY_FOLDER_NAMES,
+    load_script,
+    script_ui_snippet,
+    script_verify_snippet,
+)
+
 logger = logging.getLogger(__name__)
 
 _API = PAGER_BASE.rstrip("/")
@@ -762,6 +769,190 @@ async def _warm_chat_page(
         logger.warning("chat composer missing conv=%s after open", conv_id[:8])
 
 
+async def _open_saved_replies_panel(page) -> bool:
+    """Click «…» saved-replies button left of the message composer."""
+    if await page.get_by_text("Збережені відповіді", exact=False).count():
+        return True
+    opened = await page.evaluate(
+        """() => {
+            const ta = document.querySelector(
+                'textarea[placeholder*="Напиш"], textarea[placeholder*="повідом"],'
+                + 'textarea[placeholder*="message" i]'
+            );
+            if (!ta) return false;
+            const taRect = ta.getBoundingClientRect();
+            const buttons = [...document.querySelectorAll('button, [role="button"]')]
+                .filter(el => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8) return false;
+                    return Math.abs(r.top - taRect.top) < 48
+                        && r.right <= taRect.left + 8
+                        && r.bottom > taRect.top - 20;
+                })
+                .sort((a, b) => b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+            const trigger = buttons[0];
+            if (!trigger) return false;
+            trigger.click();
+            return true;
+        }"""
+    )
+    if opened:
+        await page.wait_for_timeout(1200)
+        logger.info("browser saved-replies panel opened")
+        return True
+    for sel in (
+        'button:has(svg.tabler-icon-message-2)',
+        'button:has(svg[class*="message"])',
+    ):
+        loc = page.locator(sel)
+        if await loc.count():
+            try:
+                await loc.last.click(timeout=5000)
+                await page.wait_for_timeout(1200)
+                logger.info("browser saved-replies panel opened (%s)", sel)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+async def _open_zambia_saved_folder(page) -> bool:
+    """Open «Замбія» folder inside saved replies."""
+    for name in SAVED_REPLY_FOLDER_NAMES:
+        loc = page.get_by_text(name, exact=False)
+        if await loc.count():
+            try:
+                await loc.first.click(timeout=5000)
+                await page.wait_for_timeout(1000)
+                logger.info("browser saved-replies folder=%s", name)
+                return True
+            except Exception:
+                continue
+    folder = page.locator("div, button, a").filter(
+        has_text=re.compile(r"Замб", re.I)
+    )
+    if await folder.count():
+        await folder.first.click(force=True)
+        await page.wait_for_timeout(1000)
+        logger.info("browser saved-replies folder=Замб (regex)")
+        return True
+    return False
+
+
+async def _ensure_zambia_replies_sidebar(page) -> bool:
+    """Saved replies sidebar open on Zambia folder."""
+    intro = page.get_by_text("Hi! I want to show you", exact=False)
+    if await intro.count():
+        return True
+    if not await _open_saved_replies_panel(page):
+        return False
+    await page.wait_for_timeout(800)
+    if await intro.count():
+        return True
+    if not await _open_zambia_saved_folder(page):
+        return False
+    await page.wait_for_timeout(800)
+    return await intro.count() > 0 or await page.get_by_text(
+        "How it works", exact=False
+    ).count() > 0
+
+
+async def _click_saved_reply_send(page, snippet: str) -> bool:
+    """Click blue send icon on the saved reply row matching snippet."""
+    sn = (snippet or "").strip()
+    if not sn:
+        return False
+    clicked = await page.evaluate(
+        """(snippet) => {
+            const needle = snippet.toLowerCase();
+            const candidates = [];
+            for (const el of document.querySelectorAll('div, li, article, button')) {
+                const t = (el.innerText || '').trim();
+                if (!t || t.length > 600) continue;
+                if (!t.toLowerCase().includes(needle)) continue;
+                candidates.push({ el, len: t.length });
+            }
+            candidates.sort((a, b) => a.len - b.len);
+            for (const { el } of candidates) {
+                let row = el;
+                for (let i = 0; i < 6 && row; i++) {
+                    const buttons = [...row.querySelectorAll('button')];
+                    if (buttons.length >= 1) {
+                        const sendBtn = buttons[buttons.length - 1];
+                        sendBtn.click();
+                        return true;
+                    }
+                    row = row.parentElement;
+                }
+            }
+            return false;
+        }""",
+        sn,
+    )
+    if clicked:
+        await page.wait_for_timeout(1800)
+        logger.info("browser saved-reply send snippet=%r", sn[:40])
+        return True
+    row = page.locator("div").filter(has_text=sn).last
+    if await row.count():
+        btn = row.locator("button").last
+        if await btn.count():
+            await btn.click(force=True)
+            await page.wait_for_timeout(1800)
+            logger.info("browser saved-reply send (locator) snippet=%r", sn[:40])
+            return True
+    return False
+
+
+async def _send_via_saved_reply(
+    page,
+    *,
+    script_key: str,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+) -> None:
+    """Send one canned reply from Замбія folder (operator UI flow)."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    snippet = script_ui_snippet(script_key)
+    verify_text = script_verify_snippet(script_key)
+
+    if not await _ensure_zambia_replies_sidebar(page):
+        raise RuntimeError(
+            f"Saved replies sidebar not open conv={conv_id[:8]}"
+        )
+    if not await _click_saved_reply_send(page, snippet):
+        raise RuntimeError(
+            f"Saved reply not found key={script_key} snippet={snippet[:30]!r}"
+        )
+
+    verify = await _verify_message_delivered(
+        page,
+        conv_id=conv_id,
+        org_id=oid,
+        user_id=uid,
+        text=verify_text,
+        attempts=20,
+    )
+    if verify.get("ghost"):
+        raise RuntimeError(
+            f"Saved reply delivery error (conv={conv_id[:8]}) — red !"
+        )
+    if verify.get("ok"):
+        logger.info(
+            "browser saved-reply sent key=%s conv=%s author=%s fb=%s",
+            script_key,
+            conv_id[:8],
+            str(verify.get("authorId") or uid)[:16],
+            str(verify.get("facebookMessageId") or "")[:12],
+        )
+        return
+    raise RuntimeError(
+        f"Saved reply not verified key={script_key} conv={conv_id[:8]}"
+    )
+
+
 async def _browser_send_via_ui(page, text: str) -> bool:
     if not await _wait_for_chat_composer(page, timeout_ms=20000):
         return False
@@ -942,6 +1133,7 @@ async def _batch_send_one_conv(
     *,
     conv_id: str,
     texts: list[str],
+    script_keys: list[str] | None = None,
     client_name: str,
     channel_hint: str,
     org_id: str,
@@ -949,13 +1141,14 @@ async def _batch_send_one_conv(
     user_id: str,
     locale: str,
 ) -> None:
-    """Open chat via URL + API warm-up, take, POST send (no composer wait)."""
+    """Open chat, take, send via saved replies (Замбія) or POST fallback."""
     uid = (user_id or "").strip()
     oid = (org_id or "").strip()
     slug = (org_slug or "").strip()
     ch = (channel_hint or "").strip()
+    keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
     bodies = [t.strip() for t in texts if (t or "").strip()]
-    if not bodies:
+    if not keys and not bodies:
         return
 
     await _open_conversation_direct(
@@ -1008,10 +1201,36 @@ async def _batch_send_one_conv(
             ch = got
     except Exception as exc:
         logger.warning("prepare outbound conv=%s: %s", conv_id[:8], exc)
-        if not ch:
-            conv = await client.open_conversation(conv_id)
-            if conv:
-                ch = str(conv.get("channelId") or "").strip()
+
+    for i, key in enumerate(keys):
+        if i:
+            await asyncio.sleep(1.0)
+        try:
+            await _send_via_saved_reply(
+                page,
+                script_key=key,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+            )
+        except Exception as exc:
+            logger.warning(
+                "saved-reply failed key=%s conv=%s: %s — POST fallback",
+                key,
+                conv_id[:8],
+                exc,
+            )
+            body = load_script("zm", key)
+            await _send_from_open_chat(
+                page,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+                text=body,
+                locale=locale,
+                org_slug=slug,
+                skip_ui=True,
+            )
 
     for i, body in enumerate(bodies):
         if i:
@@ -2126,6 +2345,7 @@ async def send_batch_via_browser(
         tuple[str, list[str]]
         | tuple[str, list[str], str]
         | tuple[str, list[str], str, str]
+        | tuple[str, list[str], str, str, list[str]]
     ],
     *,
     org_id: str,
@@ -2195,14 +2415,17 @@ async def send_batch_via_browser(
                 texts = job[1]
                 client_name = (job[2] if len(job) > 2 else "").strip()
                 channel_hint = (job[3] if len(job) > 3 else "").strip()
+                script_keys = list(job[4]) if len(job) > 4 else []
                 bodies = [t.strip() for t in texts if (t or "").strip()]
-                if not bodies:
+                keys = [k.strip() for k in script_keys if (k or "").strip()]
+                if not bodies and not keys:
                     continue
                 try:
                     logger.info(
-                        "browser batch conv=%s texts=%s channel=%s client=%r",
+                        "browser batch conv=%s texts=%s keys=%s channel=%s client=%r",
                         conv_id[:8],
                         len(bodies),
+                        keys,
                         channel_hint[:8] if channel_hint else "?",
                         (client_name or "")[:24],
                     )
@@ -2211,6 +2434,7 @@ async def send_batch_via_browser(
                         page,
                         conv_id=conv_id,
                         texts=bodies,
+                        script_keys=keys,
                         client_name=client_name,
                         channel_hint=channel_hint,
                         org_id=oid,
