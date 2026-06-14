@@ -175,7 +175,7 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
     if intent in ("positive", "ready") and step >= 2 and step < 4:
         return ["04_registration", "05_link"]
     if intent == "game_id_text" or (intent == "image_only" and step >= 5):
-        if step < 7:
+        if step < 7 and step >= 4:
             return ["07_game_id"] if step < 6 else []
     if step >= 8 and intent != "joined":
         return ["08_tg_invite", "09_tg_link"]

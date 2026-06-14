@@ -13,7 +13,7 @@ from aiogram import Bot
 
 import database as db
 from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
-from services.ai_intent import Intent, classify, needs_human
+from services.ai_intent import Intent, classify, needs_human, wants_registration_followup
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
@@ -65,6 +65,7 @@ class _CycleSendBuffer:
         self._channels: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
         self._status_patches: dict[str, list[str]] = {}
+        self._order: list[str] = []
 
     def queue_send(
         self,
@@ -91,6 +92,8 @@ class _CycleSendBuffer:
         ch = (channel_id or "").strip()
         if ch:
             self._channels[conv_id] = ch
+        if conv_id not in self._order:
+            self._order.append(conv_id)
 
     def queue_script_send(
         self,
@@ -121,9 +124,14 @@ class _CycleSendBuffer:
             self._status_patches.setdefault(conv_id, []).append(sid)
 
     async def flush(self) -> set[str]:
-        conv_ids = set(self._jobs) | set(self._script_keys)
-        if not conv_ids:
+        conv_ids_set = set(self._jobs) | set(self._script_keys)
+        if not conv_ids_set:
             return set()
+
+        conv_ids = [c for c in self._order if c in conv_ids_set]
+        for cid in conv_ids_set:
+            if cid not in conv_ids:
+                conv_ids.append(cid)
 
         email = str(self.account.get("email") or "").strip()
         pwd_enc = str(self.account.get("password_enc") or "").strip()
@@ -210,8 +218,10 @@ class _CycleSendBuffer:
         self._jobs.clear()
         self._script_keys.clear()
         self._clients.clear()
+        self._channels.clear()
         self._commits.clear()
         self._status_patches.clear()
+        self._order.clear()
         return ok
 
 
@@ -277,14 +287,6 @@ async def _handle_conversation(
         return False
 
     state = await db.get_conversation_state(account_id, conv_id)
-    if state.get("human_takeover") or state.get("pause_scripts"):
-        logger.info(
-            "conv=%s skipped paused=%s human=%s",
-            conv_id[:8],
-            bool(state.get("pause_scripts")),
-            bool(state.get("human_takeover")),
-        )
-        return "paused"
     if int(state.get("send_failures") or 0) >= 5:
         logger.info(
             "conv=%s skipped send_failures=%s (use /reset_pauses)",
@@ -371,6 +373,12 @@ async def _handle_conversation(
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         if not needs_reply:
             return "done"
+        if state.get("pause_scripts"):
+            logger.info(
+                "conv=%s skip — already handled (paused, no client reply yet)",
+                conv_id[:8],
+            )
+            return "paused"
         logger.info(
             "conv=%s retry: was marked processed but no reply sent",
             conv_id[:8],
@@ -392,20 +400,42 @@ async def _handle_conversation(
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
 
-    logger.info(
-        "conv=%s intent=%s step=%s retry=%s text=%r",
-        conv_id[:8],
-        intent.value,
-        step,
-        is_retry,
-        (text or "(photo)")[:40],
-    )
-
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
     folder = ((conv.get("status") or {}) or {}).get("name") or ""
 
     esc_chat = _escalation_chat(account)
+
+    post_intro_followup = (
+        needs_reply
+        and hist_step >= 1
+        and hist_step < 4
+        and (
+            intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
+            or wants_registration_followup(text)
+        )
+    )
+
+    logger.info(
+        "conv=%s intent=%s step=%s hist_step=%s post_intro=%s folder=%r retry=%s text=%r",
+        conv_id[:8],
+        intent.value,
+        step,
+        hist_step,
+        post_intro_followup,
+        folder[:24] if folder else "",
+        is_retry,
+        (text or "(photo)")[:40],
+    )
+
+    if state.get("human_takeover"):
+        logger.info("conv=%s skipped human_takeover", conv_id[:8])
+        return "paused"
+    if state.get("pause_scripts") and not post_intro_followup:
+        logger.info("conv=%s skipped pause_scripts", conv_id[:8])
+        return "paused"
+    if state.get("pause_scripts") and post_intro_followup:
+        await db.save_conversation_state(account_id, conv_id, pause_scripts=0)
 
     async def _outbound_send(
         texts: list[str], *, script_keys: list[str] | None = None
@@ -436,7 +466,13 @@ async def _handle_conversation(
         return "done"
 
     # --- Complaints / unclear → TG only ---
-    if needs_human(intent, step, no_status=no_status) and intent != Intent.IMAGE_ONLY:
+    if (
+        needs_human(intent, step, no_status=no_status)
+        and not post_intro_followup
+        and intent != Intent.IMAGE_ONLY
+    ):
+        if state.get("last_processed_msg_id") == msg_id and state.get("pause_scripts"):
+            return "paused"
         await notify_escalation(
             bot,
             esc_chat,
@@ -560,6 +596,8 @@ async def _handle_conversation(
     if no_status and needs_reply:
         if intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED):
             keys = scripts_for_positive_reply(hist_step)
+        elif hist_step >= 1 and wants_registration_followup(text):
+            keys = scripts_for_positive_reply(hist_step)
         elif hist_step < 1:
             keys = ["01_intro"]
         elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
@@ -578,10 +616,16 @@ async def _handle_conversation(
             keys = ["01_intro"]
         elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and hist_step >= 1:
             keys = scripts_for_positive_reply(hist_step)
+        elif hist_step >= 1 and wants_registration_followup(text):
+            keys = scripts_for_positive_reply(hist_step)
         elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
             keys = ["04_registration", "05_link"]
         elif needs_reply and not keys:
-            if intent in (Intent.QUESTION, Intent.UNKNOWN) and step >= 3:
+            if (
+                intent in (Intent.QUESTION, Intent.UNKNOWN)
+                and step >= 3
+                and not post_intro_followup
+            ):
                 await notify_escalation(
                     bot,
                     esc_chat,
@@ -638,12 +682,9 @@ async def _handle_conversation(
         actions_sent = True
 
     new_step = step
-    if keys == ["04_registration", "05_link"] or (
-        intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY)
-        and hist_step >= 1
-        and hist_step < 4
-    ) or (
-        intent == Intent.READY and step >= 2 and step < 4
+    reg_keys = {"04_registration", "05_link"}
+    if reg_keys.intersection(keys) or (
+        post_intro_followup and hist_step < 4
     ):
         new_step = 4
         if pager_user_id:
@@ -654,7 +695,7 @@ async def _handle_conversation(
         new_step = max(new_step, 1)
     elif keys == ["02_how_it_works", "03_zmw_table"]:
         new_step = max(new_step, 2)
-    elif keys and keys[-1] == "07_game_id":
+    elif "07_game_id" in keys and hist_step >= 4:
         new_step = max(new_step, 6)
         if pager_user_id:
             send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])

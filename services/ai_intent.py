@@ -30,7 +30,9 @@ _ACK = re.compile(
     re.I,
 )
 _POSITIVE = re.compile(
-    r"\b(yes|ok|okay|explain|i am|you can|sure|alright|got it)\b", re.I
+    r"\b(yes|ok|okay|explain|i am|you can|sure|alright|got it|"
+    r"how can i start|how do i start|how to start)\b",
+    re.I,
 )
 _READY = re.compile(
     r"\b(am ready|i'?m ready|let'?s start|start today|ready to start)\b", re.I
@@ -40,6 +42,22 @@ _COMPLAINT = re.compile(
     r"\b(lost|didn'?t win|scam|taking my money|stop|refund|nothing happened)\b", re.I
 )
 _GAME_ID = re.compile(r"\b16\d{6,}\b")
+_REGISTRATION_FOLLOWUP = re.compile(
+    r"\b(explain|how can i start|how do i start|how to start|tell me how|"
+    r"how does it work|how it works|what do i do|what should i do|"
+    r"what is next|what's next|next step|get started|start now)\b",
+    re.I,
+)
+
+
+def wants_registration_followup(text: str) -> bool:
+    """After intro — treat start/how/explain questions like a positive reply."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"explain\??", t, re.I):
+        return True
+    return bool(_REGISTRATION_FOLLOWUP.search(t))
 
 
 def classify(
