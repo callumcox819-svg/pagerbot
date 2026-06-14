@@ -670,16 +670,9 @@ async def _browser_prepare_outbound(
                 break
         patch_st = int(result.get("patchStatus") or 0)
         if not result.get("responsibleOk"):
-            if patch_st in (200, 204):
-                logger.warning(
-                    "browser prepare conv=%s PATCH %s — proceed without verified take",
-                    conv_id[:8],
-                    patch_st,
-                )
-            else:
-                raise RuntimeError(
-                    f"Take chat failed conv={conv_id[:8]} PATCH={patch_st}"
-                )
+            raise RuntimeError(
+                f"Take chat not verified conv={conv_id[:8]} PATCH={patch_st}"
+            )
 
     ch = str(result.get("channelId") or "").strip()
     if not ch:
@@ -732,8 +725,90 @@ async def _fast_goto_chat(
     except Exception:
         pass
     await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
     await page.wait_for_timeout(1500)
     logger.info("browser chat goto conv=%s", conv_id[:8])
+
+
+async def _ensure_take_verified(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+    locale: str,
+    org_slug: str,
+) -> str:
+    """Take chat as operator — required before send (no ghosts)."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
+
+    for attempt in range(12):
+        await _click_take_ui(page, conv_id)
+        await page.evaluate(
+            f"""async ({{url, userId}}) => {{
+                {_SAFE_FETCH}
+                await safeJsonFetch(url, {{
+                    method: 'PATCH',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{
+                        responsibleUserId: userId,
+                        conversationState: 'read',
+                    }}),
+                }});
+            }}""",
+            {"url": patch_url, "userId": uid},
+        )
+        await page.wait_for_timeout(1500)
+        check = await _poll_take_state(
+            page, conv_id=conv_id, org_id=oid, user_id=uid
+        )
+        if check.get("sessionError"):
+            await _fast_goto_chat(
+                page, locale=locale, org_slug=org_slug, conv_id=conv_id
+            )
+            continue
+        if (
+            check.get("responsibleOk")
+            or check.get("systemTake")
+            or check.get("alreadyTaken")
+        ):
+            conv_url = _api(f"/api/conversation/{conv_id}?orgId={oid}")
+            ch = await page.evaluate(
+                f"""async ({{convUrl}}) => {{
+                    {_SAFE_FETCH}
+                    const convR = await safeJsonFetch(convUrl);
+                    const conv = convR.data || {{}};
+                    return conv.channelId || (conv.channel && conv.channel.id) || '';
+                }}""",
+                {"convUrl": conv_url},
+            )
+            ch = str(ch or "").strip()
+            logger.info(
+                "browser take verified conv=%s resp=%s channel=%s try=%s",
+                conv_id[:8],
+                str(check.get("responsibleId") or uid)[:16],
+                ch[:8] if ch else "?",
+                attempt,
+            )
+            msg_url = _api(
+                f"/api/message?convId={conv_id}&orgId={oid}&pageSize=5&page=1"
+            )
+            await page.evaluate(
+                f"""async ({{msgUrl}}) => {{
+                    {_SAFE_FETCH}
+                    await safeJsonFetch(msgUrl);
+                }}""",
+                {"msgUrl": msg_url},
+            )
+            return ch
+        await page.wait_for_timeout(800)
+
+    raise RuntimeError(f"Take chat not verified conv={conv_id[:8]}")
 
 
 async def _fast_take_chat(
@@ -742,15 +817,17 @@ async def _fast_take_chat(
     conv_id: str,
     org_id: str,
     user_id: str,
+    locale: str = "uk",
+    org_slug: str = "",
 ) -> str:
-    """PATCH assign + warm conv — no long poll loops."""
-    uid = (user_id or "").strip()
-    oid = (org_id or "").strip()
-    channel_id = await _browser_prepare_outbound(
-        page, conv_id=conv_id, org_id=oid, user_id=uid
+    return await _ensure_take_verified(
+        page,
+        conv_id=conv_id,
+        org_id=org_id,
+        user_id=user_id,
+        locale=locale,
+        org_slug=org_slug,
     )
-    await _click_take_ui(page, conv_id)
-    return channel_id
 
 
 async def _post_via_context_request(
@@ -891,108 +968,65 @@ async def _send_one_in_session(
             )
             ref = f"{PAGER_BASE}/{loc}/{slug}/chats/{conv_id}"
 
-    # Operator UI sends {conversationId, text} + userId query — try that first.
-    payloads: list[dict] = [{"conversationId": conv_id, "text": text}]
-    if ch and uid:
-        payloads.append(
-            {
-                "conversationId": conv_id,
-                "text": text,
-                "channelId": ch,
-                "authorId": uid,
-            }
-        )
-
+    # Operator UI: POST {conversationId, text} + userId query only (no channelId).
+    payload = {"conversationId": conv_id, "text": text}
     last_err = ""
     last_status = 0
 
-    for payload in payloads:
-        result = await _post_message_try(
-            context, page, post_url=post_url, payload=payload, referer=ref
-        )
-        status = int(result.get("status") or 0)
-        author = str(result.get("authorId") or "").strip()
-        fb = str(result.get("facebookMessageId") or "").strip()
-        last_err = str(result.get("error") or result.get("raw") or last_err)[:400]
-        last_status = status or last_status
-
-        if result.get("html") or str(last_err).lstrip().startswith("<!DOCTYPE"):
-            logger.warning(
-                "browser POST conv=%s got HTML keys=%s",
-                conv_id[:8],
-                sorted(payload.keys()),
-            )
-            continue
-        if status >= 400:
-            logger.warning(
-                "browser POST conv=%s status=%s keys=%s err=%s",
-                conv_id[:8],
-                status,
-                sorted(payload.keys()),
-                last_err[:160],
-            )
-        elif author == uid and (result.get("isDelivered") or fb):
-            logger.info(
-                "browser POST sent conv=%s author=%s fb=%s keys=%s",
-                conv_id[:8],
-                author[:16],
-                fb[:12],
-                sorted(payload.keys()),
-            )
-            return
-        elif author and author != uid:
-            logger.warning(
-                "browser POST wrong author conv=%s author=%s",
-                conv_id[:8],
-                author[:16],
-            )
-        else:
-            verify = await _verify_message_delivered(
-                page,
-                conv_id=conv_id,
-                org_id=org_id,
-                user_id=user_id,
-                text=text,
-                attempts=12,
-            )
-            if verify.get("ok"):
-                logger.info(
-                    "browser POST sent conv=%s author=%s fb=%s (verified)",
-                    conv_id[:8],
-                    str(verify.get("authorId") or user_id)[:16],
-                    str(verify.get("facebookMessageId") or "")[:12],
-                )
-                return
-
-    page_msg = await _find_outgoing_by_text(
-        page, conv_id=conv_id, org_id=org_id, text=text
+    result = await _post_message_try(
+        context, page, post_url=post_url, payload=payload, referer=ref
     )
-    if page_msg and not page_msg.get("authorId"):
-        dom = await _verify_outgoing_dom(page, text)
-        if dom.get("ghost"):
-            raise RuntimeError(
-                f"Message delivery error in UI (conv={conv_id[:8]}) — red !"
-            )
+    status = int(result.get("status") or 0)
+    author = str(result.get("authorId") or "").strip()
+    fb = str(result.get("facebookMessageId") or "").strip()
+    last_err = str(result.get("error") or result.get("raw") or last_err)[:400]
+    last_status = status or last_status
+
+    if result.get("html") or str(last_err).lstrip().startswith("<!DOCTYPE"):
         raise RuntimeError(
-            f"Message stuck as Facebook page (conv={conv_id[:8]}) — not retrying"
+            f"Send POST HTML conv={conv_id[:8]} — chat session not active"
+        )
+    if status >= 400:
+        raise RuntimeError(
+            f"Send POST failed conv={conv_id[:8]} status={status}: {last_err[:200]}"
+        )
+    if author == uid and fb and result.get("isDelivered"):
+        logger.info(
+            "browser POST sent conv=%s author=%s fb=%s",
+            conv_id[:8],
+            author[:16],
+            fb[:12],
+        )
+        return
+    if author and author != uid:
+        raise RuntimeError(
+            f"Send as wrong author conv={conv_id[:8]} author={author[:16]}"
         )
 
-    dom = await _verify_outgoing_dom(page, text)
-    if dom.get("ghost"):
+    verify = await _verify_message_delivered(
+        page,
+        conv_id=conv_id,
+        org_id=org_id,
+        user_id=user_id,
+        text=text,
+        attempts=15,
+    )
+    if verify.get("ghost"):
         raise RuntimeError(
             f"Message delivery error in UI (conv={conv_id[:8]}) — red !"
         )
-    if dom.get("ok") and dom.get("hasAvatar"):
+    if verify.get("ok") and str(verify.get("facebookMessageId") or "").strip():
         logger.info(
-            "browser DOM verified conv=%s preview=%r",
+            "browser POST sent conv=%s author=%s fb=%s (verified)",
             conv_id[:8],
-            dom.get("preview", "")[:40],
+            str(verify.get("authorId") or user_id)[:16],
+            str(verify.get("facebookMessageId") or "")[:12],
         )
         return
 
     raise RuntimeError(
-        f"Send POST failed conv={conv_id[:8]} status={last_status}: "
-        f"{last_err or 'not delivered as operator'}"
+        f"Send not delivered conv={conv_id[:8]} status={last_status}: "
+        f"{last_err or 'no facebookMessageId'}"
     )
 
 
@@ -1009,43 +1043,16 @@ async def _send_operator_text(
     channel_id: str = "",
 ) -> None:
     referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
-    try:
-        await _send_one_in_session(
-            context,
-            page,
-            conv_id=conv_id,
-            org_id=org_id,
-            user_id=user_id,
-            text=text,
-            referer=referer,
-            channel_id=channel_id,
-        )
-        return
-    except RuntimeError as exc:
-        logger.warning(
-            "browser POST failed conv=%s: %s — try UI",
-            conv_id[:8],
-            exc,
-        )
-
-    if await _browser_send_via_ui(page, text):
-        verify = await _verify_message_delivered(
-            page,
-            conv_id=conv_id,
-            org_id=org_id,
-            user_id=user_id,
-            text=text,
-            attempts=10,
-        )
-        if verify.get("ok"):
-            logger.info(
-                "browser UI sent conv=%s author=%s fb=%s",
-                conv_id[:8],
-                str(verify.get("authorId") or user_id)[:16],
-                str(verify.get("facebookMessageId") or "")[:12],
-            )
-            return
-    raise RuntimeError(f"Send failed conv={conv_id[:8]} — POST and UI")
+    await _send_one_in_session(
+        context,
+        page,
+        conv_id=conv_id,
+        org_id=org_id,
+        user_id=user_id,
+        text=text,
+        referer=referer,
+        channel_id=channel_id,
+    )
 
 
 async def _find_outgoing_by_text(
@@ -1312,10 +1319,10 @@ async def send_batch_via_browser(
     locale: str = "uk",
     email: str = "",
     password: str = "",
-) -> set[str]:
-    """One Playwright login, send to multiple conversations. Returns successful conv ids."""
+) -> tuple[set[str], dict[str, str]]:
+    """One Playwright login, send to multiple conversations. Returns (ok conv ids, cookies)."""
     if not jobs:
-        return set()
+        return set(), {}
 
     slug = (org_slug or "").strip()
     oid = (org_id or "").strip()
@@ -1329,6 +1336,7 @@ async def send_batch_via_browser(
     from playwright.async_api import async_playwright
 
     ok: set[str] = set()
+    fresh_cookies: dict[str, str] = {}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=launch_args)
@@ -1375,6 +1383,8 @@ async def send_batch_via_browser(
                         conv_id=conv_id,
                         org_id=oid,
                         user_id=uid,
+                        locale=locale,
+                        org_slug=slug,
                     )
                     for i, body in enumerate(bodies):
                         if i:
@@ -1398,8 +1408,19 @@ async def send_batch_via_browser(
                         exc,
                     )
         finally:
+            try:
+                for c in await context.cookies():
+                    dom = str(c.get("domain") or "")
+                    if "pager.co.ua" not in dom:
+                        continue
+                    name = str(c.get("name") or "")
+                    if name.startswith("_pager_"):
+                        continue
+                    fresh_cookies[name] = str(c.get("value") or "")
+            except Exception:
+                pass
             await browser.close()
-    return ok
+    return ok, fresh_cookies
 
 
 async def send_messages_via_browser(

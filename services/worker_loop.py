@@ -97,7 +97,7 @@ class _CycleSendBuffer:
             len(jobs),
             sum(len(job[1]) for job in jobs),
         )
-        ok = await asyncio.wait_for(
+        ok, fresh_cookies = await asyncio.wait_for(
             send_batch_via_browser(
                 jobs,
                 org_id=self.org_id,
@@ -109,6 +109,16 @@ class _CycleSendBuffer:
             ),
             timeout=timeout,
         )
+        if fresh_cookies:
+            self.client.cookies.update(fresh_cookies)
+            try:
+                await db.upsert_account(
+                    int(self.account["tg_user_id"]),
+                    session_enc=_secrets.encrypt(json.dumps(self.client.cookies)),
+                    session_ok=1,
+                )
+            except Exception:
+                pass
 
         account_id = int(self.account["id"])
         uid = self.pager_user_id
