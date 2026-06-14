@@ -707,6 +707,117 @@ async def _browser_prepare_outbound(
     return ch
 
 
+async def _fast_goto_chat(
+    page,
+    *,
+    locale: str,
+    org_slug: str,
+    conv_id: str,
+) -> None:
+    """Open chat URL and wait for Pager to load message history API."""
+    chat_url = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    api_needle = f"convId={conv_id}"
+    try:
+        async with page.expect_response(
+            lambda r: (
+                api_needle in r.url
+                and "/api/message" in r.url
+                and r.status == 200
+            ),
+            timeout=20000,
+        ):
+            await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+        logger.info("browser chat loaded conv=%s (api)", conv_id[:8])
+        return
+    except Exception:
+        pass
+    await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(1500)
+    logger.info("browser chat goto conv=%s", conv_id[:8])
+
+
+async def _fast_take_chat(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+) -> str:
+    """PATCH assign + warm conv — no long poll loops."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    channel_id = await _browser_prepare_outbound(
+        page, conv_id=conv_id, org_id=oid, user_id=uid
+    )
+    await _click_take_ui(page, conv_id)
+    return channel_id
+
+
+async def _post_via_context_request(
+    context,
+    *,
+    post_url: str,
+    payload: dict,
+    referer: str,
+) -> dict:
+    import json as _json
+
+    resp = await context.request.post(
+        post_url,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Referer": referer,
+            "Origin": PAGER_BASE,
+        },
+        data=_json.dumps(payload),
+    )
+    raw = (await resp.text())[:400]
+    data = None
+    try:
+        data = _json.loads(raw) if raw else None
+    except _json.JSONDecodeError:
+        data = None
+    html = raw.lstrip().startswith("<!")
+    body = data if isinstance(data, dict) else {}
+    err = ""
+    if isinstance(body.get("error"), str):
+        err = body["error"]
+    elif isinstance(body.get("message"), str):
+        err = body["message"]
+    elif html:
+        err = "HTML response"
+    return {
+        "status": resp.status,
+        "html": html,
+        "error": err,
+        "raw": raw,
+        "authorId": str(body.get("authorId") or ""),
+        "isDelivered": bool(body.get("isDelivered")),
+        "facebookMessageId": str(body.get("facebookMessageId") or ""),
+        "bodyKeys": sorted(payload.keys()),
+    }
+
+
+async def _post_message_try(
+    context,
+    page,
+    *,
+    post_url: str,
+    payload: dict,
+    referer: str,
+) -> dict:
+    """Try Playwright request context first, then in-page fetch."""
+    result = await _post_via_context_request(
+        context, post_url=post_url, payload=payload, referer=referer
+    )
+    if not result.get("html") and int(result.get("status") or 0) < 500:
+        return result
+    return await _post_message_payload(
+        page, post_url=post_url, payload=payload, referer=referer
+    )
+
+
 async def _post_message_payload(
     page,
     *,
@@ -767,20 +878,21 @@ async def _send_one_in_session(
 
     if conv_id not in page.url:
         logger.warning(
-            "browser POST conv=%s off chat page — re-open",
+            "browser POST conv=%s off chat page — goto",
             conv_id[:8],
         )
-        slug_match = re.search(r"/([^/]+)/chats", page.url)
+        slug_match = re.search(r"/([^/]+)/chats", ref or page.url)
         slug = slug_match.group(1) if slug_match else ""
-        loc_match = re.search(r"/(uk|en)/", page.url)
+        loc_match = re.search(r"/(uk|en)/", ref or page.url)
         loc = loc_match.group(1) if loc_match else "uk"
         if slug:
-            await _open_conversation_in_ui(
+            await _fast_goto_chat(
                 page, locale=loc, org_slug=slug, conv_id=conv_id
             )
             ref = f"{PAGER_BASE}/{loc}/{slug}/chats/{conv_id}"
 
-    payloads: list[dict] = []
+    # Operator UI sends {conversationId, text} + userId query — try that first.
+    payloads: list[dict] = [{"conversationId": conv_id, "text": text}]
     if ch and uid:
         payloads.append(
             {
@@ -790,14 +902,13 @@ async def _send_one_in_session(
                 "authorId": uid,
             }
         )
-    payloads.append({"conversationId": conv_id, "text": text})
 
     last_err = ""
     last_status = 0
 
     for payload in payloads:
-        result = await _post_message_payload(
-            page, post_url=post_url, payload=payload, referer=ref
+        result = await _post_message_try(
+            context, page, post_url=post_url, payload=payload, referer=ref
         )
         status = int(result.get("status") or 0)
         author = str(result.get("authorId") or "").strip()
@@ -898,6 +1009,25 @@ async def _send_operator_text(
     channel_id: str = "",
 ) -> None:
     referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    try:
+        await _send_one_in_session(
+            context,
+            page,
+            conv_id=conv_id,
+            org_id=org_id,
+            user_id=user_id,
+            text=text,
+            referer=referer,
+            channel_id=channel_id,
+        )
+        return
+    except RuntimeError as exc:
+        logger.warning(
+            "browser POST failed conv=%s: %s — try UI",
+            conv_id[:8],
+            exc,
+        )
+
     if await _browser_send_via_ui(page, text):
         verify = await _verify_message_delivered(
             page,
@@ -905,7 +1035,7 @@ async def _send_operator_text(
             org_id=org_id,
             user_id=user_id,
             text=text,
-            attempts=15,
+            attempts=10,
         )
         if verify.get("ok"):
             logger.info(
@@ -915,20 +1045,7 @@ async def _send_operator_text(
                 str(verify.get("facebookMessageId") or "")[:12],
             )
             return
-        logger.warning("UI unverified conv=%s — trying API POST", conv_id[:8])
-    else:
-        logger.warning("UI composer missing conv=%s — trying API POST", conv_id[:8])
-
-    await _send_one_in_session(
-        context,
-        page,
-        conv_id=conv_id,
-        org_id=org_id,
-        user_id=user_id,
-        text=text,
-        referer=referer,
-        channel_id=channel_id,
-    )
+    raise RuntimeError(f"Send failed conv={conv_id[:8]} — POST and UI")
 
 
 async def _find_outgoing_by_text(
@@ -1230,56 +1347,38 @@ async def send_batch_via_browser(
             )
             org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
             await page.goto(org_inbox, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_timeout(2000)
             await _click_no_status_tab(page)
             await _verify_logged_in_operator(page, uid)
+            logger.info("browser inbox ready")
 
             for job in jobs:
                 conv_id = job[0]
                 texts = job[1]
-                client_name = job[2] if len(job) > 2 else ""
                 bodies = [t.strip() for t in texts if (t or "").strip()]
                 if not bodies:
                     continue
                 try:
                     logger.info(
-                        "browser batch conv=%s texts=%s client=%r",
+                        "browser batch conv=%s texts=%s",
                         conv_id[:8],
                         len(bodies),
-                        (client_name or "")[:24],
                     )
-                    opened = await _open_conversation_in_ui(
+                    await _fast_goto_chat(
                         page,
                         locale=locale,
                         org_slug=slug,
                         conv_id=conv_id,
-                        client_name=client_name,
                     )
-                    if not opened:
-                        chat_url = f"{org_inbox}/{conv_id}"
-                        logger.warning(
-                            "batch conv=%s not active — force URL",
-                            conv_id[:8],
-                        )
-                        await page.goto(
-                            chat_url, wait_until="domcontentloaded", timeout=90000
-                        )
-                        await page.wait_for_timeout(2000)
-                        await _click_take_ui(page, conv_id)
-                    await _click_take_ui(page, conv_id)
-                    channel_id = await _browser_prepare_outbound(
-                        page, conv_id=conv_id, org_id=oid, user_id=uid
+                    channel_id = await _fast_take_chat(
+                        page,
+                        conv_id=conv_id,
+                        org_id=oid,
+                        user_id=uid,
                     )
-                    await _click_take_ui(page, conv_id)
-                    await page.wait_for_timeout(800)
-                    if not await _wait_for_chat_composer(page, timeout_ms=35000):
-                        logger.warning(
-                            "batch conv=%s composer slow — UI/POST anyway",
-                            conv_id[:8],
-                        )
                     for i, body in enumerate(bodies):
                         if i:
-                            await page.wait_for_timeout(1200)
+                            await page.wait_for_timeout(800)
                         await _send_operator_text(
                             context,
                             page,
@@ -1292,8 +1391,6 @@ async def send_batch_via_browser(
                             channel_id=channel_id,
                         )
                     ok.add(conv_id)
-                    await _ensure_inbox(page, locale=locale, org_slug=slug)
-                    await page.wait_for_timeout(800)
                 except Exception as exc:
                     logger.warning(
                         "browser batch conv=%s failed: %s",

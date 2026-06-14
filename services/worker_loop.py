@@ -91,7 +91,7 @@ class _CycleSendBuffer:
             (cid, texts, self._clients.get(cid, ""))
             for cid, texts in self._jobs.items()
         ]
-        timeout = min(540.0, 120.0 + 55.0 * len(jobs))
+        timeout = min(540.0, 90.0 + 75.0 * len(jobs))
         logger.info(
             "browser batch flush jobs=%s texts=%s",
             len(jobs),
@@ -725,7 +725,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "4")))
+        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "2")))
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
