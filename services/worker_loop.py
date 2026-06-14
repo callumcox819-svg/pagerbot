@@ -54,14 +54,19 @@ class _CycleSendBuffer:
         self.pager_user_id = pager_user_id
         self.client = client
         self._jobs: dict[str, list[str]] = {}
+        self._clients: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
 
-    def queue_send(self, conv_id: str, texts: list[str]) -> None:
+    def queue_send(
+        self, conv_id: str, texts: list[str], *, client_name: str = ""
+    ) -> None:
         bodies = [t.strip() for t in texts if (t or "").strip()]
         if not bodies:
             return
         bucket = self._jobs.setdefault(conv_id, [])
         bucket.extend(bodies)
+        if client_name:
+            self._clients[conv_id] = client_name.strip()
 
     def queue_commit(self, conv_id: str, **kwargs: Any) -> None:
         for i, (cid, fields) in enumerate(self._commits):
@@ -82,7 +87,10 @@ class _CycleSendBuffer:
                 "Account email/password required — reconnect Pager in Telegram bot"
             )
 
-        jobs = list(self._jobs.items())
+        jobs = [
+            (cid, texts, self._clients.get(cid, ""))
+            for cid, texts in self._jobs.items()
+        ]
         timeout = min(540.0, 120.0 + 55.0 * len(jobs))
         logger.info(
             "browser batch flush jobs=%s texts=%s",
@@ -124,6 +132,7 @@ class _CycleSendBuffer:
                 await db.save_conversation_state(account_id, conv_id, **patch)
 
         self._jobs.clear()
+        self._clients.clear()
         self._commits.clear()
         return ok
 
@@ -293,10 +302,10 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def _outbound_send(texts: list[str]) -> None:
-        send_buf.queue_send(conv_id, texts)
+        send_buf.queue_send(conv_id, texts, client_name=client_name)
 
     async def send(text: str) -> None:
-        send_buf.queue_send(conv_id, [text])
+        send_buf.queue_send(conv_id, [text], client_name=client_name)
 
     # Waiting for game ID / deposit photo — ignore short acks once operator replied.
     if (

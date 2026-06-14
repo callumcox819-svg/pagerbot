@@ -352,6 +352,114 @@ async def _wait_for_chat_composer(page, timeout_ms: int = 45000) -> bool:
     return False
 
 
+async def _click_no_status_tab(page) -> bool:
+    """Filter inbox to «Без статусу» — matches worker backlog queue."""
+    for pattern in (
+        r"без\s*статусу",
+        r"no\s*status",
+        r"without\s*status",
+    ):
+        tab = page.get_by_role("tab", name=re.compile(pattern, re.I))
+        if await tab.count():
+            await tab.first.click(force=True)
+            await page.wait_for_timeout(1200)
+            logger.info("browser tab «Без статусу»")
+            return True
+        link = page.get_by_role("link", name=re.compile(pattern, re.I))
+        if await link.count():
+            await link.first.click(force=True)
+            await page.wait_for_timeout(1200)
+            logger.info("browser link «Без статусу»")
+            return True
+        btn = page.locator("button, a, [role='tab']").filter(
+            has_text=re.compile(pattern, re.I)
+        )
+        if await btn.count():
+            await btn.first.click(force=True)
+            await page.wait_for_timeout(1200)
+            logger.info("browser filter «Без статусу»")
+            return True
+    return False
+
+
+async def _click_conv_in_sidebar(page, conv_id: str) -> bool:
+    """Click chat row in sidebar — Next.js Link or clickable row."""
+    cid = conv_id.strip()
+    if not cid:
+        return False
+    clicked = await page.evaluate(
+        f"""() => {{
+            const id = "{cid}";
+            const candidates = [
+                ...document.querySelectorAll(
+                    'a[href*="' + id + '"], [href*="' + id + '"]'
+                ),
+            ];
+            for (const el of candidates) {{
+                try {{
+                    el.scrollIntoView({{block: 'center', behavior: 'instant'}});
+                }} catch (_) {{}}
+                el.click();
+                return 'link';
+            }}
+            const all = document.querySelectorAll(
+                'a, [role="button"], [class*="cursor-pointer"], li, div'
+            );
+            for (const el of all) {{
+                const href = el.getAttribute('href') || '';
+                const html = el.outerHTML || '';
+                if (!href.includes(id) && !html.includes(id)) continue;
+                try {{
+                    el.scrollIntoView({{block: 'center', behavior: 'instant'}});
+                }} catch (_) {{}}
+                el.click();
+                return 'row';
+            }}
+            return '';
+        }}"""
+    )
+    if clicked:
+        await page.wait_for_timeout(2500)
+        logger.info("browser sidebar click conv=%s (%s)", cid[:8], clicked)
+        return True
+    return False
+
+
+async def _search_and_open_chat(
+    page, *, client_name: str, conv_id: str
+) -> bool:
+    """Use Pager search box when chat row is off-screen."""
+    name = (client_name or "").strip()
+    if not name or len(name) < 2:
+        return False
+    search = page.get_by_placeholder(re.compile(r"пошук|search", re.I))
+    if not await search.count():
+        search = page.locator('input[type="search"], input[type="text"]').first
+        if not await search.count():
+            return False
+    try:
+        await search.first.click()
+        await search.first.fill("")
+        await search.first.fill(name[:40])
+        await page.wait_for_timeout(1800)
+        if await _click_conv_in_sidebar(page, conv_id):
+            return True
+        await search.first.fill("")
+        await page.wait_for_timeout(400)
+    except Exception as exc:
+        logger.debug("search open conv=%s: %s", conv_id[:8], exc)
+    return False
+
+
+async def _ensure_inbox(page, *, locale: str, org_slug: str) -> str:
+    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
+    if inbox not in page.url:
+        await page.goto(inbox, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(2000)
+    await _click_no_status_tab(page)
+    return inbox
+
+
 async def _chat_thread_active(page, conv_id: str) -> bool:
     if conv_id not in page.url:
         return False
@@ -361,7 +469,21 @@ async def _chat_thread_active(page, conv_id: str) -> bool:
             return False
     except Exception:
         pass
-    return await _wait_for_chat_composer(page, timeout_ms=8000)
+    has_thread = await page.evaluate(
+        """() => {
+            const main = document.querySelector('main') || document.body;
+            const text = (main.innerText || '').trim();
+            if (/\\d{1,2}:\\d{2}/.test(text) && text.length > 180) return true;
+            const bubbles = document.querySelectorAll(
+                '[class*="message"], [class*="Message"],'
+                + '[data-testid*="message"], img[src*="fbcdn"]'
+            );
+            return bubbles.length > 1;
+        }"""
+    )
+    if has_thread:
+        return True
+    return await _wait_for_chat_composer(page, timeout_ms=5000)
 
 
 async def _open_conversation_in_ui(
@@ -370,38 +492,35 @@ async def _open_conversation_in_ui(
     locale: str,
     org_slug: str,
     conv_id: str,
+    client_name: str = "",
 ) -> bool:
-    """Open chat in SPA — inbox warm-up then direct URL (sidebar unreliable for backlog)."""
-    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
+    """Open chat in Pager SPA: inbox + «Без статусу» → sidebar/search → URL."""
+    inbox = await _ensure_inbox(page, locale=locale, org_slug=org_slug)
     chat_url = f"{inbox}/{conv_id}"
 
-    if inbox not in page.url or conv_id in page.url:
-        if conv_id not in page.url:
-            if inbox not in page.url:
-                await page.goto(inbox, wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(2000)
-            await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(2000)
-    else:
-        clicked = await page.evaluate(
-            f"""() => {{
-                const links = document.querySelectorAll('a[href*="{conv_id}"]');
-                for (const el of links) {{
-                    el.click();
-                    return true;
-                }}
-                return false;
-            }}"""
-        )
-        if clicked:
-            await page.wait_for_timeout(2500)
-        else:
-            await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(2000)
+    if await _chat_thread_active(page, conv_id):
+        logger.info("browser chat already open conv=%s", conv_id[:8])
+        await _click_take_ui(page, conv_id)
+        return True
+
+    opened = False
+    if await _click_conv_in_sidebar(page, conv_id):
+        opened = await _chat_thread_active(page, conv_id)
+
+    if not opened and client_name:
+        if await _search_and_open_chat(
+            page, client_name=client_name, conv_id=conv_id
+        ):
+            opened = await _chat_thread_active(page, conv_id)
+
+    if not opened:
+        await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(2500)
+        opened = await _chat_thread_active(page, conv_id)
 
     await _click_take_ui(page, conv_id)
 
-    if await _chat_thread_active(page, conv_id):
+    if opened:
         logger.info("browser chat open conv=%s (active)", conv_id[:8])
         return True
 
@@ -420,7 +539,11 @@ async def _open_conversation_in_ui(
             )
             return True
 
-    logger.warning("browser chat not active conv=%s url=%s", conv_id[:8], page.url[:80])
+    logger.warning(
+        "browser chat not active conv=%s url=%s",
+        conv_id[:8],
+        page.url[:80],
+    )
     return False
 
 
@@ -1064,7 +1187,7 @@ async def send_messages_via_browser_ui(
 
 
 async def send_batch_via_browser(
-    jobs: Sequence[tuple[str, list[str]]],
+    jobs: Sequence[tuple[str, list[str]] | tuple[str, list[str], str]],
     *,
     org_id: str,
     org_slug: str,
@@ -1108,28 +1231,41 @@ async def send_batch_via_browser(
             org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
             await page.goto(org_inbox, wait_until="domcontentloaded", timeout=90000)
             await page.wait_for_timeout(1500)
+            await _click_no_status_tab(page)
             await _verify_logged_in_operator(page, uid)
 
-            for conv_id, texts in jobs:
+            for job in jobs:
+                conv_id = job[0]
+                texts = job[1]
+                client_name = job[2] if len(job) > 2 else ""
                 bodies = [t.strip() for t in texts if (t or "").strip()]
                 if not bodies:
                     continue
                 try:
                     logger.info(
-                        "browser batch conv=%s texts=%s",
+                        "browser batch conv=%s texts=%s client=%r",
                         conv_id[:8],
                         len(bodies),
+                        (client_name or "")[:24],
                     )
-                    chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
                     opened = await _open_conversation_in_ui(
-                        page, locale=locale, org_slug=slug, conv_id=conv_id
+                        page,
+                        locale=locale,
+                        org_slug=slug,
+                        conv_id=conv_id,
+                        client_name=client_name,
                     )
                     if not opened:
+                        chat_url = f"{org_inbox}/{conv_id}"
                         logger.warning(
-                            "batch conv=%s chat not active — skip send",
+                            "batch conv=%s not active — force URL",
                             conv_id[:8],
                         )
-                        continue
+                        await page.goto(
+                            chat_url, wait_until="domcontentloaded", timeout=90000
+                        )
+                        await page.wait_for_timeout(2000)
+                        await _click_take_ui(page, conv_id)
                     await _click_take_ui(page, conv_id)
                     channel_id = await _browser_prepare_outbound(
                         page, conv_id=conv_id, org_id=oid, user_id=uid
@@ -1156,7 +1292,7 @@ async def send_batch_via_browser(
                             channel_id=channel_id,
                         )
                     ok.add(conv_id)
-                    await page.goto(org_inbox, wait_until="domcontentloaded", timeout=60000)
+                    await _ensure_inbox(page, locale=locale, org_slug=slug)
                     await page.wait_for_timeout(800)
                 except Exception as exc:
                     logger.warning(
