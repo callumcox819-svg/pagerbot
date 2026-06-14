@@ -78,6 +78,27 @@ def wants_registration_followup(text: str) -> bool:
     return bool(_REGISTRATION_FOLLOWUP.search(t))
 
 
+def is_registration_pending(text: str) -> bool:
+    """Client has not registered yet — resend registration + link."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"(no|not)\s+yet\.?", t, re.I):
+        return True
+    return bool(
+        re.search(
+            r"\b(not yet|no yet|haven'?t yet|havent yet|have not yet|"
+            r"not registered|no registration|didn'?t register|"
+            r"haven'?t registered|still working|will do|doing it|"
+            r"not done|not finished|no i haven'?t|not for now|"
+            r"give me time|need time|later today|maybe later|"
+            r"still trying|working on it|in progress)\b",
+            t,
+            re.I,
+        )
+    )
+
+
 def classify(
     text: str, *, has_image: bool = False, has_ad: bool = False
 ) -> Intent:
@@ -120,3 +141,11 @@ def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
     if intent in (Intent.QUESTION, Intent.UNKNOWN):
         return True
     return False
+
+
+def needs_human_for_text(
+    intent: Intent, step: int, text: str, *, no_status: bool = False
+) -> bool:
+    if is_registration_pending(text) and step < 6:
+        return False
+    return needs_human(intent, step, no_status=no_status)

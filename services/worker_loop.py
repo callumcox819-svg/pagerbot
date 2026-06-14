@@ -17,7 +17,8 @@ from services.ai_intent import (
     Intent,
     classify,
     is_commitment_reply,
-    needs_human,
+    is_registration_pending,
+    needs_human_for_text,
     wants_registration_followup,
 )
 from services.encryption import Secrets
@@ -29,6 +30,7 @@ from services.script_engine import (
     infer_step_from_history,
     load_script,
     scripts_for_positive_reply,
+    scripts_for_registration_resend,
     scripts_to_resend_for_step,
     scripts_to_send_after_intent,
     filter_auto_script_keys,
@@ -267,6 +269,56 @@ def _escalation_link_kwargs(account: dict[str, Any], channel_id: str) -> dict[st
     }
 
 
+async def _escalate_once(
+    bot: Bot,
+    esc_chat: int,
+    *,
+    account_id: int,
+    conv_id: str,
+    msg_id: str,
+    state: dict[str, Any],
+    account: dict[str, Any],
+    channel_id: str,
+    title: str,
+    client_name: str,
+    channel_name: str,
+    folder: str,
+    reason: str,
+    last_message: str,
+    extra: str = "",
+    pause: bool = True,
+) -> bool:
+    """Notify operator once per inbound message; return True if sent."""
+    if msg_id and msg_id == str(state.get("last_escalation_msg_id") or ""):
+        logger.info(
+            "conv=%s skip duplicate escalation msg=%s",
+            conv_id[:8],
+            msg_id[:8],
+        )
+        return False
+    await notify_escalation(
+        bot,
+        esc_chat,
+        title=title,
+        client_name=client_name,
+        channel_name=channel_name,
+        folder=folder,
+        reason=reason,
+        last_message=last_message,
+        conv_id=conv_id,
+        extra=extra,
+        **_escalation_link_kwargs(account, channel_id),
+    )
+    patch: dict[str, Any] = {
+        "last_processed_msg_id": msg_id,
+        "last_escalation_msg_id": msg_id,
+    }
+    if pause:
+        patch["pause_scripts"] = 1
+    await db.save_conversation_state(account_id, conv_id, **patch)
+    return True
+
+
 async def _handle_conversation(
     bot: Bot,
     account: dict[str, Any],
@@ -385,6 +437,12 @@ async def _handle_conversation(
                 conv_id[:8],
             )
             return "paused"
+        if msg_id and msg_id == str(state.get("last_escalation_msg_id") or ""):
+            logger.info(
+                "conv=%s skip — already escalated for this message",
+                conv_id[:8],
+            )
+            return "paused"
         logger.info(
             "conv=%s retry: was marked processed but no reply sent",
             conv_id[:8],
@@ -423,13 +481,23 @@ async def _handle_conversation(
         )
     )
 
+    registration_resend = (
+        needs_reply
+        and hist_step >= 1
+        and hist_step < 6
+        and is_registration_pending(text)
+    )
+
+    auto_funnel = post_intro_followup or registration_resend
+
     logger.info(
-        "conv=%s intent=%s step=%s hist_step=%s post_intro=%s folder=%r retry=%s text=%r",
+        "conv=%s intent=%s step=%s hist_step=%s post_intro=%s reg_resend=%s folder=%r retry=%s text=%r",
         conv_id[:8],
         intent.value,
         step,
         hist_step,
         post_intro_followup,
+        registration_resend,
         folder[:24] if folder else "",
         is_retry,
         (text or "(photo)")[:40],
@@ -438,10 +506,10 @@ async def _handle_conversation(
     if state.get("human_takeover"):
         logger.info("conv=%s skipped human_takeover", conv_id[:8])
         return "paused"
-    if state.get("pause_scripts") and not post_intro_followup:
+    if state.get("pause_scripts") and not auto_funnel:
         logger.info("conv=%s skipped pause_scripts", conv_id[:8])
         return "paused"
-    if state.get("pause_scripts") and post_intro_followup:
+    if state.get("pause_scripts") and auto_funnel:
         await db.save_conversation_state(account_id, conv_id, pause_scripts=0)
 
     async def _outbound_send(
@@ -474,28 +542,27 @@ async def _handle_conversation(
 
     # --- Complaints / unclear → TG only ---
     if (
-        needs_human(intent, step, no_status=no_status)
-        and not post_intro_followup
+        needs_human_for_text(intent, step, text, no_status=no_status)
+        and not auto_funnel
         and intent != Intent.IMAGE_ONLY
     ):
-        if state.get("last_processed_msg_id") == msg_id and state.get("pause_scripts"):
-            return "paused"
-        await notify_escalation(
+        escalated = await _escalate_once(
             bot,
             esc_chat,
+            account_id=account_id,
+            conv_id=conv_id,
+            msg_id=msg_id,
+            state=state,
+            account=account,
+            channel_id=channel_id,
             title="Нужен оператор",
             client_name=client_name,
             channel_name=channel_name,
             folder=folder,
             reason=f"Intent: {intent.value}, step {step}",
             last_message=text or "(photo)",
-            conv_id=conv_id,
-            **_escalation_link_kwargs(account, channel_id),
         )
-        await db.save_conversation_state(
-            account_id, conv_id, pause_scripts=1, last_processed_msg_id=msg_id
-        )
-        return True
+        return True if escalated else "paused"
 
     actions_sent = False
 
@@ -603,6 +670,8 @@ async def _handle_conversation(
     if no_status and needs_reply:
         if hist_step < 1:
             keys = ["01_intro"]
+        elif registration_resend:
+            keys = scripts_for_registration_resend(hist_step)
         elif post_intro_followup or intent in (
             Intent.POSITIVE,
             Intent.READY,
@@ -623,6 +692,8 @@ async def _handle_conversation(
 
         if intent == Intent.INTERESTED and step < 1:
             keys = ["01_intro"]
+        elif registration_resend:
+            keys = scripts_for_registration_resend(hist_step)
         elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and hist_step >= 1:
             keys = scripts_for_positive_reply(hist_step)
         elif hist_step >= 1 and wants_registration_followup(text):
@@ -633,24 +704,26 @@ async def _handle_conversation(
             if (
                 intent in (Intent.QUESTION, Intent.UNKNOWN)
                 and step >= 3
-                and not post_intro_followup
+                and not auto_funnel
             ):
-                await notify_escalation(
+                escalated = await _escalate_once(
                     bot,
                     esc_chat,
+                    account_id=account_id,
+                    conv_id=conv_id,
+                    msg_id=msg_id,
+                    state=state,
+                    account=account,
+                    channel_id=channel_id,
                     title="Нужен оператор",
                     client_name=client_name,
                     channel_name=channel_name,
                     folder=folder,
                     reason=f"Вопрос на шаге {step}: {intent.value}",
                     last_message=text or "(photo)",
-                    conv_id=conv_id,
-                    **_escalation_link_kwargs(account, channel_id),
+                    pause=False,
                 )
-                await db.save_conversation_state(
-                    account_id, conv_id, last_processed_msg_id=msg_id
-                )
-                return True
+                return True if escalated else "paused"
             if intent in (
                 Intent.POSITIVE,
                 Intent.INTERESTED,
@@ -693,7 +766,7 @@ async def _handle_conversation(
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     if reg_keys.intersection(keys) or (
-        post_intro_followup and hist_step < 4
+        auto_funnel and hist_step < 6
     ):
         new_step = 4
         if pager_user_id:

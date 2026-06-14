@@ -138,6 +138,13 @@ def infer_step_from_history(
     return step
 
 
+def scripts_for_registration_resend(hist_step: int) -> list[str]:
+    """Client has not registered yet — (re)send registration + link."""
+    if hist_step < 1:
+        return ["01_intro"]
+    return ["04_registration", "05_link"]
+
+
 def scripts_for_positive_reply(hist_step: int) -> list[str]:
     """After intro — any positive reply goes straight to registration."""
     if hist_step < 1:

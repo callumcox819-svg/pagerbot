@@ -67,6 +67,7 @@ async def init_db() -> None:
             "ALTER TABLE pager_accounts ADD COLUMN org_slug TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE pager_accounts ADD COLUMN pager_locale TEXT NOT NULL DEFAULT 'uk'",
             "ALTER TABLE conversation_states ADD COLUMN send_failures INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE conversation_states ADD COLUMN last_escalation_msg_id TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 await db.execute(stmt)
@@ -362,6 +363,7 @@ async def get_conversation_state(account_id: int, conversation_id: str) -> dict[
         "pause_scripts": 0,
         "extracted_game_id": "",
         "last_processed_msg_id": "",
+        "last_escalation_msg_id": "",
         "send_failures": 0,
     }
 
@@ -379,14 +381,15 @@ async def save_conversation_state(
             INSERT INTO conversation_states (
                 account_id, conversation_id, step, human_takeover,
                 pause_scripts, extracted_game_id, last_processed_msg_id,
-                send_failures, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                last_escalation_msg_id, send_failures, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(account_id, conversation_id) DO UPDATE SET
                 step = excluded.step,
                 human_takeover = excluded.human_takeover,
                 pause_scripts = excluded.pause_scripts,
                 extracted_game_id = excluded.extracted_game_id,
                 last_processed_msg_id = excluded.last_processed_msg_id,
+                last_escalation_msg_id = excluded.last_escalation_msg_id,
                 send_failures = excluded.send_failures,
                 updated_at = datetime('now')
             """,
@@ -398,6 +401,7 @@ async def save_conversation_state(
                 st.get("pause_scripts", 0),
                 st.get("extracted_game_id", ""),
                 st.get("last_processed_msg_id", ""),
+                st.get("last_escalation_msg_id", ""),
                 int(st.get("send_failures") or 0),
             ),
         )
