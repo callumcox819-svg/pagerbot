@@ -21,7 +21,8 @@ class Intent(str, Enum):
 _INTERESTED = re.compile(
     r"\b(interested|interest|312|teach me|need help|need job|i am interested|"
     r"i'm interested|tell me more|am interested|kindly explain|explain it|"
-    r"your help|help me|go ahead|hi go ahead)\b",
+    r"your help|help me|go ahead|hi go ahead|interested please|"
+    r"i'm serious|i am serious|very interested)\b",
     re.I,
 )
 _ACK = re.compile(
@@ -48,6 +49,23 @@ _REGISTRATION_FOLLOWUP = re.compile(
     r"what is next|what's next|next step|get started|start now)\b",
     re.I,
 )
+
+
+def is_commitment_reply(text: str) -> bool:
+    """Short affirmations after intro (e.g. I'm serious, yes please)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b(i'?m serious|i am serious|very interested|interested please|"
+            r"yes please|count me in|let'?s go|lets go|want to start|"
+            r"please explain|tell me more|go ahead|i'?m in|sign me up|"
+            r"i want in|ready when you are)\b",
+            t,
+            re.I,
+        )
+    )
 
 
 def wants_registration_followup(text: str) -> bool:

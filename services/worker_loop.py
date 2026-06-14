@@ -13,7 +13,13 @@ from aiogram import Bot
 
 import database as db
 from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
-from services.ai_intent import Intent, classify, needs_human, wants_registration_followup
+from services.ai_intent import (
+    Intent,
+    classify,
+    is_commitment_reply,
+    needs_human,
+    wants_registration_followup,
+)
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
@@ -413,6 +419,7 @@ async def _handle_conversation(
         and (
             intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
             or wants_registration_followup(text)
+            or is_commitment_reply(text)
         )
     )
 
@@ -594,12 +601,14 @@ async def _handle_conversation(
     keys: list[str] = []
 
     if no_status and needs_reply:
-        if intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED):
-            keys = scripts_for_positive_reply(hist_step)
-        elif hist_step >= 1 and wants_registration_followup(text):
-            keys = scripts_for_positive_reply(hist_step)
-        elif hist_step < 1:
+        if hist_step < 1:
             keys = ["01_intro"]
+        elif post_intro_followup or intent in (
+            Intent.POSITIVE,
+            Intent.READY,
+            Intent.INTERESTED,
+        ):
+            keys = scripts_for_positive_reply(hist_step)
         elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
             keys = scripts_to_resend_for_step(hist_step)
         if keys:
