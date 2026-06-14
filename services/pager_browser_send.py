@@ -371,42 +371,45 @@ async def _open_conversation_in_ui(
     org_slug: str,
     conv_id: str,
 ) -> bool:
-    """Open chat thread — fast path, composer check optional."""
-    chat_url = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
-
-    await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2000)
-    if await _chat_thread_active(page, conv_id):
-        logger.info("browser chat open conv=%s (url)", conv_id[:8])
-        return True
-
+    """Open chat via inbox sidebar click — required for SPA/API session."""
     inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
-    await page.goto(inbox, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(1500)
-    clicked = await page.evaluate(
-        f"""() => {{
-            const el = document.querySelector('a[href*="{conv_id}"]');
-            if (el) {{ el.click(); return true; }}
-            return false;
-        }}"""
-    )
-    if clicked:
+    chat_url = f"{inbox}/{conv_id}"
+
+    if inbox not in page.url:
+        await page.goto(inbox, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(2500)
+
+    for attempt in range(3):
+        clicked = await page.evaluate(
+            f"""() => {{
+                const links = document.querySelectorAll('a[href*="{conv_id}"]');
+                for (const el of links) {{
+                    el.click();
+                    return true;
+                }}
+                return false;
+            }}"""
+        )
+        if clicked:
+            await page.wait_for_timeout(3000)
+        else:
+            await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
+
         if await _chat_thread_active(page, conv_id):
-            logger.info("browser chat open conv=%s (click)", conv_id[:8])
+            logger.info(
+                "browser chat open conv=%s (%s)",
+                conv_id[:8],
+                "click" if clicked else "url",
+            )
             return True
 
-    await page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(2000)
-    ok = await _chat_thread_active(page, conv_id)
-    if ok:
-        logger.info("browser chat open conv=%s (retry)", conv_id[:8])
-    else:
-        logger.warning(
-            "browser chat maybe closed conv=%s — will try send anyway",
-            conv_id[:8],
-        )
-    return ok
+        if attempt < 2:
+            await page.goto(inbox, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(1500)
+
+    logger.warning("browser chat not active conv=%s", conv_id[:8])
+    return False
 
 
 async def _warm_chat_page(
@@ -638,41 +641,6 @@ async def _send_one_in_session(
     last_status = 0
 
     for payload in payloads:
-        try:
-            resp = await context.request.post(
-                post_url,
-                data=json.dumps(payload),
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Referer": referer,
-                },
-            )
-            last_status = resp.status
-            raw = (await resp.text())[:400]
-            if raw.strip().startswith("<!"):
-                last_err = "HTML response — chat page not active"
-                continue
-            try:
-                data = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                data = {}
-            author = str((data or {}).get("authorId") or "").strip()
-            fb = str((data or {}).get("facebookMessageId") or "").strip()
-            if author == uid and ((data or {}).get("isDelivered") or fb):
-                logger.info(
-                    "browser API sent conv=%s author=%s fb=%s keys=%s",
-                    conv_id[:8],
-                    author[:16],
-                    fb[:12],
-                    sorted(payload.keys()),
-                )
-                return
-            last_err = str((data or {}).get("error") or raw)[:400]
-        except Exception as exc:
-            last_err = str(exc)[:200]
-            logger.debug("context.request POST conv=%s: %s", conv_id[:8], exc)
-
         result = await _post_message_payload(page, post_url=post_url, payload=payload)
         status = int(result.get("status") or 0)
         author = str(result.get("authorId") or "").strip()
@@ -682,10 +650,12 @@ async def _send_one_in_session(
 
         if result.get("html") or str(last_err).lstrip().startswith("<!DOCTYPE"):
             logger.warning(
-                "browser POST conv=%s got HTML — chat not active",
+                "browser POST conv=%s got HTML keys=%s",
                 conv_id[:8],
+                sorted(payload.keys()),
             )
-        elif status >= 400:
+            continue
+        if status >= 400:
             logger.warning(
                 "browser POST conv=%s status=%s keys=%s err=%s",
                 conv_id[:8],
@@ -1117,21 +1087,25 @@ async def send_batch_via_browser(
                         len(bodies),
                     )
                     chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
-                    await page.goto(
-                        chat_url, wait_until="domcontentloaded", timeout=60000
+                    opened = await _open_conversation_in_ui(
+                        page, locale=locale, org_slug=slug, conv_id=conv_id
                     )
-                    await page.wait_for_timeout(2000)
+                    if not opened:
+                        logger.warning(
+                            "batch conv=%s inbox open failed",
+                            conv_id[:8],
+                        )
                     await _click_take_ui(page, conv_id)
                     channel_id = await _browser_prepare_outbound(
                         page, conv_id=conv_id, org_id=oid, user_id=uid
                     )
-                    if not await _wait_for_chat_composer(page, timeout_ms=35000):
-                        logger.warning(
-                            "batch conv=%s composer slow — POST with channel=%s",
-                            conv_id[:8],
-                            (channel_id or "")[:8],
+                    await _click_take_ui(page, conv_id)
+                    await page.wait_for_timeout(1200)
+                    if not await _wait_for_chat_composer(page, timeout_ms=25000):
+                        await _open_conversation_in_ui(
+                            page, locale=locale, org_slug=slug, conv_id=conv_id
                         )
-                    await page.wait_for_timeout(500)
+                        await page.wait_for_timeout(1500)
                     for i, body in enumerate(bodies):
                         if i:
                             await page.wait_for_timeout(1200)
@@ -1147,6 +1121,8 @@ async def send_batch_via_browser(
                             channel_id=channel_id,
                         )
                     ok.add(conv_id)
+                    await page.goto(org_inbox, wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(800)
                 except Exception as exc:
                     logger.warning(
                         "browser batch conv=%s failed: %s",

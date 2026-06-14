@@ -207,6 +207,7 @@ async def list_worker_accounts() -> list[dict[str, Any]]:
                        MAX(id) AS max_id
                 FROM pager_accounts
                 WHERE paused = 0 AND auto_reply = 1
+                  AND email != '' AND password_enc != ''
                 GROUP BY grp
             ) latest ON a.id = latest.max_id
             """
