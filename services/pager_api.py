@@ -1066,11 +1066,13 @@ class PagerClient:
             )
 
     async def patch_status(self, conv_id: str, status_id: str, user_id: str) -> dict[str, Any]:
+        org_id = await self._ensure_org_id()
         return await self._request(
             "PATCH",
             f"/api/conversation/{conv_id}",
-            params={"statusId": status_id, "userId": user_id},
+            params={"userId": user_id, "orgId": org_id},
             json_body={"statusId": status_id},
+            referer=self._chat_referer(conv_id),
         )
 
     async def list_channels_api(self) -> list[dict[str, str]]:

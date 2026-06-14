@@ -140,6 +140,7 @@ class _CycleSendBuffer:
                 self._clients.get(cid, ""),
                 self._channels.get(cid, ""),
                 self._script_keys.get(cid, []),
+                self._status_patches.get(cid, []),
             )
             for cid in conv_ids
         ]
@@ -189,22 +190,6 @@ class _CycleSendBuffer:
         uid = self.pager_user_id
         for conv_id, fields in self._commits:
             if conv_id in ok:
-                for status_id in self._status_patches.get(conv_id, []):
-                    try:
-                        await self.client.patch_status(conv_id, status_id, uid)
-                        logger.info(
-                            "status patched conv=%s folder=%s",
-                            conv_id[:8],
-                            status_id[:8],
-                        )
-                        await asyncio.sleep(0.3)
-                    except Exception as exc:
-                        logger.warning(
-                            "status patch failed conv=%s status=%s: %s",
-                            conv_id[:8],
-                            status_id[:8],
-                            exc,
-                        )
                 try:
                     await self.client.mark_conversation_read(
                         conv_id, user_id=uid

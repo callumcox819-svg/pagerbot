@@ -1356,6 +1356,7 @@ async def _batch_send_one_conv(
     org_slug: str,
     user_id: str,
     locale: str,
+    status_patches: list[str] | None = None,
 ) -> None:
     """Open chat, take, send via saved replies (Замбія) or POST fallback."""
     uid = (user_id or "").strip()
@@ -1456,6 +1457,16 @@ async def _batch_send_one_conv(
             channel_hint=ch,
         )
 
+    for sid in status_patches or []:
+        await _browser_patch_status(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+            status_id=sid,
+        )
+        await asyncio.sleep(0.4)
+
     patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
     await page.evaluate(
         f"""async ({{url}}) => {{
@@ -1469,6 +1480,55 @@ async def _batch_send_one_conv(
         {"url": patch_url},
     )
     logger.info("browser batch done conv=%s texts=%s", conv_id[:8], len(bodies))
+
+
+async def _browser_patch_status(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+    status_id: str,
+) -> bool:
+    """Move chat to funnel folder via in-browser PATCH (same session as send)."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    sid = (status_id or "").strip()
+    if not sid or not uid or not oid:
+        return False
+    patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
+    result = await page.evaluate(
+        f"""async ({{url, statusId}}) => {{
+            {_SAFE_FETCH}
+            const r = await safeJsonFetch(url, {{
+                method: 'PATCH',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{statusId: statusId}}),
+            }});
+            return {{
+                status: r.status,
+                ok: r.ok,
+                error: r.error || r.html || '',
+            }};
+        }}""",
+        {"url": patch_url, "statusId": sid},
+    )
+    http = int(result.get("status") or 0)
+    if http >= 400 or not result.get("ok"):
+        logger.warning(
+            "browser status patch failed conv=%s folder=%s http=%s %s",
+            conv_id[:8],
+            sid[:8],
+            http,
+            str(result.get("error") or "")[:100],
+        )
+        return False
+    logger.info(
+        "browser status patched conv=%s folder=%s",
+        conv_id[:8],
+        sid[:8],
+    )
+    return True
 
 
 async def _browser_prepare_outbound(
@@ -2625,6 +2685,7 @@ async def send_batch_via_browser(
                 client_name = (job[2] if len(job) > 2 else "").strip()
                 channel_hint = (job[3] if len(job) > 3 else "").strip()
                 script_keys = list(job[4]) if len(job) > 4 else []
+                status_patches = list(job[5]) if len(job) > 5 else []
                 keys = filter_auto_script_keys(
                     [k.strip() for k in script_keys if (k or "").strip()]
                 )
@@ -2633,10 +2694,11 @@ async def send_batch_via_browser(
                     continue
                 try:
                     logger.info(
-                        "browser batch conv=%s texts=%s keys=%s channel=%s client=%r",
+                        "browser batch conv=%s texts=%s keys=%s status=%s channel=%s client=%r",
                         conv_id[:8],
                         len(bodies),
                         keys,
+                        [s[:8] for s in status_patches],
                         channel_hint[:8] if channel_hint else "?",
                         (client_name or "")[:24],
                     )
@@ -2652,6 +2714,7 @@ async def send_batch_via_browser(
                         org_slug=slug,
                         user_id=uid,
                         locale=locale,
+                        status_patches=status_patches,
                     )
                     ok.add(conv_id)
                 except Exception as exc:
