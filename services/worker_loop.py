@@ -95,7 +95,7 @@ class _CycleSendBuffer:
         logger.info(
             "browser batch flush jobs=%s texts=%s",
             len(jobs),
-            sum(len(t) for _, t in jobs),
+            sum(len(job[1]) for job in jobs),
         )
         ok = await asyncio.wait_for(
             send_batch_via_browser(
