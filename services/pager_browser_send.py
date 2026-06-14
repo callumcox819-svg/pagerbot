@@ -720,6 +720,7 @@ async def _fast_goto_chat(
     locale: str,
     org_slug: str,
     conv_id: str,
+    org_id: str = "",
 ) -> None:
     """Open chat URL and wait for Pager to load message history API."""
     chat_url = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
@@ -743,8 +744,191 @@ async def _fast_goto_chat(
         await page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
         pass
+    oid = (org_id or "").strip()
+    if oid:
+        api_msg = _api(
+            f"/api/message?convId={conv_id}&orgId={oid}&pageSize=5&page=1"
+        )
+        for _ in range(12):
+            loaded = await page.evaluate(
+                f"""async ({{msgUrl}}) => {{
+                    {_SAFE_FETCH}
+                    const r = await safeJsonFetch(msgUrl);
+                    return !r.html && Array.isArray(r.data);
+                }}""",
+                {"msgUrl": api_msg},
+            )
+            if loaded:
+                logger.info("browser chat loaded conv=%s (poll)", conv_id[:8])
+                return
+            await page.wait_for_timeout(800)
     await page.wait_for_timeout(1500)
     logger.info("browser chat goto conv=%s", conv_id[:8])
+
+
+async def _browser_pager_client(
+    context,
+    *,
+    org_id: str,
+    org_slug: str,
+    locale: str,
+    user_id: str,
+):
+    from services.pager_api import PagerClient
+
+    cookies = await _cookies_from_context(context)
+    return PagerClient(
+        PAGER_BASE,
+        cookies,
+        org_id=org_id,
+        org_slug=org_slug,
+        locale=locale,
+        org_id_fallback=org_id,
+        session_user_id=user_id,
+    )
+
+
+async def _resolve_channel_id(
+    client,
+    conv_id: str,
+    *,
+    channel_hint: str = "",
+) -> str:
+    ch = (channel_hint or "").strip()
+    if ch:
+        return ch
+    conv = await client.open_conversation(conv_id)
+    if not conv:
+        return ""
+    ch = str(conv.get("channelId") or "").strip()
+    nested = conv.get("channel")
+    if not ch and isinstance(nested, dict):
+        ch = str(nested.get("id") or "").strip()
+    return ch
+
+
+async def _rest_take_chat(
+    context,
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    org_slug: str,
+    user_id: str,
+    locale: str,
+    channel_id: str = "",
+) -> str:
+    """Take chat via REST using live browser cookies (not fragile in-page poll)."""
+    uid = (user_id or "").strip()
+    ch_hint = (channel_id or "").strip()
+
+    await _fast_goto_chat(
+        page,
+        locale=locale,
+        org_slug=org_slug,
+        conv_id=conv_id,
+        org_id=org_id,
+    )
+    await page.wait_for_timeout(1200)
+
+    for attempt in range(5):
+        client = await _browser_pager_client(
+            context,
+            org_id=org_id,
+            org_slug=org_slug,
+            locale=locale,
+            user_id=uid,
+        )
+        taken = await client.take_conversation(conv_id, uid)
+        ch = await _resolve_channel_id(client, conv_id, channel_hint=ch_hint)
+        if taken and ch:
+            logger.info(
+                "REST take OK conv=%s channel=%s try=%s",
+                conv_id[:8],
+                ch[:8],
+                attempt,
+            )
+            return ch
+        if attempt in (0, 2):
+            await _click_take_ui(page, conv_id)
+        if attempt == 3 and ch and not taken:
+            resp = await client._conversation_responsible(conv_id)
+            if resp == uid:
+                logger.info(
+                    "REST take late OK conv=%s channel=%s",
+                    conv_id[:8],
+                    ch[:8],
+                )
+                return ch
+        await page.wait_for_timeout(1000)
+
+    raise RuntimeError(f"Take chat not verified conv={conv_id[:8]}")
+
+
+async def _rest_send_texts(
+    context,
+    page,
+    *,
+    conv_id: str,
+    texts: list[str],
+    org_id: str,
+    org_slug: str,
+    user_id: str,
+    locale: str,
+    channel_id: str,
+) -> None:
+    from services.pager_api import PagerAPIError, message_accepted
+
+    uid = (user_id or "").strip()
+    ch = (channel_id or "").strip()
+    if not ch:
+        raise RuntimeError(f"channelId missing conv={conv_id[:8]}")
+    referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    client = await _browser_pager_client(
+        context,
+        org_id=org_id,
+        org_slug=org_slug,
+        locale=locale,
+        user_id=uid,
+    )
+
+    for i, body in enumerate(texts):
+        if i:
+            await asyncio.sleep(0.8)
+        try:
+            result = await client.post_message_after_take(
+                conv_id, body, user_id=uid, channel_id=ch
+            )
+            if message_accepted(result, uid):
+                logger.info(
+                    "REST sent conv=%s author=%s fb=%s",
+                    conv_id[:8],
+                    str(result.get("authorId") or uid)[:16],
+                    str(result.get("facebookMessageId") or "")[:12],
+                )
+                continue
+            logger.warning(
+                "REST not accepted conv=%s author=%s delivered=%s",
+                conv_id[:8],
+                str(result.get("authorId") or "")[:16],
+                result.get("isDelivered"),
+            )
+        except PagerAPIError as exc:
+            logger.warning(
+                "REST post failed conv=%s: %s",
+                conv_id[:8],
+                (exc.body or str(exc))[:200],
+            )
+        await _send_one_in_session(
+            context,
+            page,
+            conv_id=conv_id,
+            org_id=org_id,
+            user_id=uid,
+            text=body,
+            referer=referer,
+            channel_id=ch,
+        )
 
 
 async def _ensure_take_verified(
@@ -1413,7 +1597,11 @@ async def send_messages_via_browser_ui(
 
 
 async def send_batch_via_browser(
-    jobs: Sequence[tuple[str, list[str]] | tuple[str, list[str], str]],
+    jobs: Sequence[
+        tuple[str, list[str]]
+        | tuple[str, list[str], str]
+        | tuple[str, list[str], str, str]
+    ],
     *,
     org_id: str,
     org_slug: str,
@@ -1465,48 +1653,38 @@ async def send_batch_via_browser(
             for job in jobs:
                 conv_id = job[0]
                 texts = job[1]
+                channel_hint = (job[3] if len(job) > 3 else "").strip()
                 bodies = [t.strip() for t in texts if (t or "").strip()]
                 if not bodies:
                     continue
                 try:
                     logger.info(
-                        "browser batch conv=%s texts=%s",
+                        "browser batch conv=%s texts=%s channel=%s",
                         conv_id[:8],
                         len(bodies),
+                        channel_hint[:8] if channel_hint else "?",
                     )
-                    await _fast_goto_chat(
-                        page,
-                        locale=locale,
-                        org_slug=slug,
-                        conv_id=conv_id,
-                    )
-                    await page.wait_for_timeout(3000)
-                    channel_id = await _fast_take_chat(
+                    channel_id = await _rest_take_chat(
+                        context,
                         page,
                         conv_id=conv_id,
                         org_id=oid,
+                        org_slug=slug,
                         user_id=uid,
                         locale=locale,
-                        org_slug=slug,
+                        channel_id=channel_hint,
                     )
-                    if not (channel_id or "").strip():
-                        raise RuntimeError(
-                            f"channelId missing after take conv={conv_id[:8]}"
-                        )
-                    for i, body in enumerate(bodies):
-                        if i:
-                            await page.wait_for_timeout(800)
-                        await _send_operator_text(
-                            context,
-                            page,
-                            conv_id=conv_id,
-                            org_id=oid,
-                            user_id=uid,
-                            text=body,
-                            locale=locale,
-                            org_slug=slug,
-                            channel_id=channel_id,
-                        )
+                    await _rest_send_texts(
+                        context,
+                        page,
+                        conv_id=conv_id,
+                        texts=bodies,
+                        org_id=oid,
+                        org_slug=slug,
+                        user_id=uid,
+                        locale=locale,
+                        channel_id=channel_id,
+                    )
                     ok.add(conv_id)
                 except Exception as exc:
                     logger.warning(

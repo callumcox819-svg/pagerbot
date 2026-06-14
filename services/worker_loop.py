@@ -55,10 +55,16 @@ class _CycleSendBuffer:
         self.client = client
         self._jobs: dict[str, list[str]] = {}
         self._clients: dict[str, str] = {}
+        self._channels: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
 
     def queue_send(
-        self, conv_id: str, texts: list[str], *, client_name: str = ""
+        self,
+        conv_id: str,
+        texts: list[str],
+        *,
+        client_name: str = "",
+        channel_id: str = "",
     ) -> None:
         bodies = [t.strip() for t in texts if (t or "").strip()]
         if not bodies:
@@ -67,6 +73,9 @@ class _CycleSendBuffer:
         bucket.extend(bodies)
         if client_name:
             self._clients[conv_id] = client_name.strip()
+        ch = (channel_id or "").strip()
+        if ch:
+            self._channels[conv_id] = ch
 
     def queue_commit(self, conv_id: str, **kwargs: Any) -> None:
         for i, (cid, fields) in enumerate(self._commits):
@@ -88,7 +97,12 @@ class _CycleSendBuffer:
             )
 
         jobs = [
-            (cid, texts, self._clients.get(cid, ""))
+            (
+                cid,
+                texts,
+                self._clients.get(cid, ""),
+                self._channels.get(cid, ""),
+            )
             for cid, texts in self._jobs.items()
         ]
         timeout = min(540.0, 90.0 + 75.0 * len(jobs))
@@ -340,10 +354,14 @@ async def _handle_conversation(
     esc_chat = _escalation_chat(account)
 
     async def _outbound_send(texts: list[str]) -> None:
-        send_buf.queue_send(conv_id, texts, client_name=client_name)
+        send_buf.queue_send(
+            conv_id, texts, client_name=client_name, channel_id=channel_id
+        )
 
     async def send(text: str) -> None:
-        send_buf.queue_send(conv_id, [text], client_name=client_name)
+        send_buf.queue_send(
+            conv_id, [text], client_name=client_name, channel_id=channel_id
+        )
 
     # Waiting for game ID / deposit photo — ignore short acks once operator replied.
     if (
