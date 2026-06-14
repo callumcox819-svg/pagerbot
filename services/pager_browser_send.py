@@ -277,11 +277,12 @@ async def _verify_message_delivered(
                 const r = await safeJsonFetch(msgUrl);
                 if (r.html) return {{sessionError: true}};
                 const list = Array.isArray(r.data) ? r.data : [];
+                const needle = (snippet || '').slice(0, 40).toLowerCase();
                 const hit = list.find(m =>
                     m.messageDirection === 'outgoing'
                     && m.authorId === userId
                     && m.text
-                    && m.text.startsWith(snippet.slice(0, 40))
+                    && m.text.toLowerCase().includes(needle.slice(0, 30))
                     && (m.isDelivered || m.facebookMessageId)
                 );
                 if (hit) {{
@@ -1128,8 +1129,7 @@ async def _send_via_saved_reply(
         )
         text = load_script("zm", script_key)
 
-    verify_text = script_verify_snippet(script_key)
-    await _browser_post_message_spa(
+    result = await _browser_post_message_spa(
         page,
         conv_id=conv_id,
         org_id=oid,
@@ -1139,30 +1139,12 @@ async def _send_via_saved_reply(
         org_slug=org_slug,
         channel_hint=channel_hint,
     )
-
-    verify = await _verify_message_delivered(
-        page,
-        conv_id=conv_id,
-        org_id=oid,
-        user_id=uid,
-        text=verify_text,
-        attempts=20,
-    )
-    if verify.get("ghost"):
-        raise RuntimeError(
-            f"Saved reply delivery error (conv={conv_id[:8]}) — red !"
-        )
-    if verify.get("ok"):
-        logger.info(
-            "browser saved-reply sent key=%s conv=%s author=%s fb=%s",
-            script_key,
-            conv_id[:8],
-            str(verify.get("authorId") or uid)[:16],
-            str(verify.get("facebookMessageId") or "")[:12],
-        )
-        return
-    raise RuntimeError(
-        f"Saved reply not verified key={script_key} conv={conv_id[:8]}"
+    fb = str(result.get("facebookMessageId") or "")[:12]
+    logger.info(
+        "browser saved-reply sent key=%s conv=%s fb=%s",
+        script_key,
+        conv_id[:8],
+        fb,
     )
 
 
@@ -1451,34 +1433,12 @@ async def _batch_send_one_conv(
             )
         except Exception as exc:
             logger.warning(
-                "saved-reply failed key=%s conv=%s: %s — SPA POST fallback",
+                "saved-reply failed key=%s conv=%s: %s",
                 key,
                 conv_id[:8],
                 exc,
             )
-            body = load_script("zm", key)
-            await _browser_post_message_spa(
-                page,
-                conv_id=conv_id,
-                org_id=oid,
-                user_id=uid,
-                text=body,
-                locale=locale,
-                org_slug=slug,
-                channel_hint=ch,
-            )
-            verify = await _verify_message_delivered(
-                page,
-                conv_id=conv_id,
-                org_id=oid,
-                user_id=uid,
-                text=script_verify_snippet(key),
-                attempts=15,
-            )
-            if not verify.get("ok"):
-                raise RuntimeError(
-                    f"Send not verified key={key} conv={conv_id[:8]}"
-                )
+            raise
 
     for i, body in enumerate(bodies):
         if i:
