@@ -859,10 +859,57 @@ async def _rest_take_chat(
                     conv_id[:8],
                     ch[:8],
                 )
-                return ch
+                taken = True
+        if taken and ch:
+            await _warm_chat_for_send(
+                page,
+                conv_id=conv_id,
+                org_id=org_id,
+                user_id=uid,
+                locale=locale,
+                org_slug=org_slug,
+            )
+            return ch
         await page.wait_for_timeout(1000)
 
     raise RuntimeError(f"Take chat not verified conv={conv_id[:8]}")
+
+
+async def _warm_chat_for_send(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+    locale: str,
+    org_slug: str,
+) -> None:
+    """Load conv in SPA before POST — aiohttp cannot send without this context."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    conv_url = _api(f"/api/conversation/{conv_id}?orgId={oid}")
+    msg_url = _api(
+        f"/api/message?convId={conv_id}&orgId={oid}&pageSize=10&page=1"
+    )
+    await page.evaluate(
+        f"""async ({{convUrl, msgUrl, userId}}) => {{
+            {_SAFE_FETCH}
+            await safeJsonFetch(convUrl);
+            await safeJsonFetch(msgUrl);
+        }}""",
+        {"convUrl": conv_url, "msgUrl": msg_url, "userId": uid},
+    )
+    if conv_id not in page.url:
+        if not await _click_conv_in_sidebar(page, conv_id):
+            await _fast_goto_chat(
+                page,
+                locale=locale,
+                org_slug=org_slug,
+                conv_id=conv_id,
+                org_id=oid,
+            )
+    await page.wait_for_timeout(2500)
+    logger.info("browser chat warmed conv=%s", conv_id[:8])
 
 
 async def _rest_send_texts(
@@ -877,85 +924,92 @@ async def _rest_send_texts(
     locale: str,
     channel_id: str,
 ) -> None:
-    from services.pager_api import PagerAPIError, message_accepted
-
     uid = (user_id or "").strip()
     ch = (channel_id or "").strip()
     if not ch:
         raise RuntimeError(f"channelId missing conv={conv_id[:8]}")
     referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
-    client = await _browser_pager_client(
-        context,
+
+    await _warm_chat_for_send(
+        page,
+        conv_id=conv_id,
         org_id=org_id,
-        org_slug=org_slug,
-        locale=locale,
         user_id=uid,
+        locale=locale,
+        org_slug=org_slug,
     )
 
     for i, body in enumerate(texts):
         if i:
             await asyncio.sleep(0.8)
         sent = False
-        try:
-            result = await client.post_message_minimal(conv_id, body, user_id=uid)
-            if message_accepted(result, uid):
-                logger.info(
-                    "REST sent conv=%s author=%s fb=%s",
-                    conv_id[:8],
-                    str(result.get("authorId") or uid)[:16],
-                    str(result.get("facebookMessageId") or "")[:12],
-                )
-                sent = True
-            else:
-                logger.warning(
-                    "REST not accepted conv=%s author=%s delivered=%s",
-                    conv_id[:8],
-                    str(result.get("authorId") or "")[:16],
-                    result.get("isDelivered"),
-                )
-        except PagerAPIError as exc:
-            logger.warning(
-                "REST minimal post failed conv=%s: %s",
-                conv_id[:8],
-                (exc.body or str(exc))[:200],
-            )
 
-        if not sent and await _wait_for_chat_composer(page, timeout_ms=25000):
-            if await _browser_send_via_ui(page, body):
-                verify = await _verify_message_delivered(
-                    page,
-                    conv_id=conv_id,
-                    org_id=org_id,
-                    user_id=uid,
-                    text=body,
-                    attempts=12,
-                )
-                if verify.get("ghost"):
-                    raise RuntimeError(
-                        f"Message delivery error (conv={conv_id[:8]}) — red !"
-                    )
-                if verify.get("ok") and str(
-                    verify.get("facebookMessageId") or ""
-                ).strip():
-                    logger.info(
-                        "browser UI sent conv=%s author=%s fb=%s",
-                        conv_id[:8],
-                        str(verify.get("authorId") or uid)[:16],
-                        str(verify.get("facebookMessageId") or "")[:12],
-                    )
-                    sent = True
-
-        if not sent:
-            await _send_one_in_session(
-                context,
+        if await _browser_send_via_ui(page, body):
+            verify = await _verify_message_delivered(
                 page,
                 conv_id=conv_id,
                 org_id=org_id,
                 user_id=uid,
                 text=body,
-                referer=referer,
-                channel_id=ch,
+                attempts=15,
             )
+            if verify.get("ghost"):
+                raise RuntimeError(
+                    f"Message delivery error (conv={conv_id[:8]}) — red !"
+                )
+            if verify.get("ok") and str(
+                verify.get("facebookMessageId") or ""
+            ).strip():
+                logger.info(
+                    "browser UI sent conv=%s author=%s fb=%s",
+                    conv_id[:8],
+                    str(verify.get("authorId") or uid)[:16],
+                    str(verify.get("facebookMessageId") or "")[:12],
+                )
+                sent = True
+
+        if not sent:
+            try:
+                await _send_one_in_session(
+                    context,
+                    page,
+                    conv_id=conv_id,
+                    org_id=org_id,
+                    user_id=uid,
+                    text=body,
+                    referer=referer,
+                    channel_id=ch,
+                )
+                sent = True
+            except RuntimeError as exc:
+                if "HTML" not in str(exc) and "session not active" not in str(exc):
+                    raise
+                logger.warning(
+                    "browser POST retry conv=%s: %s",
+                    conv_id[:8],
+                    exc,
+                )
+                await _warm_chat_for_send(
+                    page,
+                    conv_id=conv_id,
+                    org_id=org_id,
+                    user_id=uid,
+                    locale=locale,
+                    org_slug=org_slug,
+                )
+                await _send_one_in_session(
+                    context,
+                    page,
+                    conv_id=conv_id,
+                    org_id=org_id,
+                    user_id=uid,
+                    text=body,
+                    referer=referer,
+                    channel_id=ch,
+                )
+
+        if not sent:
+            raise RuntimeError(f"Send failed conv={conv_id[:8]}")
 
 
 async def _ensure_take_verified(
@@ -1208,10 +1262,11 @@ async def _send_one_in_session(
     if not uid:
         raise RuntimeError(f"operator user_id missing conv={conv_id[:8]}")
 
-    payloads = [
-        {"conversationId": conv_id, "text": text},
-    ]
+    payloads: list[dict] = [{"conversationId": conv_id, "text": text}]
     if ch:
+        payloads.append(
+            {"conversationId": conv_id, "text": text, "channelId": ch}
+        )
         payloads.append(
             {
                 "conversationId": conv_id,
@@ -1228,8 +1283,12 @@ async def _send_one_in_session(
     fb = ""
 
     for payload in payloads:
-        result = await _post_message_payload(
-            page, post_url=post_url, payload=payload, referer=ref
+        result = await _post_message_try(
+            context,
+            page,
+            post_url=post_url,
+            payload=payload,
+            referer=ref,
         )
         status = int(result.get("status") or 0)
         author = str(result.get("authorId") or "").strip()
@@ -1237,9 +1296,12 @@ async def _send_one_in_session(
         last_err = str(result.get("error") or result.get("raw") or last_err)[:400]
         last_status = status or last_status
         if result.get("html") or str(last_err).lstrip().startswith("<!DOCTYPE"):
-            raise RuntimeError(
-                f"Send POST HTML conv={conv_id[:8]} — chat session not active"
+            logger.warning(
+                "browser POST HTML conv=%s keys=%s",
+                conv_id[:8],
+                sorted(payload.keys()),
             )
+            continue
         if status < 400 and author == uid and fb and result.get("isDelivered"):
             logger.info(
                 "browser POST sent conv=%s author=%s fb=%s keys=%s",
@@ -1249,7 +1311,10 @@ async def _send_one_in_session(
                 sorted(payload.keys()),
             )
             return
-        if status >= 400 and "imageurl" in last_err.lower() and len(payloads) > 1:
+        if status >= 400 and (
+            "imageurl" in last_err.lower()
+            or "channel.findunique" in last_err.lower()
+        ):
             continue
         if status >= 400:
             break
@@ -1257,6 +1322,10 @@ async def _send_one_in_session(
     if status >= 400:
         raise RuntimeError(
             f"Send POST failed conv={conv_id[:8]} status={status}: {last_err[:200]}"
+        )
+    if result.get("html") or str(last_err).lstrip().startswith("<!DOCTYPE"):
+        raise RuntimeError(
+            f"Send POST HTML conv={conv_id[:8]} — chat session not active"
         )
     if author == uid and fb and result.get("isDelivered"):
         logger.info(
