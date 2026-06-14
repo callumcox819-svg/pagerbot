@@ -151,6 +151,9 @@ class _CycleSendBuffer:
             timeout=timeout,
         )
         if fresh_cookies:
+            for keep in ("_pager_org_id", "_pager_user_id"):
+                if keep in self.client.cookies and keep not in fresh_cookies:
+                    fresh_cookies[keep] = self.client.cookies[keep]
             self.client.cookies.update(fresh_cookies)
             try:
                 await db.upsert_account(

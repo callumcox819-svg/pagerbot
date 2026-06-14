@@ -769,6 +769,180 @@ async def _warm_chat_page(
         logger.warning("chat composer missing conv=%s after open", conv_id[:8])
 
 
+async def _fetch_saved_reply_text_via_api(
+    page,
+    *,
+    org_id: str,
+    script_key: str,
+) -> str:
+    """Load reply text from /api/reply/folder + /api/reply (same as UI sidebar)."""
+    oid = (org_id or "").strip()
+    snippet = script_ui_snippet(script_key)
+    folder_url = _api(f"/api/reply/folder?orgId={oid}")
+    result = await page.evaluate(
+        f"""async ({{folderUrl, snippet, folderNames}}) => {{
+            {_SAFE_FETCH}
+            const fr = await safeJsonFetch(folderUrl);
+            if (fr.html || !fr.ok) return {{ error: 'folder fetch failed' }};
+            const folders = Array.isArray(fr.data) ? fr.data : [];
+            const names = folderNames.map(n => n.toLowerCase());
+            const folder = folders.find(f => {{
+                const n = (f.name || '').toLowerCase();
+                return names.some(x => n.includes(x) || x.includes(n));
+            }});
+            if (!folder || !folder.id) return {{ error: 'zambia folder not found' }};
+            const rr = await safeJsonFetch('/api/reply?folderId=' + folder.id);
+            if (rr.html || !rr.ok) return {{ error: 'replies fetch failed' }};
+            const replies = Array.isArray(rr.data) ? rr.data : [];
+            const needle = snippet.toLowerCase();
+            const hit = replies.find(r => (r.text || '').toLowerCase().includes(needle));
+            if (!hit || !hit.text) return {{ error: 'reply not found', folder: folder.name }};
+            return {{ ok: true, text: hit.text, folder: folder.name }};
+        }}""",
+        {
+            "folderUrl": folder_url,
+            "snippet": snippet,
+            "folderNames": list(SAVED_REPLY_FOLDER_NAMES),
+        },
+    )
+    if isinstance(result, dict) and result.get("ok") and result.get("text"):
+        logger.info(
+            "browser saved-reply API key=%s folder=%s chars=%s",
+            script_key,
+            result.get("folder"),
+            len(str(result.get("text") or "")),
+        )
+        return str(result["text"])
+    raise RuntimeError(
+        f"Saved reply API miss key={script_key}: {result.get('error') if isinstance(result, dict) else result}"
+    )
+
+
+async def _browser_post_message_spa(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+    text: str,
+    locale: str,
+    org_slug: str,
+) -> dict:
+    """POST /api/message with the same JSON body Pager SPA uses (fixes imageUrl 500)."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    ref = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    conv_url = _api(f"/api/conversation/{conv_id}?orgId={oid}")
+    members_url = _api("/api/organizationMember")
+    post_url = _api(f"/api/message?orgId={oid}&userId={uid}")
+
+    result = await page.evaluate(
+        f"""async ({{convUrl, membersUrl, postUrl, referer, convId, userId, text}}) => {{
+            {_SAFE_FETCH}
+            const convR = await safeJsonFetch(convUrl);
+            if (convR.html || !convR.ok) {{
+                return {{ status: convR.status, error: 'conv fetch failed', html: convR.html }};
+            }}
+            const conv = convR.data || {{}};
+            const channelId = conv.channelId || (conv.channel && conv.channel.id) || '';
+            const recipient = conv.clientPSID || conv.clientPsid || conv.recipient
+                || (conv.client && (conv.client.psid || conv.client.PSID)) || '';
+            let imageUrl = '';
+            const respUser = conv.responsibleUser || conv.responsibleuser || {{}};
+            if (respUser.imageUrl) imageUrl = respUser.imageUrl;
+            if (!imageUrl) {{
+                const memR = await safeJsonFetch(membersUrl);
+                const members = Array.isArray(memR.data) ? memR.data : [];
+                for (const m of members) {{
+                    const mid = m.userId || m.pagerUserId || (m.user && m.user.id) || m.id || '';
+                    if (mid === userId) {{
+                        imageUrl = m.imageUrl || (m.user && m.user.imageUrl) || '';
+                        break;
+                    }}
+                }}
+            }}
+            const now = new Date().toISOString();
+            const payload = {{
+                id: crypto.randomUUID(),
+                channelId,
+                text,
+                conversationId: convId,
+                messageDirection: 'outgoing',
+                authorId: userId,
+                author: {{ id: userId, imageUrl: imageUrl || '' }},
+                recipient,
+                createdAt: now,
+                updatedAt: now,
+                lastMessageAt: now,
+                optimistic: true,
+                isDelivered: null,
+                replyToMessageId: null,
+            }};
+            const headers = {{
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }};
+            if (referer) headers['Referer'] = referer;
+            const r = await safeJsonFetch(postUrl, {{
+                method: 'POST',
+                headers,
+                body: JSON.stringify(payload),
+            }});
+            const p = r.data || {{}};
+            const err = typeof p.error === 'string'
+                ? p.error
+                : (typeof p.message === 'string' ? p.message : (r.raw || '').slice(0, 300));
+            return {{
+                status: r.status,
+                html: r.html,
+                error: err,
+                authorId: p.authorId || '',
+                isDelivered: !!p.isDelivered,
+                facebookMessageId: p.facebookMessageId || '',
+                channelId,
+                hadRecipient: !!recipient,
+                hadImageUrl: !!imageUrl,
+            }};
+        }}""",
+        {
+            "convUrl": conv_url,
+            "membersUrl": members_url,
+            "postUrl": post_url,
+            "referer": ref,
+            "convId": conv_id,
+            "userId": uid,
+            "text": text,
+        },
+    )
+
+    if not isinstance(result, dict):
+        raise RuntimeError(f"SPA POST invalid response conv={conv_id[:8]}")
+
+    if result.get("html"):
+        raise RuntimeError(
+            f"SPA POST HTML conv={conv_id[:8]} — session expired"
+        )
+
+    status = int(result.get("status") or 0)
+    author = str(result.get("authorId") or "").strip()
+    fb = str(result.get("facebookMessageId") or "").strip()
+    err = str(result.get("error") or "")
+
+    if status < 400 and author == uid and fb:
+        logger.info(
+            "browser SPA POST sent conv=%s author=%s fb=%s ch=%s",
+            conv_id[:8],
+            author[:16],
+            fb[:12],
+            str(result.get("channelId") or "")[:8],
+        )
+        return result
+
+    raise RuntimeError(
+        f"SPA POST failed conv={conv_id[:8]} status={status}: {err[:200]}"
+    )
+
+
 async def _open_saved_replies_panel(page) -> bool:
     """Click «…» saved-replies button left of the message composer."""
     if await page.get_by_text("Збережені відповіді", exact=False).count():
@@ -911,21 +1085,34 @@ async def _send_via_saved_reply(
     conv_id: str,
     org_id: str,
     user_id: str,
+    locale: str = "uk",
+    org_slug: str = "",
 ) -> None:
-    """Send one canned reply from Замбія folder (operator UI flow)."""
+    """Send canned reply: load text from /api/reply (Замбія), POST like Pager SPA."""
     uid = (user_id or "").strip()
     oid = (org_id or "").strip()
-    snippet = script_ui_snippet(script_key)
-    verify_text = script_verify_snippet(script_key)
+    try:
+        text = await _fetch_saved_reply_text_via_api(
+            page, org_id=oid, script_key=script_key
+        )
+    except Exception as exc:
+        logger.warning(
+            "saved-reply API key=%s: %s — using local script",
+            script_key,
+            exc,
+        )
+        text = load_script("zm", script_key)
 
-    if not await _ensure_zambia_replies_sidebar(page):
-        raise RuntimeError(
-            f"Saved replies sidebar not open conv={conv_id[:8]}"
-        )
-    if not await _click_saved_reply_send(page, snippet):
-        raise RuntimeError(
-            f"Saved reply not found key={script_key} snippet={snippet[:30]!r}"
-        )
+    verify_text = script_verify_snippet(script_key)
+    await _browser_post_message_spa(
+        page,
+        conv_id=conv_id,
+        org_id=oid,
+        user_id=uid,
+        text=text,
+        locale=locale,
+        org_slug=org_slug,
+    )
 
     verify = await _verify_message_delivered(
         page,
@@ -1052,6 +1239,24 @@ async def _send_from_open_chat(
         )
 
     post_url = _api(f"/api/message?orgId={oid}&userId={uid}")
+    try:
+        await _browser_post_message_spa(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+            text=text,
+            locale=locale,
+            org_slug=org_slug,
+        )
+        return
+    except Exception as spa_exc:
+        logger.warning(
+            "SPA POST failed conv=%s: %s — trying minimal POST",
+            conv_id[:8],
+            spa_exc,
+        )
+
     payload = {"conversationId": conv_id, "text": text}
     result = await page.evaluate(
         f"""async ({{url, payload, referer}}) => {{
@@ -1212,16 +1417,18 @@ async def _batch_send_one_conv(
                 conv_id=conv_id,
                 org_id=oid,
                 user_id=uid,
+                locale=locale,
+                org_slug=slug,
             )
         except Exception as exc:
             logger.warning(
-                "saved-reply failed key=%s conv=%s: %s — POST fallback",
+                "saved-reply failed key=%s conv=%s: %s — SPA POST fallback",
                 key,
                 conv_id[:8],
                 exc,
             )
             body = load_script("zm", key)
-            await _send_from_open_chat(
+            await _browser_post_message_spa(
                 page,
                 conv_id=conv_id,
                 org_id=oid,
@@ -1229,8 +1436,19 @@ async def _batch_send_one_conv(
                 text=body,
                 locale=locale,
                 org_slug=slug,
-                skip_ui=True,
             )
+            verify = await _verify_message_delivered(
+                page,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+                text=script_verify_snippet(key),
+                attempts=15,
+            )
+            if not verify.get("ok"):
+                raise RuntimeError(
+                    f"Send not verified key={key} conv={conv_id[:8]}"
+                )
 
     for i, body in enumerate(bodies):
         if i:
