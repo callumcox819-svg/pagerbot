@@ -761,7 +761,7 @@ async def _ensure_take_verified(
     oid = (org_id or "").strip()
     patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
 
-    for attempt in range(12):
+    for attempt in range(8):
         await _click_take_ui(page, conv_id)
         await page.evaluate(
             f"""async ({{url, userId}}) => {{
@@ -782,9 +782,13 @@ async def _ensure_take_verified(
             page, conv_id=conv_id, org_id=oid, user_id=uid
         )
         if check.get("sessionError"):
-            await _fast_goto_chat(
-                page, locale=locale, org_slug=org_slug, conv_id=conv_id
-            )
+            if attempt in (0, 3):
+                await _fast_goto_chat(
+                    page, locale=locale, org_slug=org_slug, conv_id=conv_id
+                )
+                await page.wait_for_timeout(2000)
+            else:
+                await page.wait_for_timeout(1000)
             continue
         if (
             check.get("responsibleOk")
@@ -802,11 +806,19 @@ async def _ensure_take_verified(
                 {"convUrl": conv_url},
             )
             ch = str(ch or "").strip()
+            if not ch:
+                logger.warning(
+                    "take ok but channel empty conv=%s try=%s",
+                    conv_id[:8],
+                    attempt,
+                )
+                await page.wait_for_timeout(800)
+                continue
             logger.info(
                 "browser take verified conv=%s resp=%s channel=%s try=%s",
                 conv_id[:8],
                 str(check.get("responsibleId") or uid)[:16],
-                ch[:8] if ch else "?",
+                ch[:8],
                 attempt,
             )
             msg_url = _api(
@@ -856,11 +868,12 @@ async def _post_via_context_request(
     resp = await context.request.post(
         post_url,
         headers={
+            "Content-Type": "application/json",
             "Accept": "application/json",
             "Referer": referer,
             "Origin": PAGER_BASE,
         },
-        json=payload,
+        data=_json.dumps(payload),
     )
     raw = (await resp.text())[:400]
     data = None
@@ -981,14 +994,21 @@ async def _send_one_in_session(
             )
             ref = f"{PAGER_BASE}/{loc}/{slug}/chats/{conv_id}"
 
-    # Operator UI: POST {conversationId, text} + userId query only (no channelId).
-    payload = {"conversationId": conv_id, "text": text}
+    if not ch:
+        raise RuntimeError(f"channelId missing conv={conv_id[:8]} — cannot send")
+    if not uid:
+        raise RuntimeError(f"operator user_id missing conv={conv_id[:8]}")
+
+    payload = {
+        "conversationId": conv_id,
+        "text": text,
+        "channelId": ch,
+        "authorId": uid,
+    }
     last_err = ""
     last_status = 0
 
-    result = await _post_message_try(
-        context, page, post_url=post_url, payload=payload, referer=ref
-    )
+    result = await _post_message_payload(page, post_url=post_url, payload=payload, referer=ref)
     status = int(result.get("status") or 0)
     author = str(result.get("authorId") or "").strip()
     fb = str(result.get("facebookMessageId") or "").strip()
@@ -1059,6 +1079,9 @@ async def _send_operator_text(
 
     referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
     uid = (user_id or "").strip()
+    ch = (channel_id or "").strip()
+    if not ch:
+        raise RuntimeError(f"channelId missing conv={conv_id[:8]}")
     await page.wait_for_timeout(2000)
 
     cookies = await _cookies_from_context(context)
@@ -1074,7 +1097,7 @@ async def _send_operator_text(
         )
         try:
             result = await client.post_message_after_take(
-                conv_id, text, user_id=uid
+                conv_id, text, user_id=uid, channel_id=ch
             )
             if message_accepted(result, uid):
                 logger.info(
@@ -1466,6 +1489,10 @@ async def send_batch_via_browser(
                         locale=locale,
                         org_slug=slug,
                     )
+                    if not (channel_id or "").strip():
+                        raise RuntimeError(
+                            f"channelId missing after take conv={conv_id[:8]}"
+                        )
                     for i, body in enumerate(bodies):
                         if i:
                             await page.wait_for_timeout(800)

@@ -868,20 +868,47 @@ class PagerClient:
         text: str,
         *,
         user_id: str = "",
+        channel_id: str = "",
     ) -> dict[str, Any]:
-        """POST after browser take — warm chat page, no re-take loop."""
+        """POST after browser take — requires channelId in body for REST."""
         uid = self.operator_user_id(user_id)
         await self._fetch_conv_chat_page(conv_id)
         org_id = await self._ensure_org_id()
         referer = self._chat_referer(conv_id)
+        ch = (channel_id or "").strip()
+        if not ch:
+            try:
+                conv = await self.open_conversation(conv_id)
+                ch = str(conv.get("channelId") or "").strip()
+                nested = conv.get("channel")
+                if not ch and isinstance(nested, dict):
+                    ch = str(nested.get("id") or "").strip()
+            except PagerAPIError:
+                ch = ""
+        if not ch:
+            raise PagerAPIError(
+                400,
+                json.dumps({"error": "channelId missing", "conv": conv_id[:8]}),
+            )
         params: dict[str, Any] = {"orgId": org_id}
         if uid:
             params["userId"] = uid
-        body = {"conversationId": conv_id, "text": text}
+        body: dict[str, Any] = {
+            "conversationId": conv_id,
+            "text": text,
+            "channelId": ch,
+        }
+        if uid:
+            body["authorId"] = uid
+        try:
+            await self.list_messages(conv_id, page_size=3)
+        except PagerAPIError:
+            pass
         logger.info(
-            "post after take conv=%s user=%s chars=%s",
+            "post after take conv=%s user=%s channel=%s chars=%s",
             conv_id[:8],
             (uid or "")[:16],
+            ch[:8],
             len(text),
         )
         result = await self._request(

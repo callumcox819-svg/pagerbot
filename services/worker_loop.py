@@ -763,7 +763,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "2")))
+        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "1")))
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
