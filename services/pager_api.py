@@ -74,7 +74,12 @@ def _extract_user_id(data: Any) -> str:
 
 
 def _clean_cookies(cookies: dict[str, str]) -> dict[str, str]:
-    return {k: v for k, v in cookies.items() if not k.startswith("_pager_")}
+    keep_pager = {"_pager_org_id", "_pager_user_id"}
+    return {
+        k: v
+        for k, v in cookies.items()
+        if not k.startswith("_pager_") or k in keep_pager
+    }
 
 
 class PagerAPIError(Exception):

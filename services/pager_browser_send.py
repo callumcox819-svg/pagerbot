@@ -523,6 +523,10 @@ async def _open_conversation_in_ui(
 
     if opened:
         logger.info("browser chat open conv=%s (active)", conv_id[:8])
+        try:
+            await page.wait_for_load_state("networkidle", timeout=12000)
+        except Exception:
+            pass
         return True
 
     for attempt in range(2):
@@ -601,6 +605,223 @@ async def _browser_send_via_ui(page, text: str) -> bool:
     return False
 
 
+async def _send_from_open_chat(
+    page,
+    *,
+    conv_id: str,
+    org_id: str,
+    user_id: str,
+    text: str,
+    locale: str,
+    org_slug: str,
+) -> None:
+    """Send like operator UI: composer first, then in-page POST {conversationId, text} only."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    ref = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+
+    if conv_id not in page.url:
+        await _fast_goto_chat(
+            page,
+            locale=locale,
+            org_slug=org_slug,
+            conv_id=conv_id,
+            org_id=oid,
+        )
+        await page.wait_for_timeout(2500)
+
+    if await _browser_send_via_ui(page, text):
+        verify = await _verify_message_delivered(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+            text=text,
+            attempts=15,
+        )
+        if verify.get("ghost"):
+            raise RuntimeError(
+                f"Message delivery error (conv={conv_id[:8]}) — red !"
+            )
+        if verify.get("ok"):
+            logger.info(
+                "browser UI sent conv=%s author=%s fb=%s",
+                conv_id[:8],
+                str(verify.get("authorId") or uid)[:16],
+                str(verify.get("facebookMessageId") or "")[:12],
+            )
+            return
+
+    post_url = _api(f"/api/message?orgId={oid}&userId={uid}")
+    payload = {"conversationId": conv_id, "text": text}
+    result = await page.evaluate(
+        f"""async ({{url, payload, referer}}) => {{
+            {_SAFE_FETCH}
+            const headers = {{
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }};
+            if (referer) headers['Referer'] = referer;
+            const r = await safeJsonFetch(url, {{
+                method: 'POST',
+                headers,
+                body: JSON.stringify(payload),
+            }});
+            const p = r.data || {{}};
+            const err = typeof p.error === 'string'
+                ? p.error
+                : (typeof p.message === 'string' ? p.message : (r.raw || '').slice(0, 300));
+            return {{
+                status: r.status,
+                html: r.html,
+                error: err,
+                authorId: p.authorId || '',
+                isDelivered: !!p.isDelivered,
+                facebookMessageId: p.facebookMessageId || '',
+            }};
+        }}""",
+        {"url": post_url, "payload": payload, "referer": ref},
+    )
+
+    if result.get("html"):
+        raise RuntimeError(
+            f"Send POST HTML conv={conv_id[:8]} — open chat in browser first"
+        )
+
+    status = int(result.get("status") or 0)
+    author = str(result.get("authorId") or "").strip()
+    fb = str(result.get("facebookMessageId") or "").strip()
+    err = str(result.get("error") or "")
+
+    if status < 400 and author == uid and fb:
+        logger.info(
+            "browser page POST sent conv=%s author=%s fb=%s",
+            conv_id[:8],
+            author[:16],
+            fb[:12],
+        )
+        return
+
+    verify = await _verify_message_delivered(
+        page,
+        conv_id=conv_id,
+        org_id=oid,
+        user_id=uid,
+        text=text,
+        attempts=12,
+    )
+    if verify.get("ghost"):
+        raise RuntimeError(
+            f"Message delivery error (conv={conv_id[:8]}) — red !"
+        )
+    if verify.get("ok"):
+        logger.info(
+            "browser verified sent conv=%s author=%s fb=%s",
+            conv_id[:8],
+            str(verify.get("authorId") or uid)[:16],
+            str(verify.get("facebookMessageId") or "")[:12],
+        )
+        return
+
+    raise RuntimeError(
+        f"Send failed conv={conv_id[:8]} status={status}: {err[:200]}"
+    )
+
+
+async def _batch_send_one_conv(
+    context,
+    page,
+    *,
+    conv_id: str,
+    texts: list[str],
+    client_name: str,
+    channel_hint: str,
+    org_id: str,
+    org_slug: str,
+    user_id: str,
+    locale: str,
+) -> None:
+    """Open chat in SPA like operator, take, send, mark read."""
+    uid = (user_id or "").strip()
+    oid = (org_id or "").strip()
+    slug = (org_slug or "").strip()
+    ch = (channel_hint or "").strip()
+    bodies = [t.strip() for t in texts if (t or "").strip()]
+    if not bodies:
+        return
+
+    await _ensure_inbox(page, locale=locale, org_slug=slug)
+    opened = await _open_conversation_in_ui(
+        page,
+        locale=locale,
+        org_slug=slug,
+        conv_id=conv_id,
+        client_name=client_name,
+    )
+    if not opened:
+        logger.warning(
+            "batch UI open failed conv=%s — trying direct URL",
+            conv_id[:8],
+        )
+        await _fast_goto_chat(
+            page,
+            locale=locale,
+            org_slug=slug,
+            conv_id=conv_id,
+            org_id=oid,
+        )
+        await page.wait_for_timeout(3000)
+
+    client = await _browser_pager_client(
+        context,
+        org_id=oid,
+        org_slug=slug,
+        locale=locale,
+        user_id=uid,
+    )
+    await client.take_conversation(conv_id, uid)
+
+    try:
+        got = await _browser_prepare_outbound(
+            page, conv_id=conv_id, org_id=oid, user_id=uid
+        )
+        if got:
+            ch = got
+    except Exception as exc:
+        logger.warning("prepare outbound conv=%s: %s", conv_id[:8], exc)
+        if not ch:
+            conv = await client.open_conversation(conv_id)
+            if conv:
+                ch = str(conv.get("channelId") or "").strip()
+
+    for i, body in enumerate(bodies):
+        if i:
+            await asyncio.sleep(0.8)
+        await _send_from_open_chat(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+            text=body,
+            locale=locale,
+            org_slug=slug,
+        )
+
+    patch_url = _api(f"/api/conversation/{conv_id}?userId={uid}&orgId={oid}")
+    await page.evaluate(
+        f"""async ({{url}}) => {{
+            {_SAFE_FETCH}
+            await safeJsonFetch(url, {{
+                method: 'PATCH',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{conversationState: 'read'}}),
+            }});
+        }}""",
+        {"url": patch_url},
+    )
+    logger.info("browser batch done conv=%s texts=%s", conv_id[:8], len(bodies))
+
+
 async def _browser_prepare_outbound(
     page,
     *,
@@ -671,9 +892,16 @@ async def _browser_prepare_outbound(
                 break
         patch_st = int(result.get("patchStatus") or 0)
         if not result.get("responsibleOk"):
-            raise RuntimeError(
-                f"Take chat not verified conv={conv_id[:8]} PATCH={patch_st}"
-            )
+            if patch_st in (200, 204):
+                logger.warning(
+                    "browser prepare conv=%s take unverified PATCH=%s — proceed",
+                    conv_id[:8],
+                    patch_st,
+                )
+            else:
+                raise RuntimeError(
+                    f"Take chat not verified conv={conv_id[:8]} PATCH={patch_st}"
+                )
 
     ch = str(result.get("channelId") or "").strip()
     if not ch:
@@ -699,6 +927,20 @@ async def _browser_prepare_outbound(
         ch[:8] if ch else "?",
     )
     return ch
+
+
+async def _export_context_cookies(context) -> dict[str, str]:
+    """All pager.co.ua cookies including _pager_org_id (needed for worker poll)."""
+    out: dict[str, str] = {}
+    for c in await context.cookies():
+        dom = str(c.get("domain") or "")
+        if "pager.co.ua" not in dom:
+            continue
+        name = str(c.get("name") or "")
+        if not name:
+            continue
+        out[name] = str(c.get("value") or "")
+    return out
 
 
 async def _cookies_from_context(context) -> dict[str, str]:
@@ -1379,85 +1621,14 @@ async def _send_operator_text(
     org_slug: str,
     channel_id: str = "",
 ) -> None:
-    from services.pager_api import PagerAPIError, PagerClient, message_accepted
-
-    referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
-    uid = (user_id or "").strip()
-    ch = (channel_id or "").strip()
-    if not ch:
-        raise RuntimeError(f"channelId missing conv={conv_id[:8]}")
-    await page.wait_for_timeout(2000)
-
-    cookies = await _cookies_from_context(context)
-    if cookies:
-        client = PagerClient(
-            PAGER_BASE,
-            cookies,
-            org_id=org_id,
-            org_slug=org_slug,
-            locale=locale,
-            org_id_fallback=org_id,
-            session_user_id=uid,
-        )
-        try:
-            result = await client.post_message_after_take(
-                conv_id, text, user_id=uid, channel_id=ch
-            )
-            if message_accepted(result, uid):
-                logger.info(
-                    "REST sent conv=%s author=%s fb=%s",
-                    conv_id[:8],
-                    str(result.get("authorId") or uid)[:16],
-                    str(result.get("facebookMessageId") or "")[:12],
-                )
-                return
-            logger.warning(
-                "REST not accepted conv=%s author=%s delivered=%s",
-                conv_id[:8],
-                str(result.get("authorId") or "")[:16],
-                result.get("isDelivered"),
-            )
-        except PagerAPIError as exc:
-            logger.warning(
-                "REST post failed conv=%s: %s",
-                conv_id[:8],
-                (exc.body or str(exc))[:200],
-            )
-
-    if await _wait_for_chat_composer(page, timeout_ms=35000):
-        if await _browser_send_via_ui(page, text):
-            verify = await _verify_message_delivered(
-                page,
-                conv_id=conv_id,
-                org_id=org_id,
-                user_id=user_id,
-                text=text,
-                attempts=15,
-            )
-            if verify.get("ghost"):
-                raise RuntimeError(
-                    f"Message delivery error (conv={conv_id[:8]}) — red !"
-                )
-            if verify.get("ok") and str(
-                verify.get("facebookMessageId") or ""
-            ).strip():
-                logger.info(
-                    "browser UI sent conv=%s author=%s fb=%s",
-                    conv_id[:8],
-                    str(verify.get("authorId") or uid)[:16],
-                    str(verify.get("facebookMessageId") or "")[:12],
-                )
-                return
-
-    await _send_one_in_session(
-        context,
+    await _send_from_open_chat(
         page,
         conv_id=conv_id,
         org_id=org_id,
         user_id=user_id,
         text=text,
-        referer=referer,
-        channel_id=channel_id,
+        locale=locale,
+        org_slug=org_slug,
     )
 
 
@@ -1519,14 +1690,19 @@ async def _run_browser_session(
         raise RuntimeError("No session cookies for browser send")
 
     chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
-    launch_args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    launch_args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+    ]
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=launch_args)
         context = await browser.new_context(
             user_agent=UA,
             locale="uk-UA",
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1400, "height": 900},
         )
         await context.add_cookies(
             [
@@ -1635,14 +1811,19 @@ async def send_messages_via_browser_ui(
     if not bodies:
         raise RuntimeError("No messages to send")
 
-    launch_args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    launch_args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+    ]
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=launch_args)
         context = await browser.new_context(
             user_agent=UA,
             locale="uk-UA",
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1400, "height": 900},
         )
         context.set_default_timeout(25000)
         page = await context.new_page()
@@ -1742,7 +1923,12 @@ async def send_batch_via_browser(
     if not (email or "").strip() or not (password or "").strip():
         raise RuntimeError("email/password required for batch browser send")
 
-    launch_args = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    launch_args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+    ]
     from playwright.async_api import async_playwright
 
     ok: set[str] = set()
@@ -1753,7 +1939,7 @@ async def send_batch_via_browser(
         context = await browser.new_context(
             user_agent=UA,
             locale="uk-UA",
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1400, "height": 900},
         )
         context.set_default_timeout(25000)
         page = await context.new_page()
@@ -1773,37 +1959,30 @@ async def send_batch_via_browser(
             for job in jobs:
                 conv_id = job[0]
                 texts = job[1]
+                client_name = (job[2] if len(job) > 2 else "").strip()
                 channel_hint = (job[3] if len(job) > 3 else "").strip()
                 bodies = [t.strip() for t in texts if (t or "").strip()]
                 if not bodies:
                     continue
                 try:
                     logger.info(
-                        "browser batch conv=%s texts=%s channel=%s",
+                        "browser batch conv=%s texts=%s channel=%s client=%r",
                         conv_id[:8],
                         len(bodies),
                         channel_hint[:8] if channel_hint else "?",
+                        (client_name or "")[:24],
                     )
-                    channel_id = await _rest_take_chat(
-                        context,
-                        page,
-                        conv_id=conv_id,
-                        org_id=oid,
-                        org_slug=slug,
-                        user_id=uid,
-                        locale=locale,
-                        channel_id=channel_hint,
-                    )
-                    await _rest_send_texts(
+                    await _batch_send_one_conv(
                         context,
                         page,
                         conv_id=conv_id,
                         texts=bodies,
+                        client_name=client_name,
+                        channel_hint=channel_hint,
                         org_id=oid,
                         org_slug=slug,
                         user_id=uid,
                         locale=locale,
-                        channel_id=channel_id,
                     )
                     ok.add(conv_id)
                 except Exception as exc:
@@ -1814,14 +1993,7 @@ async def send_batch_via_browser(
                     )
         finally:
             try:
-                for c in await context.cookies():
-                    dom = str(c.get("domain") or "")
-                    if "pager.co.ua" not in dom:
-                        continue
-                    name = str(c.get("name") or "")
-                    if name.startswith("_pager_"):
-                        continue
-                    fresh_cookies[name] = str(c.get("value") or "")
+                fresh_cookies = await _export_context_cookies(context)
             except Exception:
                 pass
             await browser.close()
