@@ -1078,14 +1078,11 @@ async def send_batch_via_browser(
                         conv_id[:8],
                         len(bodies),
                     )
-                    if not await _open_conversation_in_ui(
-                        page, locale=locale, org_slug=slug, conv_id=conv_id
-                    ):
-                        logger.warning(
-                            "batch conv=%s composer not ready — trying send",
-                            conv_id[:8],
-                        )
                     chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
+                    await page.goto(
+                        chat_url, wait_until="domcontentloaded", timeout=60000
+                    )
+                    await page.wait_for_timeout(1500)
                     await _browser_take_and_verify(
                         page,
                         conv_id=conv_id,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from aiogram import Bot
@@ -82,7 +83,7 @@ class _CycleSendBuffer:
             )
 
         jobs = list(self._jobs.items())
-        timeout = min(240.0, 60.0 + 45.0 * len(jobs))
+        timeout = min(540.0, 120.0 + 55.0 * len(jobs))
         logger.info(
             "browser batch flush jobs=%s texts=%s",
             len(jobs),
@@ -684,6 +685,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 len(inbound_convs) - no_status_count,
             )
 
+        no_status_inbound = [c for c in inbound_convs if is_no_status(c)]
+        if no_status_inbound:
+            logger.info(
+                "Worker account=%s: backlog mode — only «Без статусу» (%s chats)",
+                account.get("id"),
+                len(no_status_inbound),
+            )
+            inbound_convs = no_status_inbound
+
         async def _priority(conv: dict) -> tuple[int, str]:
             cid = str(conv.get("id") or "")
             st = await db.get_conversation_state(account_id, cid)
@@ -706,7 +716,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_replies = 2
+        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "8")))
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
@@ -721,7 +731,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             client=client,
         )
         planned = 0
-        for conv in inbound_convs[:max_replies]:
+        for conv in inbound_convs:
+            if planned >= max_plans:
+                break
             conv_id = str(conv.get("id") or "")
             try:
                 result = await _handle_conversation(
@@ -842,11 +854,11 @@ async def worker_loop(bot: Bot) -> None:
                 try:
                     await asyncio.wait_for(
                         _process_account(bot, acc),
-                        timeout=300.0,
+                        timeout=600.0,
                     )
                 except asyncio.TimeoutError:
                     logger.error(
-                        "Worker account=%s: cycle timeout 300s",
+                        "Worker account=%s: cycle timeout 600s",
                         acc.get("id"),
                     )
         except Exception:
