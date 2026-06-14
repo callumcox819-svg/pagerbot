@@ -116,11 +116,15 @@ def infer_step_from_history(
         return 4
     if "promo code zam577" in outgoing_joined or "registration link" in outgoing_joined:
         return 3
-    if "30 zmw - 300 zmw" in outgoing_joined or "are you ready to start" in outgoing_joined:
+    # Step 2 markers must be unique to scripts 02/03 — intro mentions
+    # "how it works" in passing and must not advance the funnel.
+    if "30 zmw - 300 zmw" in outgoing_joined:
         return 2
-    if "how it works" in outgoing_joined:
+    if "are you ready to start today" in outgoing_joined:
         return 2
-    if "analytical systems" in outgoing_joined or "casino platforms" in outgoing_joined:
+    if re.search(r"how it works:\s*\n\s*1\)", outgoing_joined):
+        return 2
+    if "hi! i want to show you" in outgoing_joined or "analytical systems" in outgoing_joined:
         return 1
     return 0
 

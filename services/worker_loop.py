@@ -58,6 +58,7 @@ class _CycleSendBuffer:
         self._clients: dict[str, str] = {}
         self._channels: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
+        self._status_patches: dict[str, list[str]] = {}
 
     def queue_send(
         self,
@@ -106,6 +107,11 @@ class _CycleSendBuffer:
                 self._commits[i] = (cid, {**fields, **kwargs})
                 return
         self._commits.append((conv_id, dict(kwargs)))
+
+    def queue_status_patch(self, conv_id: str, status_id: str) -> None:
+        sid = (status_id or "").strip()
+        if sid:
+            self._status_patches.setdefault(conv_id, []).append(sid)
 
     async def flush(self) -> set[str]:
         conv_ids = set(self._jobs) | set(self._script_keys)
@@ -168,6 +174,17 @@ class _CycleSendBuffer:
         uid = self.pager_user_id
         for conv_id, fields in self._commits:
             if conv_id in ok:
+                for status_id in self._status_patches.get(conv_id, []):
+                    try:
+                        await self.client.patch_status(conv_id, status_id, uid)
+                        await asyncio.sleep(0.3)
+                    except Exception as exc:
+                        logger.warning(
+                            "status patch failed conv=%s status=%s: %s",
+                            conv_id[:8],
+                            status_id[:8],
+                            exc,
+                        )
                 try:
                     await self.client.mark_conversation_read(
                         conv_id, user_id=uid
@@ -189,6 +206,7 @@ class _CycleSendBuffer:
         self._script_keys.clear()
         self._clients.clear()
         self._commits.clear()
+        self._status_patches.clear()
         return ok
 
 
@@ -448,8 +466,8 @@ async def _handle_conversation(
             if extracted:
                 await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
                 if pager_user_id:
-                    await client.patch_status(
-                        conv_id, ZM_STATUSES["registration"], pager_user_id
+                    send_buf.queue_status_patch(
+                        conv_id, ZM_STATUSES["registration"]
                     )
                 send_buf.queue_commit(
                     conv_id,
@@ -506,8 +524,8 @@ async def _handle_conversation(
                 script_keys=["08_tg_invite", "09_tg_link"],
             )
             if pager_user_id:
-                await client.patch_status(
-                    conv_id, ZM_STATUSES["deps_pending"], pager_user_id
+                send_buf.queue_status_patch(
+                    conv_id, ZM_STATUSES["deps_pending"]
                 )
             send_buf.queue_commit(
                 conv_id, step=9, last_processed_msg_id=msg_id
@@ -520,8 +538,8 @@ async def _handle_conversation(
         if gid and step >= 5 and step < 7:
             await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
             if pager_user_id:
-                await client.patch_status(
-                    conv_id, ZM_STATUSES["registration"], pager_user_id
+                send_buf.queue_status_patch(
+                    conv_id, ZM_STATUSES["registration"]
                 )
             send_buf.queue_commit(
                 conv_id,
@@ -604,13 +622,10 @@ async def _handle_conversation(
             channel_id=channel_id,
         )
         if pager_user_id:
-            await client.patch_status(
-                conv_id, ZM_STATUSES["in_progress"], pager_user_id
+            send_buf.queue_status_patch(
+                conv_id, ZM_STATUSES["in_progress"]
             )
-            await asyncio.sleep(0.5)
-            await client.patch_status(
-                conv_id, ZM_STATUSES["wait_id"], pager_user_id
-            )
+            send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])
         new_step = 5
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
@@ -781,37 +796,57 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             )
 
         no_status_inbound = [c for c in inbound_convs if is_no_status(c)]
+        funnel_inbound = [c for c in inbound_convs if not is_no_status(c)]
         if no_status_inbound:
             logger.info(
-                "Worker account=%s: backlog mode — only «Без статусу» (%s chats)",
+                "Worker account=%s: backlog mode — «Без статусу»=%s + funnel follow-ups=%s",
                 account.get("id"),
                 len(no_status_inbound),
+                len(funnel_inbound),
             )
-            inbound_convs = no_status_inbound
+            seen_ids: set[str] = set()
+            merged: list[dict] = []
+            for c in no_status_inbound + funnel_inbound:
+                cid = str(c.get("id") or "")
+                if cid and cid not in seen_ids:
+                    seen_ids.add(cid)
+                    merged.append(c)
+            inbound_convs = merged
 
-        async def _priority(conv: dict) -> tuple[int, str]:
+        def _last_msg_ts(conv: dict) -> float:
+            raw = str(conv.get("lastMessageAt") or "").strip()
+            if not raw:
+                return 0.0
+            try:
+                from datetime import datetime
+
+                return datetime.fromisoformat(
+                    raw.replace("Z", "+00:00")
+                ).timestamp()
+            except ValueError:
+                return 0.0
+
+        async def _priority(conv: dict) -> tuple[int, float]:
             cid = str(conv.get("id") or "")
             st = await db.get_conversation_state(account_id, cid)
-            ts = str(conv.get("lastMessageAt") or "")
+            ts = _last_msg_ts(conv)
             if st.get("pause_scripts") or st.get("human_takeover"):
                 return (3, ts)
-            if is_no_status(conv):
+            # Active funnel dialogs and follow-ups beat cold backlog intros.
+            if not is_no_status(conv):
                 return (0, ts)
-            if not st.get("last_processed_msg_id"):
-                return (1, ts)
-            return (2, ts)
+            if int(st.get("step") or 0) >= 1:
+                return (0, ts)
+            return (1, ts)
 
-        scored: list[tuple[tuple[int, str], dict]] = []
+        scored: list[tuple[tuple[int, float], dict]] = []
         for c in inbound_convs:
             scored.append((await _priority(c), c))
-        scored.sort(key=lambda x: x[0][0])
+        scored.sort(key=lambda x: (x[0][0], -x[0][1]))
         inbound_convs = [c for _, c in scored]
-        inbound_convs.sort(
-            key=lambda c: str(c.get("lastMessageAt") or ""), reverse=True
-        )
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "1")))
+        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "2")))
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
