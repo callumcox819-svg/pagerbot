@@ -269,7 +269,35 @@ async def _handle_conversation(
             for m in msg_only
         )
 
+    def _has_failed_ghost_after(last_in_ts: str) -> bool:
+        for m in msg_only:
+            if str(m.get("createdAt") or "") <= last_in_ts:
+                continue
+            if not _is_outgoing_direction(str(m.get("messageDirection") or "")):
+                continue
+            if "oldStatusId" in m or "oldResponsibleId" in m:
+                continue
+            if not (m.get("text") or "").strip():
+                continue
+            author = str(m.get("authorId") or "").strip()
+            if pager_user_id and author and author != pager_user_id:
+                continue
+            if m.get("isDelivered") or m.get("facebookMessageId"):
+                continue
+            return True
+        return False
+
     last_in_ts = str(last_in.get("createdAt") or "")
+    if _has_failed_ghost_after(last_in_ts):
+        logger.warning(
+            "conv=%s skip — undelivered ghost in thread (no resend)",
+            conv_id[:8],
+        )
+        await db.save_conversation_state(
+            account_id, conv_id, last_processed_msg_id=msg_id
+        )
+        return "done"
+
     needs_reply = not _has_operator_reply_after(last_in_ts)
     is_retry = False
     if msg_id and msg_id == state.get("last_processed_msg_id"):

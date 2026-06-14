@@ -862,6 +862,39 @@ class PagerClient:
             ),
         )
 
+    async def post_message_after_take(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        user_id: str = "",
+    ) -> dict[str, Any]:
+        """POST after browser take — warm chat page, no re-take loop."""
+        uid = self.operator_user_id(user_id)
+        await self._fetch_conv_chat_page(conv_id)
+        org_id = await self._ensure_org_id()
+        referer = self._chat_referer(conv_id)
+        params: dict[str, Any] = {"orgId": org_id}
+        if uid:
+            params["userId"] = uid
+        body = {"conversationId": conv_id, "text": text}
+        logger.info(
+            "post after take conv=%s user=%s chars=%s",
+            conv_id[:8],
+            (uid or "")[:16],
+            len(text),
+        )
+        result = await self._request(
+            "POST",
+            "/api/message",
+            params=params,
+            json_body=body,
+            referer=referer,
+        )
+        if not isinstance(result, dict):
+            raise PagerAPIError(502, '{"error":"empty message response"}')
+        return result
+
     async def send_operator_message(
         self,
         conv_id: str,

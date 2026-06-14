@@ -333,6 +333,7 @@ async def _verify_message_delivered(
 async def _wait_for_chat_composer(page, timeout_ms: int = 45000) -> bool:
     """Wait until messenger input is mounted (SPA hydration)."""
     selectors = [
+        'textarea[placeholder*="Напишіть"]',
         'textarea[placeholder*="повідом"]',
         'textarea[placeholder*="message" i]',
         'textarea[placeholder]',
@@ -700,6 +701,19 @@ async def _browser_prepare_outbound(
     return ch
 
 
+async def _cookies_from_context(context) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for c in await context.cookies():
+        dom = str(c.get("domain") or "")
+        if "pager.co.ua" not in dom:
+            continue
+        name = str(c.get("name") or "")
+        if name.startswith("_pager_"):
+            continue
+        out[name] = str(c.get("value") or "")
+    return out
+
+
 async def _fast_goto_chat(
     page,
     *,
@@ -842,12 +856,11 @@ async def _post_via_context_request(
     resp = await context.request.post(
         post_url,
         headers={
-            "Content-Type": "application/json",
             "Accept": "application/json",
             "Referer": referer,
             "Origin": PAGER_BASE,
         },
-        data=_json.dumps(payload),
+        json=payload,
     )
     raw = (await resp.text())[:400]
     data = None
@@ -1042,7 +1055,73 @@ async def _send_operator_text(
     org_slug: str,
     channel_id: str = "",
 ) -> None:
+    from services.pager_api import PagerAPIError, PagerClient, message_accepted
+
     referer = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    uid = (user_id or "").strip()
+    await page.wait_for_timeout(2000)
+
+    cookies = await _cookies_from_context(context)
+    if cookies:
+        client = PagerClient(
+            PAGER_BASE,
+            cookies,
+            org_id=org_id,
+            org_slug=org_slug,
+            locale=locale,
+            org_id_fallback=org_id,
+            session_user_id=uid,
+        )
+        try:
+            result = await client.post_message_after_take(
+                conv_id, text, user_id=uid
+            )
+            if message_accepted(result, uid):
+                logger.info(
+                    "REST sent conv=%s author=%s fb=%s",
+                    conv_id[:8],
+                    str(result.get("authorId") or uid)[:16],
+                    str(result.get("facebookMessageId") or "")[:12],
+                )
+                return
+            logger.warning(
+                "REST not accepted conv=%s author=%s delivered=%s",
+                conv_id[:8],
+                str(result.get("authorId") or "")[:16],
+                result.get("isDelivered"),
+            )
+        except PagerAPIError as exc:
+            logger.warning(
+                "REST post failed conv=%s: %s",
+                conv_id[:8],
+                (exc.body or str(exc))[:200],
+            )
+
+    if await _wait_for_chat_composer(page, timeout_ms=35000):
+        if await _browser_send_via_ui(page, text):
+            verify = await _verify_message_delivered(
+                page,
+                conv_id=conv_id,
+                org_id=org_id,
+                user_id=user_id,
+                text=text,
+                attempts=15,
+            )
+            if verify.get("ghost"):
+                raise RuntimeError(
+                    f"Message delivery error (conv={conv_id[:8]}) — red !"
+                )
+            if verify.get("ok") and str(
+                verify.get("facebookMessageId") or ""
+            ).strip():
+                logger.info(
+                    "browser UI sent conv=%s author=%s fb=%s",
+                    conv_id[:8],
+                    str(verify.get("authorId") or uid)[:16],
+                    str(verify.get("facebookMessageId") or "")[:12],
+                )
+                return
+
     await _send_one_in_session(
         context,
         page,
@@ -1378,6 +1457,7 @@ async def send_batch_via_browser(
                         org_slug=slug,
                         conv_id=conv_id,
                     )
+                    await page.wait_for_timeout(3000)
                     channel_id = await _fast_take_chat(
                         page,
                         conv_id=conv_id,
