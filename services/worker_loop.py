@@ -22,6 +22,7 @@ from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
     load_script,
+    scripts_for_positive_reply,
     scripts_to_resend_for_step,
     scripts_to_send_after_intent,
 )
@@ -565,7 +566,9 @@ async def _handle_conversation(
     keys: list[str] = []
 
     if no_status and needs_reply:
-        if hist_step < 1:
+        if intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED) and hist_step >= 1:
+            keys = scripts_for_positive_reply(hist_step)
+        elif hist_step < 1:
             keys = ["01_intro"]
         elif hist_step < 2:
             keys = ["02_how_it_works", "03_zmw_table"]
@@ -593,6 +596,8 @@ async def _handle_conversation(
 
         if intent == Intent.INTERESTED and step < 1:
             keys = ["01_intro"]
+        elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and hist_step >= 1:
+            keys = scripts_for_positive_reply(hist_step)
         elif intent in (Intent.POSITIVE, Intent.INTERESTED) and step < 2:
             keys = ["02_how_it_works", "03_zmw_table"]
         elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
@@ -911,7 +916,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound_convs = [c for _, c in scored]
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "3")))
+        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "5")))
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),

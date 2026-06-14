@@ -81,10 +81,38 @@ def script_sent_in_history(outgoing_texts: list[str], snippet: str) -> bool:
     return False
 
 
+def _step_for_outgoing_text(text: str) -> int:
+    """Map one operator message to funnel step (strict markers only)."""
+    t = (text or "").lower()
+    if "t.me/+" in t or "vhfjiofy" in t:
+        return 9
+    if "join our private telegram" in t:
+        return 8
+    if 'click "deposit"' in t or "minimum deposit amount" in t:
+        return 7
+    if "begins with 16" in t or "send me your game id" in t:
+        return 6
+    if "ibb.co" in t or "скрин реги" in t:
+        return 5
+    if "tinyurl.com/zam577" in t:
+        return 4
+    if "promo code zam577" in t:
+        return 3
+    if "30 zmw - 300 zmw" in t:
+        return 2
+    if "are you ready to start today" in t:
+        return 2
+    if re.search(r"how it works:\s*\n\s*1\)", t):
+        return 2
+    if "hi! i want to show you" in t or "analytical systems" in t:
+        return 1
+    return 0
+
+
 def infer_step_from_history(
     messages: list[dict], operator_id: str = ""
 ) -> int:
-    """0=new … 9=TG link sent, 10=subscriber games phase."""
+    """0=new … 9=TG link sent. Uses chronological operator messages (max step)."""
     uid = (operator_id or "").strip()
     outgoing: list[str] = []
     for m in messages:
@@ -100,33 +128,24 @@ def infer_step_from_history(
         if not (m.get("isDelivered") or m.get("facebookMessageId")):
             continue
         outgoing.append(m.get("text") or "")
-    outgoing_joined = "\n".join(outgoing).lower()
 
-    if "t.me/+" in outgoing_joined or "vhfjiofy" in outgoing_joined:
-        return 9
-    if "join our private telegram" in outgoing_joined:
-        return 8
-    if "deposit" in outgoing_joined and "screenshot" in outgoing_joined:
-        return 7
-    if "game id" in outgoing_joined or "begins with 16" in outgoing_joined:
-        return 6
-    if "ibb.co" in outgoing_joined or "скрин реги" in outgoing_joined:
-        return 5
-    if "tinyurl.com/zam577" in outgoing_joined:
-        return 4
-    if "promo code zam577" in outgoing_joined or "registration link" in outgoing_joined:
-        return 3
-    # Step 2 markers must be unique to scripts 02/03 — intro mentions
-    # "how it works" in passing and must not advance the funnel.
-    if "30 zmw - 300 zmw" in outgoing_joined:
-        return 2
-    if "are you ready to start today" in outgoing_joined:
-        return 2
-    if re.search(r"how it works:\s*\n\s*1\)", outgoing_joined):
-        return 2
-    if "hi! i want to show you" in outgoing_joined or "analytical systems" in outgoing_joined:
-        return 1
-    return 0
+    step = 0
+    for text in outgoing:
+        step = max(step, _step_for_outgoing_text(text))
+    return step
+
+
+def scripts_for_positive_reply(hist_step: int) -> list[str]:
+    """After client says Yes/OK — next scripts in funnel order."""
+    if hist_step < 1:
+        return ["01_intro"]
+    if hist_step < 2:
+        return ["02_how_it_works", "03_zmw_table"]
+    if hist_step < 4:
+        return ["04_registration", "05_link"]
+    if hist_step < 5:
+        return ["10_reg_screenshot"]
+    return scripts_to_resend_for_step(hist_step)
 
 
 def scripts_to_resend_for_step(hist_step: int) -> list[str]:
