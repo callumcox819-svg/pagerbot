@@ -77,6 +77,7 @@ class _CycleSendBuffer:
     ) -> None:
         bodies = [t.strip() for t in texts if (t or "").strip()]
         keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
+        keys = filter_auto_script_keys(keys)
         if not bodies and not keys:
             return
         if bodies:
@@ -191,6 +192,11 @@ class _CycleSendBuffer:
                 for status_id in self._status_patches.get(conv_id, []):
                     try:
                         await self.client.patch_status(conv_id, status_id, uid)
+                        logger.info(
+                            "status patched conv=%s folder=%s",
+                            conv_id[:8],
+                            status_id[:8],
+                        )
                         await asyncio.sleep(0.3)
                     except Exception as exc:
                         logger.warning(
@@ -657,11 +663,14 @@ async def _handle_conversation(
             send_buf.queue_status_patch(
                 conv_id, ZM_STATUSES["in_progress"]
             )
-            send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
     elif keys == ["02_how_it_works", "03_zmw_table"]:
         new_step = max(new_step, 2)
+    elif keys and keys[-1] == "07_game_id":
+        new_step = max(new_step, 6)
+        if pager_user_id:
+            send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])
 
     if actions_sent:
         send_buf.queue_commit(
@@ -900,7 +909,20 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound_convs = [c for _, c in scored]
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "5")))
+        no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "8")))
+        if no_status_n > 15:
+            max_plans = min(12, base_plans + no_status_n // 4)
+        elif no_status_n > 8:
+            max_plans = min(10, base_plans + 2)
+        else:
+            max_plans = base_plans
+        logger.info(
+            "Worker account=%s: plan budget=%s (no_status=%s)",
+            account.get("id"),
+            max_plans,
+            no_status_n,
+        )
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
@@ -1038,11 +1060,11 @@ async def worker_loop(bot: Bot) -> None:
                 try:
                     await asyncio.wait_for(
                         _process_account(bot, acc),
-                        timeout=600.0,
+                        timeout=900.0,
                     )
                 except asyncio.TimeoutError:
                     logger.error(
-                        "Worker account=%s: cycle timeout 600s",
+                        "Worker account=%s: cycle timeout 900s",
                         acc.get("id"),
                     )
         except Exception:

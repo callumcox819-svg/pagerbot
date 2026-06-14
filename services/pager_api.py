@@ -466,10 +466,10 @@ class PagerClient:
                 _add(convs)
 
         # «Без статусу» — extra pass (Pager tab often not in first pages per channel).
-        for page in range(1, max(max_pages, 8) + 1):
+        for page in range(1, max(max_pages, 12) + 1):
             convs = await self.list_conversations(page=page, page_size=100)
             no_status = [c for c in convs if is_no_status(c)]
-            if not no_status:
+            if not convs:
                 break
             _add(no_status)
 

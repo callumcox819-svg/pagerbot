@@ -12,6 +12,7 @@ from services.pager_auth import PAGER_BASE, UA, playwright_sign_in_on_page
 
 from services.script_engine import (
     SAVED_REPLY_FOLDER_NAMES,
+    filter_auto_script_keys,
     load_script,
     script_ui_snippet,
     script_verify_snippet,
@@ -2624,8 +2625,10 @@ async def send_batch_via_browser(
                 client_name = (job[2] if len(job) > 2 else "").strip()
                 channel_hint = (job[3] if len(job) > 3 else "").strip()
                 script_keys = list(job[4]) if len(job) > 4 else []
+                keys = filter_auto_script_keys(
+                    [k.strip() for k in script_keys if (k or "").strip()]
+                )
                 bodies = [t.strip() for t in texts if (t or "").strip()]
-                keys = [k.strip() for k in script_keys if (k or "").strip()]
                 if not bodies and not keys:
                     continue
                 try:
