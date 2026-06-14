@@ -353,6 +353,134 @@ async def _wait_for_chat_composer(page, timeout_ms: int = 45000) -> bool:
     return False
 
 
+async def _wait_for_inbox_hydrated(
+    page,
+    *,
+    org_id: str,
+    channel_id: str = "",
+    timeout_ms: int = 90000,
+) -> bool:
+    """Wait until Pager inbox finishes loading (skeletons → real chat rows)."""
+    oid = (org_id or "").strip()
+    ch = (channel_id or "").strip()
+    api_conv = _api(f"/api/conversation?orgId={oid}&pageSize=20&page=1")
+    if ch:
+        api_conv += f"&channelId={ch}"
+
+    deadline = asyncio.get_event_loop().time() + timeout_ms / 1000.0
+    while asyncio.get_event_loop().time() < deadline:
+        state = await page.evaluate(
+            """() => {
+                const pulses = document.querySelectorAll('.animate-pulse');
+                const links = [...document.querySelectorAll('a[href*="/chats/"]')]
+                    .filter(a => /[0-9a-f]{8}-[0-9a-f]{4}-/.test(a.getAttribute('href') || ''));
+                const text = document.body.innerText || '';
+                const choose = text.includes('Оберіть чат') || text.includes('Select a chat');
+                const search = !!document.querySelector('input[placeholder="Пошук"], input[placeholder*="Пошук"]');
+                return {
+                    pulses: pulses.length,
+                    links: links.length,
+                    chooseChat: choose,
+                    hasSearch: search,
+                };
+            }"""
+        )
+        if isinstance(state, dict):
+            links = int(state.get("links") or 0)
+            pulses = int(state.get("pulses") or 0)
+            if links >= 1 and pulses < 25:
+                logger.info(
+                    "browser inbox hydrated links=%s pulses=%s",
+                    links,
+                    pulses,
+                )
+                return True
+            if state.get("hasSearch") and not state.get("chooseChat") and pulses < 15:
+                logger.info("browser inbox hydrated (search ready)")
+                return True
+
+        if oid:
+            ok = await page.evaluate(
+                f"""async ({{url}}) => {{
+                    {_SAFE_FETCH}
+                    const r = await safeJsonFetch(url);
+                    if (r.html) return false;
+                    const data = r.data;
+                    if (Array.isArray(data)) return data.length > 0;
+                    if (data && Array.isArray(data.items)) return data.items.length > 0;
+                    return false;
+                }}""",
+                {"url": api_conv},
+            )
+            if ok:
+                logger.info("browser inbox hydrated (conversation API)")
+                await page.wait_for_timeout(2000)
+                return True
+
+        await page.wait_for_timeout(2000)
+
+    logger.warning("browser inbox hydration timeout")
+    return False
+
+
+async def _wait_for_chat_thread(
+    page,
+    conv_id: str,
+    *,
+    timeout_ms: int = 60000,
+) -> bool:
+    """Wait until a specific chat thread is open (not «Оберіть чат»)."""
+    cid = (conv_id or "").strip()
+    if not cid:
+        return False
+    attempts = max(1, timeout_ms // 1500)
+    for attempt in range(attempts):
+        if await _chat_thread_active(page, cid):
+            logger.info("browser thread active conv=%s try=%s", cid[:8], attempt)
+            return True
+        await page.wait_for_timeout(1500)
+    return False
+
+
+async def _open_conversation_direct(
+    page,
+    *,
+    locale: str,
+    org_slug: str,
+    conv_id: str,
+    channel_id: str = "",
+    org_id: str = "",
+) -> None:
+    """Open chat URL exactly like Pager SPA (with channelId query)."""
+    ch = (channel_id or "").strip()
+    chat_url = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    if ch:
+        chat_url += f"?channelId={ch}"
+    api_needle = f"convId={conv_id}"
+    try:
+        async with page.expect_response(
+            lambda r: (
+                api_needle in r.url
+                and "/api/message" in r.url
+                and r.status == 200
+            ),
+            timeout=25000,
+        ):
+            await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
+        logger.info("browser chat direct conv=%s (api)", conv_id[:8])
+        return
+    except Exception:
+        pass
+    await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
+    await _fast_goto_chat(
+        page,
+        locale=locale,
+        org_slug=org_slug,
+        conv_id=conv_id,
+        org_id=org_id,
+    )
+
+
 async def _click_no_status_tab(page) -> bool:
     """Filter inbox to «Без статусу» — matches worker backlog queue."""
     for pattern in (
@@ -452,18 +580,43 @@ async def _search_and_open_chat(
     return False
 
 
-async def _ensure_inbox(page, *, locale: str, org_slug: str) -> str:
-    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats"
-    if inbox not in page.url:
+async def _ensure_inbox(
+    page,
+    *,
+    locale: str,
+    org_slug: str,
+    channel_id: str = "",
+    org_id: str = "",
+) -> str:
+    ch = (channel_id or "").strip()
+    qs = f"?channelId={ch}" if ch else ""
+    inbox = f"{PAGER_BASE}/{locale}/{org_slug}/chats{qs}"
+    on_inbox = f"/{org_slug}/chats" in page.url
+    if not on_inbox or (ch and f"channelId={ch}" not in page.url):
         await page.goto(inbox, wait_until="domcontentloaded", timeout=90000)
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(1500)
+    if org_id:
+        await _wait_for_inbox_hydrated(
+            page, org_id=org_id, channel_id=ch, timeout_ms=90000
+        )
     await _click_no_status_tab(page)
-    return inbox
+    return f"{PAGER_BASE}/{locale}/{org_slug}/chats"
 
 
 async def _chat_thread_active(page, conv_id: str) -> bool:
-    if conv_id not in page.url:
-        return False
+    cid = (conv_id or "").strip()
+    if cid and cid in page.url:
+        pass
+    elif cid:
+        in_dom = await page.evaluate(
+            f"""() => {{
+                const id = "{cid}";
+                return document.querySelector('a[href*="' + id + '"]') !== null
+                    || (location.href || '').includes(id);
+            }}"""
+        )
+        if not in_dom:
+            return False
     try:
         body = await page.locator("body").inner_text()
         if "Оберіть чат" in body or "Select a chat" in body:
@@ -621,14 +774,18 @@ async def _send_from_open_chat(
     ref = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
 
     if conv_id not in page.url:
-        await _fast_goto_chat(
-            page,
-            locale=locale,
-            org_slug=org_slug,
-            conv_id=conv_id,
-            org_id=oid,
-        )
-        await page.wait_for_timeout(2500)
+        if not await _chat_thread_active(page, conv_id):
+            await _wait_for_chat_thread(page, conv_id, timeout_ms=15000)
+        if conv_id not in page.url and not await _chat_thread_active(page, conv_id):
+            await _fast_goto_chat(
+                page,
+                locale=locale,
+                org_slug=org_slug,
+                conv_id=conv_id,
+                org_id=oid,
+            )
+            await page.wait_for_timeout(2500)
+            await _wait_for_chat_thread(page, conv_id, timeout_ms=30000)
 
     if await _browser_send_via_ui(page, text):
         verify = await _verify_message_delivered(
@@ -750,27 +907,45 @@ async def _batch_send_one_conv(
     if not bodies:
         return
 
-    await _ensure_inbox(page, locale=locale, org_slug=slug)
-    opened = await _open_conversation_in_ui(
+    inbox = await _ensure_inbox(
         page,
         locale=locale,
         org_slug=slug,
-        conv_id=conv_id,
-        client_name=client_name,
+        channel_id=ch,
+        org_id=oid,
     )
-    if not opened:
-        logger.warning(
-            "batch UI open failed conv=%s — trying direct URL",
-            conv_id[:8],
+
+    opened = False
+    if client_name:
+        opened = await _search_and_open_chat(
+            page, client_name=client_name, conv_id=conv_id
         )
-        await _fast_goto_chat(
+    if not opened:
+        opened = await _click_conv_in_sidebar(page, conv_id)
+    if not opened:
+        await _open_conversation_direct(
             page,
             locale=locale,
             org_slug=slug,
             conv_id=conv_id,
+            channel_id=ch,
             org_id=oid,
         )
-        await page.wait_for_timeout(3000)
+    if not await _wait_for_chat_thread(page, conv_id, timeout_ms=60000):
+        await _open_conversation_direct(
+            page,
+            locale=locale,
+            org_slug=slug,
+            conv_id=conv_id,
+            channel_id=ch,
+            org_id=oid,
+        )
+        if not await _wait_for_chat_thread(page, conv_id, timeout_ms=45000):
+            raise RuntimeError(
+                f"Chat thread not open conv={conv_id[:8]} — still «Оберіть чат»"
+            )
+
+    await _click_take_ui(page, conv_id)
 
     client = await _browser_pager_client(
         context,
@@ -963,9 +1138,13 @@ async def _fast_goto_chat(
     org_slug: str,
     conv_id: str,
     org_id: str = "",
+    channel_id: str = "",
 ) -> None:
     """Open chat URL and wait for Pager to load message history API."""
+    ch = (channel_id or "").strip()
     chat_url = f"{PAGER_BASE}/{locale}/{org_slug}/chats/{conv_id}"
+    if ch:
+        chat_url += f"?channelId={ch}"
     api_needle = f"convId={conv_id}"
     try:
         async with page.expect_response(
@@ -1950,8 +2129,18 @@ async def send_batch_via_browser(
                 timeout=120.0,
             )
             org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
+            first_ch = ""
+            for job in jobs:
+                if len(job) > 3 and (job[3] or "").strip():
+                    first_ch = (job[3] or "").strip()
+                    break
+            if first_ch:
+                org_inbox += f"?channelId={first_ch}"
             await page.goto(org_inbox, wait_until="domcontentloaded", timeout=90000)
             await page.wait_for_timeout(2000)
+            await _wait_for_inbox_hydrated(
+                page, org_id=oid, channel_id=first_ch, timeout_ms=90000
+            )
             await _click_no_status_tab(page)
             await _verify_logged_in_operator(page, uid)
             logger.info("browser inbox ready")
