@@ -157,18 +157,26 @@ class _CycleSendBuffer:
             timeout=timeout,
         )
         if fresh_cookies:
-            for keep in ("_pager_org_id", "_pager_user_id"):
-                if keep in self.client.cookies and keep not in fresh_cookies:
-                    fresh_cookies[keep] = self.client.cookies[keep]
-            self.client.cookies.update(fresh_cookies)
-            try:
-                await db.upsert_account(
-                    int(self.account["tg_user_id"]),
-                    session_enc=_secrets.encrypt(json.dumps(self.client.cookies)),
-                    session_ok=1,
-                )
-            except Exception:
-                pass
+            # Browser Playwright cookies break REST polling — only merge org hints.
+            hints: dict[str, str] = {}
+            for key in ("_pager_org_id", "_pager_user_id"):
+                val = str(fresh_cookies.get(key) or "").strip()
+                if val:
+                    hints[key] = val
+            if hints:
+                merged = dict(self.client.cookies)
+                merged.update(hints)
+                self.client.cookies = merged
+                try:
+                    await db.upsert_account(
+                        int(self.account["tg_user_id"]),
+                        session_enc=_secrets.encrypt(
+                            json.dumps(self.client.cookies)
+                        ),
+                        session_ok=1,
+                    )
+                except Exception:
+                    pass
 
         account_id = int(self.account["id"])
         uid = self.pager_user_id
@@ -725,10 +733,27 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             )
 
         client = _make_client(cookies)
-        try:
-            probe = await client.probe_session()
-        except PagerAPIError:
-            probe = None
+        await client.warm_session()
+        probe: dict[str, Any] | None = None
+        for attempt in range(2):
+            try:
+                probe = await client.probe_session()
+                break
+            except PagerAPIError as exc:
+                if attempt == 0 and is_session_error(exc):
+                    logger.info(
+                        "Worker account=%s: API probe retry after warm",
+                        account_id,
+                    )
+                    await client.warm_session()
+                    continue
+                logger.warning(
+                    "Worker account=%s: API probe failed: %s",
+                    account_id,
+                    exc,
+                )
+                probe = None
+                break
         if not probe:
             logger.warning(
                 "Worker account=%s: session stale — refreshing",
@@ -741,6 +766,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             if acc:
                 account.update(acc)
             client = _make_client(fresh)
+            await client.warm_session()
 
         enabled = await _ensure_enabled_channels(account_id, client)
         if enabled is None:
@@ -846,7 +872,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound_convs = [c for _, c in scored]
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
-        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "2")))
+        max_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "3")))
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),

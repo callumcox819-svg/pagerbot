@@ -1047,7 +1047,8 @@ class PagerClient:
         *,
         user_id: str = "",
     ) -> None:
-        params: dict[str, Any] = {}
+        org_id = await self._ensure_org_id()
+        params: dict[str, Any] = {"orgId": org_id}
         if user_id:
             params["userId"] = user_id
         try:
@@ -1058,7 +1059,11 @@ class PagerClient:
                 json_body={"conversationState": "read"},
             )
         except PagerAPIError as exc:
-            logger.debug("mark read conv=%s: %s", conv_id[:8], exc.body[:80])
+            logger.warning(
+                "mark read conv=%s: %s",
+                conv_id[:8],
+                exc.body[:120],
+            )
 
     async def patch_status(self, conv_id: str, status_id: str, user_id: str) -> dict[str, Any]:
         return await self._request(
