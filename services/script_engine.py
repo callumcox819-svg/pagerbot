@@ -38,6 +38,8 @@ SCRIPT_UI_SNIPPETS: dict[str, str] = {
 # Never auto-send to clients (Russian internal note / manual-only in Pager).
 AUTO_SKIP_SCRIPT_KEYS: frozenset[str] = frozenset({"10_reg_screenshot"})
 
+SAVED_REPLY_FOLDER_NAMES = ("Замбія", "Замбия", "Zambia", "Замб")
+
 _cache: dict[str, str] = {}
 
 
