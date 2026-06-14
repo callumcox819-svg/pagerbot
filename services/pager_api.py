@@ -862,6 +862,38 @@ class PagerClient:
             ),
         )
 
+    async def post_message_minimal(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        user_id: str = "",
+    ) -> dict[str, Any]:
+        """POST like operator UI after take: {conversationId, text} + userId query."""
+        uid = self.operator_user_id(user_id)
+        org_id = await self._ensure_org_id()
+        referer = self._chat_referer(conv_id)
+        params: dict[str, Any] = {"orgId": org_id}
+        if uid:
+            params["userId"] = uid
+        body: dict[str, Any] = {"conversationId": conv_id, "text": text}
+        logger.info(
+            "post minimal conv=%s user=%s chars=%s",
+            conv_id[:8],
+            (uid or "")[:16],
+            len(text),
+        )
+        result = await self._request(
+            "POST",
+            "/api/message",
+            params=params,
+            json_body=body,
+            referer=referer,
+        )
+        if not isinstance(result, dict):
+            raise PagerAPIError(502, '{"error":"empty message response"}')
+        return result
+
     async def post_message_after_take(
         self,
         conv_id: str,
@@ -870,8 +902,21 @@ class PagerClient:
         user_id: str = "",
         channel_id: str = "",
     ) -> dict[str, Any]:
-        """POST after browser take — requires channelId in body for REST."""
+        """POST after browser take — UI-style body first, channelId body as fallback."""
         uid = self.operator_user_id(user_id)
+        try:
+            await self.list_messages(conv_id, page_size=3)
+        except PagerAPIError:
+            pass
+        try:
+            result = await self.post_message_minimal(conv_id, text, user_id=uid)
+            if message_delivered(result):
+                return result
+        except PagerAPIError as exc:
+            body_l = (exc.body or "").lower()
+            if "imageurl" not in body_l and "channel" not in body_l:
+                raise
+
         await self._fetch_conv_chat_page(conv_id)
         org_id = await self._ensure_org_id()
         referer = self._chat_referer(conv_id)
@@ -900,10 +945,6 @@ class PagerClient:
         }
         if uid:
             body["authorId"] = uid
-        try:
-            await self.list_messages(conv_id, page_size=3)
-        except PagerAPIError:
-            pass
         logger.info(
             "post after take conv=%s user=%s channel=%s chars=%s",
             conv_id[:8],
