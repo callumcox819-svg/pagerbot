@@ -315,14 +315,13 @@ async def toggle_channel(account_id: int, channel_id: str, enabled: bool) -> Non
 
 
 async def clear_pauses_for_account(account_id: int) -> int:
-    """Reset pauses and stale markers on paused chats."""
+    """Reset pause flags only — keep processed/escalation markers for dedupe."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
             UPDATE conversation_states
             SET pause_scripts = 0,
                 human_takeover = 0,
-                last_processed_msg_id = '',
                 send_failures = 0,
                 updated_at = datetime('now')
             WHERE account_id = ?

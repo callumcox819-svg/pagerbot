@@ -1408,7 +1408,28 @@ async def _batch_send_one_conv(
     if not taken:
         resp = await client._conversation_responsible(conv_id)
         if resp != uid:
-            raise RuntimeError(f"Take chat failed conv={conv_id[:8]}")
+            try:
+                await _browser_take_and_verify(
+                    page,
+                    conv_id=conv_id,
+                    org_id=oid,
+                    user_id=uid,
+                    chat_url=page.url,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "browser take fallback conv=%s: %s", conv_id[:8], exc
+                )
+            check = await _poll_take_state(
+                page, conv_id=conv_id, org_id=oid, user_id=uid
+            )
+            resp = await client._conversation_responsible(conv_id)
+            if (
+                resp != uid
+                and not check.get("responsibleOk")
+                and not check.get("systemTake")
+            ):
+                raise RuntimeError(f"Take chat failed conv={conv_id[:8]}")
 
     try:
         got = await _browser_prepare_outbound(

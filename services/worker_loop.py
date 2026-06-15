@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -160,68 +161,112 @@ class _CycleSendBuffer:
             )
             for cid in conv_ids
         ]
-        timeout = min(720.0, 150.0 + 120.0 * len(jobs))
+        chunk_size = max(1, int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "6")))
+        n_chunks = (len(jobs) + chunk_size - 1) // chunk_size
         n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
-            "browser batch flush jobs=%s texts=%s script_keys=%s",
+            "browser batch flush jobs=%s chunks=%s texts=%s script_keys=%s",
             len(jobs),
+            n_chunks,
             sum(len(job[1]) for job in jobs),
             n_keys,
         )
-        ok, fresh_cookies = await asyncio.wait_for(
-            send_batch_via_browser(
-                jobs,
-                org_id=self.org_id,
-                org_slug=self.org_slug,
-                user_id=self.pager_user_id,
-                locale=self.locale,
-                email=email,
-                password=password,
-            ),
-            timeout=timeout,
-        )
-        if fresh_cookies:
-            # Browser Playwright cookies break REST polling — only merge org hints.
-            hints: dict[str, str] = {}
-            for key in ("_pager_org_id", "_pager_user_id"):
-                val = str(fresh_cookies.get(key) or "").strip()
-                if val:
-                    hints[key] = val
-            if hints:
-                merged = dict(self.client.cookies)
-                merged.update(hints)
-                self.client.cookies = merged
-                try:
-                    await db.upsert_account(
-                        int(self.account["tg_user_id"]),
-                        session_enc=_secrets.encrypt(
-                            json.dumps(self.client.cookies)
-                        ),
-                        session_ok=1,
-                    )
-                except Exception:
-                    pass
 
+        ok_total: set[str] = set()
         account_id = int(self.account["id"])
         uid = self.pager_user_id
-        for conv_id, fields in self._commits:
-            if conv_id in ok:
-                try:
-                    await self.client.mark_conversation_read(
-                        conv_id, user_id=uid
-                    )
-                except Exception:
-                    pass  # browser batch already marks read via in-page PATCH
-                await db.save_conversation_state(
-                    account_id, conv_id, send_failures=0, **fields
+
+        for start in range(0, len(jobs), chunk_size):
+            chunk = jobs[start : start + chunk_size]
+            chunk_no = start // chunk_size + 1
+            timeout = min(600.0, 120.0 + 90.0 * len(chunk))
+            try:
+                ok, fresh_cookies = await asyncio.wait_for(
+                    send_batch_via_browser(
+                        chunk,
+                        org_id=self.org_id,
+                        org_slug=self.org_slug,
+                        user_id=self.pager_user_id,
+                        locale=self.locale,
+                        email=email,
+                        password=password,
+                    ),
+                    timeout=timeout,
                 )
-            else:
-                st = await db.get_conversation_state(account_id, conv_id)
-                fails = int(st.get("send_failures") or 0) + 1
-                patch: dict[str, Any] = {"send_failures": fails}
-                if fails >= 5:
-                    patch["pause_scripts"] = 1
-                await db.save_conversation_state(account_id, conv_id, **patch)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "browser batch chunk timeout chunk=%s/%s jobs=%s",
+                    chunk_no,
+                    n_chunks,
+                    len(chunk),
+                )
+                ok = set()
+                fresh_cookies = {}
+            except Exception as exc:
+                logger.warning(
+                    "browser batch chunk failed chunk=%s/%s: %s",
+                    chunk_no,
+                    n_chunks,
+                    exc,
+                )
+                ok = set()
+                fresh_cookies = {}
+
+            if fresh_cookies:
+                hints: dict[str, str] = {}
+                for key in ("_pager_org_id", "_pager_user_id"):
+                    val = str(fresh_cookies.get(key) or "").strip()
+                    if val:
+                        hints[key] = val
+                if hints:
+                    merged = dict(self.client.cookies)
+                    merged.update(hints)
+                    self.client.cookies = merged
+                    try:
+                        await db.upsert_account(
+                            int(self.account["tg_user_id"]),
+                            session_enc=_secrets.encrypt(
+                                json.dumps(self.client.cookies)
+                            ),
+                            session_ok=1,
+                        )
+                    except Exception:
+                        pass
+
+            ok_total.update(ok)
+            chunk_cids = {job[0] for job in chunk}
+            for conv_id, fields in self._commits:
+                if conv_id not in chunk_cids:
+                    continue
+                if conv_id in ok:
+                    try:
+                        await self.client.mark_conversation_read(
+                            conv_id, user_id=uid
+                        )
+                    except Exception:
+                        pass
+                    await db.save_conversation_state(
+                        account_id, conv_id, send_failures=0, **fields
+                    )
+                else:
+                    st = await db.get_conversation_state(account_id, conv_id)
+                    fails = int(st.get("send_failures") or 0) + 1
+                    patch: dict[str, Any] = {"send_failures": fails}
+                    if fails >= 5:
+                        patch["pause_scripts"] = 1
+                    await db.save_conversation_state(
+                        account_id, conv_id, **patch
+                    )
+
+            logger.info(
+                "browser batch chunk=%s/%s delivered=%s/%s",
+                chunk_no,
+                n_chunks,
+                len(ok),
+                len(chunk),
+            )
+
+        ok = ok_total
 
         self._jobs.clear()
         self._script_keys.clear()
@@ -460,9 +505,21 @@ async def _handle_conversation(
     else:
         step = max(int(state.get("step") or 0), hist_step)
 
-    intent = classify(text, has_image=has_image, has_ad=has_ad)
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
+
+    intent = classify(text, has_image=has_image, has_ad=has_ad)
+    thread_has_ad = has_ad or any(
+        bool(m.get("adId") or m.get("adUrl")) for m in msg_only
+    )
+    if (
+        no_status
+        and hist_step < 1
+        and needs_reply
+        and thread_has_ad
+        and re.fullmatch(r"\d{1,4}", text.strip())
+    ):
+        intent = Intent.INTERESTED
 
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     channel_name = ((conv.get("channel") or {}).get("name") or channel_id).strip()
@@ -489,6 +546,18 @@ async def _handle_conversation(
     )
 
     auto_funnel = post_intro_followup or registration_resend
+
+    if (
+        not auto_funnel
+        and needs_reply
+        and msg_id
+        and msg_id == str(state.get("last_escalation_msg_id") or "")
+    ):
+        logger.info(
+            "conv=%s skip — already escalated for this message",
+            conv_id[:8],
+        )
+        return "paused"
 
     logger.info(
         "conv=%s intent=%s step=%s hist_step=%s post_intro=%s reg_resend=%s folder=%r retry=%s text=%r",
@@ -1020,13 +1089,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "8")))
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "6")))
         if no_status_n > 15:
-            max_plans = min(12, base_plans + no_status_n // 4)
+            max_plans = min(6, base_plans + no_status_n // 10)
         elif no_status_n > 8:
-            max_plans = min(10, base_plans + 2)
+            max_plans = min(6, base_plans + 1)
         else:
-            max_plans = base_plans
+            max_plans = min(6, base_plans)
         logger.info(
             "Worker account=%s: plan budget=%s (no_status=%s)",
             account.get("id"),
