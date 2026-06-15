@@ -1140,15 +1140,6 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             max_plans = min(8, base_plans)
         else:
             max_plans = min(6, base_plans)
-        logger.info(
-            "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s (no_status=%s)",
-            account.get("id"),
-            max_plans,
-            funnel_cap,
-            batch_chunk,
-            browser_parallel,
-            no_status_n,
-        )
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
@@ -1164,6 +1155,16 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             1,
             int(os.getenv("PAGER_BROWSER_PARALLEL", "4")),
         )
+        funnel_cap = max(6, (max_plans * 2 + 1) // 3)
+        logger.info(
+            "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s (no_status=%s)",
+            account.get("id"),
+            max_plans,
+            funnel_cap,
+            batch_chunk,
+            browser_parallel,
+            no_status_n,
+        )
         send_buf = _CycleSendBuffer(
             account,
             org_id=org_id,
@@ -1176,7 +1177,6 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
         planned = 0
         funnel_planned = 0
-        funnel_cap = max(6, (max_plans * 2 + 1) // 3)
         for conv in process_order:
             if conv in funnel_active:
                 if funnel_planned >= funnel_cap:
