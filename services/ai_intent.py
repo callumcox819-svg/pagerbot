@@ -11,6 +11,7 @@ class Intent(str, Enum):
     POSITIVE = "positive"
     READY = "ready"
     JOINED = "joined"
+    DEPOSIT_DONE = "deposit_done"
     COMPLAINT = "complaint"
     QUESTION = "question"
     IMAGE_ONLY = "image_only"
@@ -83,6 +84,22 @@ def wants_registration_followup(text: str) -> bool:
     return bool(_REGISTRATION_FOLLOWUP.search(t))
 
 
+def is_deposit_confirmation(text: str) -> bool:
+    """Client says they deposited — never resend registration scripts."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b(done deposit|deposit done|deposited|made (a |my )?deposit|"
+            r"i (have |'?ve )?deposited|sent deposit|finished deposit|"
+            r"completed deposit|deposit complete|paid deposit|i paid)\b",
+            t,
+            re.I,
+        )
+    )
+
+
 def is_registration_pending(text: str) -> bool:
     """Client has not registered yet — resend registration + link."""
     t = (text or "").strip()
@@ -116,6 +133,8 @@ def classify(
         return Intent.GAME_ID_TEXT
     if _COMPLAINT.search(t):
         return Intent.COMPLAINT
+    if is_deposit_confirmation(t):
+        return Intent.DEPOSIT_DONE
     if _ACK.search(t):
         return Intent.POSITIVE
     if _JOINED.search(t):

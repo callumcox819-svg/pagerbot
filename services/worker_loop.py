@@ -18,6 +18,7 @@ from services.ai_intent import (
     Intent,
     classify,
     is_commitment_reply,
+    is_deposit_confirmation,
     is_registration_pending,
     needs_human_for_text,
     wants_registration_followup,
@@ -33,6 +34,8 @@ from services.script_engine import (
     scripts_for_positive_reply,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
+    script_sent_in_history,
+    script_ui_snippet,
     scripts_to_send_after_intent,
     filter_auto_script_keys,
 )
@@ -533,10 +536,17 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
+    deposit_signal = (
+        intent == Intent.DEPOSIT_DONE
+        or is_deposit_confirmation(text)
+        or (has_image and effective_step >= 4)
+    )
+
     post_intro_followup = (
         needs_reply
         and effective_step >= 1
-        and effective_step < 5
+        and effective_step < 4
+        and not deposit_signal
         and (
             intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
             or wants_registration_followup(text)
@@ -603,6 +613,79 @@ async def _handle_conversation(
         send_buf.queue_send(
             conv_id, [text], client_name=client_name, channel_id=channel_id
         )
+
+    # --- Deposit done / deposit screenshot (never resend 04+05) ---
+    if deposit_signal and needs_reply and effective_step >= 4:
+        op_outgoing = [
+            (m.get("text") or "")
+            for m in msg_only
+            if _valid_outgoing_reply(m)
+        ]
+        gid = extract_id_from_text(text)
+        if not gid and has_image:
+            img_url = ""
+            for att in attachments:
+                if att.get("type") == "image":
+                    img_url = (att.get("payload") or {}).get("url") or ""
+                    break
+            if img_url:
+                gid = await extract_id_from_image_url(
+                    img_url, _settings.openai_api_key
+                )
+
+        await notify_escalation(
+            bot,
+            esc_chat,
+            title="Депозит",
+            client_name=client_name,
+            channel_name=channel_name,
+            folder=folder,
+            reason="Клиент сделал депозит — проверьте скрин",
+            last_message=text or "(photo)",
+            conv_id=conv_id,
+            extra=f"Game ID: {gid}" if gid else "",
+            **_escalation_link_kwargs(account, channel_id),
+        )
+
+        next_keys: list[str] = []
+        if effective_step < 6 and not script_sent_in_history(
+            op_outgoing, script_ui_snippet("07_game_id")
+        ):
+            next_keys = ["07_game_id"]
+        elif effective_step >= 7:
+            next_keys = ["08_tg_invite", "09_tg_link"]
+
+        if next_keys:
+            send_buf.queue_script_send(
+                conv_id,
+                next_keys,
+                client_name=client_name,
+                channel_id=channel_id,
+            )
+            new_step = 6 if "07_game_id" in next_keys else 9
+            if gid:
+                send_buf.queue_commit(
+                    conv_id,
+                    step=new_step,
+                    extracted_game_id=gid,
+                    last_processed_msg_id=msg_id,
+                )
+            else:
+                send_buf.queue_commit(
+                    conv_id,
+                    step=new_step,
+                    last_processed_msg_id=msg_id,
+                )
+            return True
+
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            step=max(step, 7),
+            extracted_game_id=gid or state.get("extracted_game_id"),
+            last_processed_msg_id=msg_id,
+        )
+        return True
 
     # Waiting for game ID / deposit photo — ignore short acks once operator replied.
     if (
@@ -754,6 +837,8 @@ async def _handle_conversation(
             Intent.INTERESTED,
         ):
             keys = scripts_for_positive_reply(effective_step)
+        elif intent == Intent.DEPOSIT_DONE:
+            keys = []
         elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
             keys = scripts_to_resend_for_step(effective_step)
         elif effective_step < 5:
@@ -779,7 +864,9 @@ async def _handle_conversation(
             keys = ["01_intro"]
         elif registration_resend:
             keys = scripts_for_registration_resend(effective_step)
-        elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and effective_step >= 1:
+        elif intent == Intent.DEPOSIT_DONE or deposit_signal:
+            keys = []
+        elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and effective_step < 4:
             keys = scripts_for_positive_reply(effective_step)
         elif effective_step >= 1 and wants_registration_followup(text):
             keys = scripts_for_positive_reply(effective_step)

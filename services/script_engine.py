@@ -141,21 +141,23 @@ def infer_step_from_history(
 
 
 def scripts_for_registration_resend(hist_step: int) -> list[str]:
-    """Client has not registered yet — resend missing funnel scripts."""
-    if hist_step < 1:
-        return ["01_intro"]
-    if hist_step < 3:
-        return ["02_how_it_works", "03_zmw_table"]
-    return ["04_registration", "05_link"]
-
-
-def scripts_for_positive_reply(hist_step: int) -> list[str]:
-    """After intro: explain (02+03), then registration (04+05) when step 3+."""
+    """Client has not registered yet — resend registration + link."""
     if hist_step < 1:
         return ["01_intro"]
     if hist_step < 3:
         return ["02_how_it_works", "03_zmw_table"]
     if hist_step < 5:
+        return ["04_registration", "05_link"]
+    return []
+
+
+def scripts_for_positive_reply(hist_step: int) -> list[str]:
+    """After intro: explain (02+03), then registration (04+05) before link sent."""
+    if hist_step < 1:
+        return ["01_intro"]
+    if hist_step < 3:
+        return ["02_how_it_works", "03_zmw_table"]
+    if hist_step < 4:
         return ["04_registration", "05_link"]
     return []
 
@@ -170,7 +172,7 @@ def scripts_to_resend_for_step(hist_step: int) -> list[str]:
         return ["01_intro"]
     if hist_step < 3:
         return ["02_how_it_works", "03_zmw_table"]
-    if hist_step < 5:
+    if hist_step < 4:
         return ["04_registration", "05_link"]
     if hist_step < 6:
         return ["07_game_id"]
@@ -187,8 +189,13 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
         return ["01_intro"]
     if intent in ("interested", "positive", "ready") and 1 <= step < 3:
         return ["02_how_it_works", "03_zmw_table"]
-    if intent in ("interested", "positive", "ready") and 3 <= step < 5:
+    if intent in ("interested", "positive", "ready") and 3 <= step < 4:
         return ["04_registration", "05_link"]
+    if intent in ("deposit_done",) or (
+        intent == "image_only" and step >= 4
+    ):
+        if step < 6:
+            return ["07_game_id"]
     if intent == "game_id_text" or (intent == "image_only" and step >= 5):
         if step < 7 and step >= 4:
             return ["07_game_id"] if step < 6 else []
