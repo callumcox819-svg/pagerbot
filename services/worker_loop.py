@@ -61,6 +61,7 @@ class _CycleSendBuffer:
         locale: str,
         pager_user_id: str,
         client: PagerClient,
+        batch_chunk_size: int = 6,
     ) -> None:
         self.account = account
         self.org_id = org_id
@@ -68,6 +69,7 @@ class _CycleSendBuffer:
         self.locale = locale
         self.pager_user_id = pager_user_id
         self.client = client
+        self.batch_chunk_size = max(1, batch_chunk_size)
         self._jobs: dict[str, list[str]] = {}
         self._script_keys: dict[str, list[str]] = {}
         self._clients: dict[str, str] = {}
@@ -161,7 +163,7 @@ class _CycleSendBuffer:
             )
             for cid in conv_ids
         ]
-        chunk_size = max(1, int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "4")))
+        chunk_size = self.batch_chunk_size
         n_chunks = (len(jobs) + chunk_size - 1) // chunk_size
         n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
@@ -872,7 +874,7 @@ async def _handle_conversation(
 async def _ensure_enabled_channels(
     account_id: int, client: PagerClient
 ) -> set[str] | None:
-    """Return enabled channel ids; sync from API and auto-enable if none on."""
+    """Return user-enabled channel ids only — never auto-enable."""
     chs = await db.list_channels(account_id)
     if not chs:
         try:
@@ -886,19 +888,15 @@ async def _ensure_enabled_channels(
             return None
         if not api_chs:
             return None
-        await db.sync_channels(account_id, api_chs, default_enabled=True)
-        return {c["channel_id"] for c in api_chs}
-
-    enabled = {c["channel_id"] for c in chs if c.get("enabled")}
-    if not enabled:
-        n = await db.enable_all_channels(account_id)
+        await db.sync_channels(account_id, api_chs, default_enabled=False)
         logger.info(
-            "Worker account=%s: auto-enabled %s channel(s)",
+            "Worker account=%s: synced %s channel(s) — all off until user enables in 📡 Каналы",
             account_id,
-            n,
+            len(api_chs),
         )
-        return {c["channel_id"] for c in chs}
-    return enabled
+        return set()
+
+    return {c["channel_id"] for c in chs if c.get("enabled")}
 
 
 async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
@@ -1104,24 +1102,34 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "4")))
-        if no_status_n > 15:
-            max_plans = min(4, base_plans)
+        n_enabled = len(enabled)
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "6")))
+        if n_enabled <= 1:
+            max_plans = min(10, base_plans + 2)
+        elif no_status_n > 15:
+            max_plans = min(6, base_plans)
         elif no_status_n > 8:
-            max_plans = min(4, base_plans)
+            max_plans = min(5, base_plans)
         else:
             max_plans = min(4, base_plans)
         logger.info(
-            "Worker account=%s: plan budget=%s (no_status=%s)",
+            "Worker account=%s: plan budget=%s (no_status=%s enabled_ch=%s)",
             account.get("id"),
             max_plans,
             no_status_n,
+            n_enabled,
         )
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
             org_slug=org_slug,
         )
+        batch_chunk = max(
+            1,
+            int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "0")),
+        )
+        if batch_chunk < 1:
+            batch_chunk = 8 if n_enabled <= 1 else 4
         send_buf = _CycleSendBuffer(
             account,
             org_id=org_id,
@@ -1129,6 +1137,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             locale=str(account.get("pager_locale") or _settings.pager_locale),
             pager_user_id=pager_user_id,
             client=client,
+            batch_chunk_size=batch_chunk,
         )
         planned = 0
         for conv in inbound_convs:

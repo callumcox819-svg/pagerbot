@@ -249,7 +249,7 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
                 "PAGER_ORG_SLUG=tehsup в Railway Variables."
             )
             return
-        await db.sync_channels(int(acc["id"]), channels)
+        await db.sync_channels(int(acc["id"]), channels, default_enabled=False)
         chs = await db.list_channels(int(acc["id"]))
         enabled = sum(1 for c in chs if c.get("enabled"))
         hint = f" ({enabled} вкл.)" if enabled else " (все выкл.)"

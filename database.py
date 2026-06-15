@@ -42,7 +42,7 @@ async def init_db() -> None:
                 account_id INTEGER NOT NULL,
                 channel_id TEXT NOT NULL,
                 name TEXT NOT NULL DEFAULT '',
-                enabled INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(account_id, channel_id),
                 FOREIGN KEY (account_id) REFERENCES pager_accounts(id) ON DELETE CASCADE
             );
