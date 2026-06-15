@@ -766,8 +766,6 @@ async def _handle_conversation(
             keys = scripts_for_positive_reply(hist_step)
         elif hist_step >= 1 and wants_registration_followup(text):
             keys = scripts_for_positive_reply(hist_step)
-        elif intent in (Intent.POSITIVE, Intent.READY) and step >= 2 and step < 4:
-            keys = ["04_registration", "05_link"]
         elif needs_reply and not keys:
             if (
                 intent in (Intent.QUESTION, Intent.UNKNOWN)
@@ -833,18 +831,17 @@ async def _handle_conversation(
 
     new_step = step
     reg_keys = {"04_registration", "05_link"}
-    if reg_keys.intersection(keys) or (
-        auto_funnel and hist_step < 6
-    ):
+    explain_keys = {"02_how_it_works", "03_zmw_table"}
+    if reg_keys.intersection(keys):
         new_step = 4
         if pager_user_id:
             send_buf.queue_status_patch(
                 conv_id, ZM_STATUSES["in_progress"]
             )
+    elif explain_keys.intersection(keys):
+        new_step = max(new_step, 3)
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
-    elif keys == ["02_how_it_works", "03_zmw_table"]:
-        new_step = max(new_step, 2)
     elif "07_game_id" in keys and hist_step >= 4:
         new_step = max(new_step, 6)
         if pager_user_id:
