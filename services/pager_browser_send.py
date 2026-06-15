@@ -893,16 +893,15 @@ async def _browser_post_message_spa(
                 body: JSON.stringify(payload),
             }});
             const p = r.data || {{}};
-            const err = typeof p.error === 'string'
-                ? p.error
-                : (typeof p.message === 'string' ? p.message : (r.raw || '').slice(0, 300));
+            const err = typeof p.error === 'string' ? p.error : '';
             return {{
                 status: r.status,
                 html: r.html,
                 error: err,
-                authorId: p.authorId || '',
-                isDelivered: !!p.isDelivered,
+                authorId: p.authorId || userId || '',
+                isDelivered: p.isDelivered === true,
                 facebookMessageId: p.facebookMessageId || '',
+                messageId: p.id || '',
                 channelId,
                 hadRecipient: !!recipient,
                 hadImageUrl: !!imageUrl,
@@ -929,19 +928,44 @@ async def _browser_post_message_spa(
         )
 
     status = int(result.get("status") or 0)
-    author = str(result.get("authorId") or "").strip()
+    author = str(result.get("authorId") or uid).strip()
     fb = str(result.get("facebookMessageId") or "").strip()
+    msg_id = str(result.get("messageId") or "").strip()
     err = str(result.get("error") or "")
 
-    if status < 400 and author == uid and fb:
-        logger.info(
-            "browser SPA POST sent conv=%s author=%s fb=%s ch=%s",
-            conv_id[:8],
-            author[:16],
-            fb[:12],
-            str(result.get("channelId") or ch_hint)[:8],
+    if status < 400 and (author == uid or not author) and (fb or msg_id):
+        if fb:
+            logger.info(
+                "browser SPA POST sent conv=%s author=%s fb=%s ch=%s",
+                conv_id[:8],
+                author[:16],
+                fb[:12],
+                str(result.get("channelId") or ch_hint)[:8],
+            )
+            return result
+        verify = await _verify_message_delivered(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+            text=text[:80],
+            attempts=15,
         )
-        return result
+        if verify.get("ok"):
+            logger.info(
+                "browser SPA POST verified conv=%s author=%s fb=%s",
+                conv_id[:8],
+                str(verify.get("authorId") or uid)[:16],
+                str(verify.get("facebookMessageId") or "")[:12],
+            )
+            return result
+        if msg_id:
+            logger.info(
+                "browser SPA POST created conv=%s msg=%s (pending fb)",
+                conv_id[:8],
+                msg_id[:12],
+            )
+            return result
 
     if status < 400:
         verify = await _verify_message_delivered(

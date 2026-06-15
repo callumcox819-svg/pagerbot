@@ -161,7 +161,7 @@ class _CycleSendBuffer:
             )
             for cid in conv_ids
         ]
-        chunk_size = max(1, int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "6")))
+        chunk_size = max(1, int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "4")))
         n_chunks = (len(jobs) + chunk_size - 1) // chunk_size
         n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
@@ -937,9 +937,14 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 account.get("pager_user_id"),
                 org_slug=org_slug,
             )
+            merged = dict(cookie_dict)
+            if org_id:
+                merged["_pager_org_id"] = org_id
+            if session_uid:
+                merged["_pager_user_id"] = session_uid
             return PagerClient(
                 _settings.pager_base_url,
-                cookie_dict,
+                merged,
                 org_id=org_id,
                 org_slug=org_slug,
                 locale=str(account.get("pager_locale") or _settings.pager_locale),
@@ -970,19 +975,27 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 )
                 break
         if not session_ok:
-            logger.warning(
-                "Worker account=%s: session stale — refreshing",
-                account_id,
-            )
-            fresh = await refresh_pager_session(account)
-            if not fresh:
-                return
-            _session_cache[account_id] = (time.time(), dict(fresh))
-            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
-            if acc:
-                account.update(acc)
-            client = _make_client(fresh)
-            await client.warm_session()
+            if org_id:
+                logger.warning(
+                    "Worker account=%s: REST poll failed — browser-only mode org=%s",
+                    account_id,
+                    org_id[:16],
+                )
+                client.org_id = org_id
+            else:
+                logger.warning(
+                    "Worker account=%s: session stale — refreshing",
+                    account_id,
+                )
+                fresh = await refresh_pager_session(account)
+                if not fresh:
+                    return
+                _session_cache[account_id] = (time.time(), dict(fresh))
+                acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+                if acc:
+                    account.update(acc)
+                client = _make_client(fresh)
+                await client.warm_session()
         else:
             _session_cache[account_id] = (time.time(), dict(client.cookies))
 
@@ -1074,11 +1087,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             cid = str(conv.get("id") or "")
             st = await db.get_conversation_state(account_id, cid)
             ts = _last_msg_ts(conv)
+            fails = int(st.get("send_failures") or 0)
             if st.get("pause_scripts") or st.get("human_takeover"):
                 return (3, ts)
             # «Без статусу» always beats funnel folders (new leads first).
             if is_no_status(conv):
-                return (0, ts)
+                # Retry failed sends before fresh backlog.
+                return (0, ts + fails * 1e12)
             return (2, ts)
 
         scored: list[tuple[tuple[int, float], dict]] = []
@@ -1089,13 +1104,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         inbound = len(inbound_convs)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "6")))
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "4")))
         if no_status_n > 15:
-            max_plans = min(6, base_plans + no_status_n // 10)
+            max_plans = min(4, base_plans)
         elif no_status_n > 8:
-            max_plans = min(6, base_plans + 1)
+            max_plans = min(4, base_plans)
         else:
-            max_plans = min(6, base_plans)
+            max_plans = min(4, base_plans)
         logger.info(
             "Worker account=%s: plan budget=%s (no_status=%s)",
             account.get("id"),
