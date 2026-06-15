@@ -52,10 +52,12 @@ _REGISTRATION_FOLLOWUP = re.compile(
 
 
 def is_commitment_reply(text: str) -> bool:
-    """Short affirmations after intro (e.g. I'm serious, yes please)."""
+    """Short affirmations after intro / ZMW table (e.g. Yes, I'm serious)."""
     t = (text or "").strip()
     if not t:
         return False
+    if re.fullmatch(r"yes\.?", t, re.I):
+        return True
     return bool(
         re.search(
             r"\b(i'?m serious|i am serious|very interested|interested please|"

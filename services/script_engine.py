@@ -103,6 +103,8 @@ def _step_for_outgoing_text(text: str) -> int:
         return 3
     if "30 zmw - 300 zmw" in t:
         return 3
+    if "here's what you can get" in t or "here is what you can get" in t:
+        return 3
     if "are you ready to start today" in t:
         return 3
     if re.search(r"how it works:\s*\n\s*1\)", t):

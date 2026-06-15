@@ -499,10 +499,12 @@ async def _handle_conversation(
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
     hist_step = infer_step_from_history(msg_only, pager_user_id)
+    stored_step = int(state.get("step") or 0)
+    effective_step = max(hist_step, stored_step)
     if needs_reply:
-        step = hist_step
+        step = effective_step
     else:
-        step = max(int(state.get("step") or 0), hist_step)
+        step = max(stored_step, hist_step)
 
     geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
@@ -513,7 +515,7 @@ async def _handle_conversation(
     )
     if (
         no_status
-        and hist_step < 1
+        and effective_step < 1
         and needs_reply
         and thread_has_ad
         and re.fullmatch(r"\d{1,4}", text.strip())
@@ -528,8 +530,8 @@ async def _handle_conversation(
 
     post_intro_followup = (
         needs_reply
-        and hist_step >= 1
-        and hist_step < 4
+        and effective_step >= 1
+        and effective_step < 5
         and (
             intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
             or wants_registration_followup(text)
@@ -539,8 +541,8 @@ async def _handle_conversation(
 
     registration_resend = (
         needs_reply
-        and hist_step >= 1
-        and hist_step < 6
+        and effective_step >= 1
+        and effective_step < 6
         and is_registration_pending(text)
     )
 
@@ -559,11 +561,12 @@ async def _handle_conversation(
         return "paused"
 
     logger.info(
-        "conv=%s intent=%s step=%s hist_step=%s post_intro=%s reg_resend=%s folder=%r retry=%s text=%r",
+        "conv=%s intent=%s step=%s hist_step=%s eff_step=%s post_intro=%s reg_resend=%s folder=%r retry=%s text=%r",
         conv_id[:8],
         intent.value,
         step,
         hist_step,
+        effective_step,
         post_intro_followup,
         registration_resend,
         folder[:24] if folder else "",
@@ -736,36 +739,36 @@ async def _handle_conversation(
     keys: list[str] = []
 
     if no_status and needs_reply:
-        if hist_step < 1:
+        if effective_step < 1:
             keys = ["01_intro"]
         elif registration_resend:
-            keys = scripts_for_registration_resend(hist_step)
+            keys = scripts_for_registration_resend(effective_step)
         elif post_intro_followup or intent in (
             Intent.POSITIVE,
             Intent.READY,
             Intent.INTERESTED,
         ):
-            keys = scripts_for_positive_reply(hist_step)
+            keys = scripts_for_positive_reply(effective_step)
         elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
-            keys = scripts_to_resend_for_step(hist_step)
+            keys = scripts_to_resend_for_step(effective_step)
         if keys:
             logger.info(
-                "conv=%s no_status hist_step=%s keys=%s",
+                "conv=%s no_status eff_step=%s keys=%s",
                 conv_id[:8],
-                hist_step,
+                effective_step,
                 keys,
             )
     else:
         keys = scripts_to_send_after_intent(step, intent.value, geo)
 
-        if intent == Intent.INTERESTED and step < 1:
+        if intent == Intent.INTERESTED and effective_step < 1:
             keys = ["01_intro"]
         elif registration_resend:
-            keys = scripts_for_registration_resend(hist_step)
-        elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and hist_step >= 1:
-            keys = scripts_for_positive_reply(hist_step)
-        elif hist_step >= 1 and wants_registration_followup(text):
-            keys = scripts_for_positive_reply(hist_step)
+            keys = scripts_for_registration_resend(effective_step)
+        elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and effective_step >= 1:
+            keys = scripts_for_positive_reply(effective_step)
+        elif effective_step >= 1 and wants_registration_followup(text):
+            keys = scripts_for_positive_reply(effective_step)
         elif needs_reply and not keys:
             if (
                 intent in (Intent.QUESTION, Intent.UNKNOWN)
@@ -797,12 +800,12 @@ async def _handle_conversation(
                 Intent.IMAGE_ONLY,
                 Intent.GAME_ID_TEXT,
             ):
-                keys = scripts_to_resend_for_step(hist_step)
+                keys = scripts_to_resend_for_step(effective_step)
                 if keys:
                     logger.info(
-                        "conv=%s resend hist_step=%s keys=%s",
+                        "conv=%s resend eff_step=%s keys=%s",
                         conv_id[:8],
-                        hist_step,
+                        effective_step,
                         keys,
                     )
 
@@ -1087,11 +1090,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             st = await db.get_conversation_state(account_id, cid)
             ts = _last_msg_ts(conv)
             fails = int(st.get("send_failures") or 0)
+            st_step = int(st.get("step") or 0)
             if st.get("pause_scripts") or st.get("human_takeover"):
                 return (3, ts)
-            # «Без статусу» always beats funnel folders (new leads first).
+            # Active funnel (client already got intro / explain) — before new backlog.
+            if st_step >= 1:
+                return (-1, ts)
             if is_no_status(conv):
-                # Retry failed sends before fresh backlog.
                 return (0, ts + fails * 1e12)
             return (2, ts)
 
@@ -1100,7 +1105,24 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             scored.append((await _priority(c), c))
         scored.sort(key=lambda x: (x[0][0], -x[0][1]))
         inbound_convs = [c for _, c in scored]
-        inbound = len(inbound_convs)
+
+        async def _in_funnel(conv: dict) -> bool:
+            cid = str(conv.get("id") or "")
+            st = await db.get_conversation_state(account_id, cid)
+            return int(st.get("step") or 0) >= 1
+
+        funnel_active = [c for c in inbound_convs if await _in_funnel(c)]
+        fresh_inbound = [c for c in inbound_convs if c not in funnel_active]
+        if funnel_active:
+            logger.info(
+                "Worker account=%s: funnel-active=%s fresh-inbound=%s",
+                account.get("id"),
+                len(funnel_active),
+                len(fresh_inbound),
+            )
+        process_order = funnel_active + fresh_inbound
+
+        inbound = len(process_order)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
         n_enabled = len(enabled)
@@ -1141,8 +1163,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             batch_chunk_size=batch_chunk,
         )
         planned = 0
-        for conv in inbound_convs:
-            if planned >= max_plans:
+        funnel_planned = 0
+        funnel_cap = max(3, max_plans // 2)
+        for conv in process_order:
+            if conv in funnel_active:
+                if funnel_planned >= funnel_cap:
+                    continue
+            elif planned >= max_plans:
                 break
             conv_id = str(conv.get("id") or "")
             try:
@@ -1160,7 +1187,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 elif result == "no_script":
                     skipped["no_script"] += 1
                 elif result:
-                    planned += 1
+                    if conv in funnel_active:
+                        funnel_planned += 1
+                    else:
+                        planned += 1
             except PagerAPIError as exc:
                 logger.warning(
                     "conv API error account=%s conv=%s: %s",
