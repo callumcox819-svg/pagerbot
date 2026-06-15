@@ -34,5 +34,10 @@ def channels_kb(channels: list[dict]) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="🔄 Обновить список", callback_data="ch:refresh")])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬜ Выкл все", callback_data="ch:all_off"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="ch:refresh"),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)

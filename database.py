@@ -294,6 +294,16 @@ async def list_channels(account_id: int) -> list[dict[str, Any]]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def disable_all_channels(account_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE pager_channels SET enabled = 0 WHERE account_id = ?",
+            (account_id,),
+        )
+        await db.commit()
+        return cur.rowcount or 0
+
+
 async def enable_all_channels(account_id: int) -> int:
     """Turn on every channel for an account. Returns rows updated."""
     async with aiosqlite.connect(DB_PATH) as db:

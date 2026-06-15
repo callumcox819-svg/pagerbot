@@ -219,6 +219,18 @@ async def cb_toggle_channel(cb: CallbackQuery) -> None:
         await cb.answer("Выключено")
 
 
+@router.callback_query(F.data == "ch:all_off")
+async def cb_all_off_channels(cb: CallbackQuery) -> None:
+    acc = await db.get_account_by_tg(cb.from_user.id)
+    if not acc:
+        await cb.answer("Нет аккаунта")
+        return
+    await db.disable_all_channels(int(acc["id"]))
+    chs = await db.list_channels(int(acc["id"]))
+    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
+    await cb.answer("Все выключены — включите только Kelvin Phiri")
+
+
 @router.callback_query(F.data == "ch:refresh")
 async def cb_refresh_channels(cb: CallbackQuery) -> None:
     acc = await db.get_account_by_tg(cb.from_user.id)

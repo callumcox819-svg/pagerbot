@@ -215,25 +215,22 @@ class _CycleSendBuffer:
                 fresh_cookies = {}
 
             if fresh_cookies:
-                hints: dict[str, str] = {}
-                for key in ("_pager_org_id", "_pager_user_id"):
-                    val = str(fresh_cookies.get(key) or "").strip()
-                    if val:
-                        hints[key] = val
-                if hints:
-                    merged = dict(self.client.cookies)
-                    merged.update(hints)
-                    self.client.cookies = merged
-                    try:
-                        await db.upsert_account(
-                            int(self.account["tg_user_id"]),
-                            session_enc=_secrets.encrypt(
-                                json.dumps(self.client.cookies)
-                            ),
-                            session_ok=1,
-                        )
-                    except Exception:
-                        pass
+                merged = dict(self.client.cookies)
+                merged.update(fresh_cookies)
+                if self.org_id:
+                    merged["_pager_org_id"] = self.org_id
+                if self.pager_user_id:
+                    merged["_pager_user_id"] = self.pager_user_id
+                self.client.cookies = merged
+                _session_cache[account_id] = (time.time(), dict(merged))
+                try:
+                    await db.upsert_account(
+                        int(self.account["tg_user_id"]),
+                        session_enc=_secrets.encrypt(json.dumps(merged)),
+                        session_ok=1,
+                    )
+                except Exception:
+                    pass
 
             ok_total.update(ok)
             chunk_cids = {job[0] for job in chunk}
@@ -973,27 +970,28 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 )
                 break
         if not session_ok:
-            if org_id:
-                logger.warning(
-                    "Worker account=%s: REST poll failed — browser-only mode org=%s",
+            logger.warning(
+                "Worker account=%s: REST poll failed — refreshing session",
+                account_id,
+            )
+            fresh = await refresh_pager_session(account)
+            if not fresh:
+                return
+            _session_cache[account_id] = (time.time(), dict(fresh))
+            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+            if acc:
+                account.update(acc)
+            client = _make_client(fresh)
+            await client.warm_session()
+            try:
+                await client.list_conversations(page_size=1)
+            except PagerAPIError as exc:
+                logger.error(
+                    "Worker account=%s: session still invalid after refresh: %s",
                     account_id,
-                    org_id[:16],
+                    exc,
                 )
-                client.org_id = org_id
-            else:
-                logger.warning(
-                    "Worker account=%s: session stale — refreshing",
-                    account_id,
-                )
-                fresh = await refresh_pager_session(account)
-                if not fresh:
-                    return
-                _session_cache[account_id] = (time.time(), dict(fresh))
-                acc = await db.get_account_by_tg(int(account["tg_user_id"]))
-                if acc:
-                    account.update(acc)
-                client = _make_client(fresh)
-                await client.warm_session()
+                return
         else:
             _session_cache[account_id] = (time.time(), dict(client.cookies))
 
@@ -1017,7 +1015,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 client.session_user_id = _settings.pager_user_id
 
         try:
-            convs = await client.collect_conversations(enabled, max_pages=5)
+            convs = await client.collect_conversations(
+                enabled,
+                max_pages=10 if len(enabled) <= 1 else 6,
+            )
         except PagerAPIError as exc:
             if not is_session_error(exc):
                 raise
@@ -1033,7 +1034,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 account.update(acc)
             client = _make_client(fresh)
             await client.warm_session()
-            convs = await client.collect_conversations(enabled, max_pages=5)
+            convs = await client.collect_conversations(
+                enabled,
+                max_pages=10 if len(enabled) <= 1 else 6,
+            )
         inbound_convs = [
             c
             for c in convs
@@ -1263,11 +1267,11 @@ async def worker_loop(bot: Bot) -> None:
                 try:
                     await asyncio.wait_for(
                         _process_account(bot, acc),
-                        timeout=900.0,
+                        timeout=1200.0,
                     )
                 except asyncio.TimeoutError:
                     logger.error(
-                        "Worker account=%s: cycle timeout 900s",
+                        "Worker account=%s: cycle timeout 1200s",
                         acc.get("id"),
                     )
         except Exception:

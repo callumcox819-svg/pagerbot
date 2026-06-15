@@ -547,16 +547,19 @@ class PagerClient:
 
     async def list_messages(self, conv_id: str, page: int = 1, page_size: int = 50) -> list[dict]:
         org_id = await self._ensure_org_id()
-        data = await self._request(
-            "GET",
-            "/api/message",
-            params={
-                "convId": conv_id,
-                "pageSize": page_size,
-                "page": page,
-                "orgId": org_id,
-            },
-        )
+        params = {
+            "convId": conv_id,
+            "pageSize": page_size,
+            "page": page,
+            "orgId": org_id,
+        }
+        try:
+            data = await self._request("GET", "/api/message", params=params)
+        except PagerAPIError as exc:
+            if not is_session_error(exc):
+                raise
+            await self.warm_session()
+            data = await self._request("GET", "/api/message", params=params)
         return data if isinstance(data, list) else []
 
     async def resolve_session_user_id(self) -> str:
