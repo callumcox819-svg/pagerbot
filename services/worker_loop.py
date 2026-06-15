@@ -62,6 +62,7 @@ class _CycleSendBuffer:
         pager_user_id: str,
         client: PagerClient,
         batch_chunk_size: int = 6,
+        parallel: int = 4,
     ) -> None:
         self.account = account
         self.org_id = org_id
@@ -70,6 +71,7 @@ class _CycleSendBuffer:
         self.pager_user_id = pager_user_id
         self.client = client
         self.batch_chunk_size = max(1, batch_chunk_size)
+        self.parallel = max(1, parallel)
         self._jobs: dict[str, list[str]] = {}
         self._script_keys: dict[str, list[str]] = {}
         self._clients: dict[str, str] = {}
@@ -167,9 +169,10 @@ class _CycleSendBuffer:
         n_chunks = (len(jobs) + chunk_size - 1) // chunk_size
         n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
-            "browser batch flush jobs=%s chunks=%s texts=%s script_keys=%s",
+            "browser batch flush jobs=%s chunks=%s parallel=%s texts=%s script_keys=%s",
             len(jobs),
             n_chunks,
+            self.parallel,
             sum(len(job[1]) for job in jobs),
             n_keys,
         )
@@ -181,7 +184,8 @@ class _CycleSendBuffer:
         for start in range(0, len(jobs), chunk_size):
             chunk = jobs[start : start + chunk_size]
             chunk_no = start // chunk_size + 1
-            timeout = min(600.0, 120.0 + 90.0 * len(chunk))
+            waves = (len(chunk) + self.parallel - 1) // self.parallel
+            timeout = min(1200.0, 90.0 + 75.0 * waves)
             try:
                 ok, fresh_cookies = await asyncio.wait_for(
                     send_batch_via_browser(
@@ -192,6 +196,7 @@ class _CycleSendBuffer:
                         locale=self.locale,
                         email=email,
                         password=password,
+                        parallel=self.parallel,
                     ),
                     timeout=timeout,
                 )
@@ -1126,21 +1131,23 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
         n_enabled = len(enabled)
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "6")))
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "12")))
         if n_enabled <= 1:
-            max_plans = min(10, base_plans + 2)
+            max_plans = min(16, base_plans)
         elif no_status_n > 15:
-            max_plans = min(6, base_plans)
+            max_plans = min(10, base_plans)
         elif no_status_n > 8:
-            max_plans = min(5, base_plans)
+            max_plans = min(8, base_plans)
         else:
-            max_plans = min(4, base_plans)
+            max_plans = min(6, base_plans)
         logger.info(
-            "Worker account=%s: plan budget=%s (no_status=%s enabled_ch=%s)",
+            "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s (no_status=%s)",
             account.get("id"),
             max_plans,
+            funnel_cap,
+            batch_chunk,
+            browser_parallel,
             no_status_n,
-            n_enabled,
         )
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
@@ -1152,7 +1159,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "0")),
         )
         if batch_chunk < 1:
-            batch_chunk = 8 if n_enabled <= 1 else 4
+            batch_chunk = 16 if n_enabled <= 1 else 8
+        browser_parallel = max(
+            1,
+            int(os.getenv("PAGER_BROWSER_PARALLEL", "4")),
+        )
         send_buf = _CycleSendBuffer(
             account,
             org_id=org_id,
@@ -1161,10 +1172,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             pager_user_id=pager_user_id,
             client=client,
             batch_chunk_size=batch_chunk,
+            parallel=browser_parallel,
         )
         planned = 0
         funnel_planned = 0
-        funnel_cap = max(3, max_plans // 2)
+        funnel_cap = max(6, (max_plans * 2 + 1) // 3)
         for conv in process_order:
             if conv in funnel_active:
                 if funnel_planned >= funnel_cap:

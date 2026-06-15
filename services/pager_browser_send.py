@@ -2668,8 +2668,9 @@ async def send_batch_via_browser(
     locale: str = "uk",
     email: str = "",
     password: str = "",
+    parallel: int = 4,
 ) -> tuple[set[str], dict[str, str]]:
-    """One Playwright login, send to multiple conversations. Returns (ok conv ids, cookies)."""
+    """One Playwright login; send to multiple chats in parallel tabs."""
     if not jobs:
         return set(), {}
 
@@ -2680,6 +2681,30 @@ async def send_batch_via_browser(
         raise RuntimeError("org_slug, org_id, user_id required")
     if not (email or "").strip() or not (password or "").strip():
         raise RuntimeError("email/password required for batch browser send")
+
+    def _parse_job(
+        job: tuple,
+    ) -> tuple[str, list[str], list[str], str, str, list[str]] | None:
+        conv_id = str(job[0] or "")
+        texts = job[1]
+        client_name = (job[2] if len(job) > 2 else "").strip()
+        channel_hint = (job[3] if len(job) > 3 else "").strip()
+        script_keys = list(job[4]) if len(job) > 4 else []
+        status_patches = list(job[5]) if len(job) > 5 else []
+        keys = filter_auto_script_keys(
+            [k.strip() for k in script_keys if (k or "").strip()]
+        )
+        bodies = [t.strip() for t in texts if (t or "").strip()]
+        if not conv_id or (not bodies and not keys):
+            return None
+        return conv_id, bodies, keys, client_name, channel_hint, status_patches
+
+    work = [parsed for job in jobs if (parsed := _parse_job(job))]
+    if not work:
+        return set(), {}
+
+    n_parallel = max(1, min(parallel, len(work)))
+    sem = asyncio.Semaphore(n_parallel)
 
     launch_args = [
         "--no-sandbox",
@@ -2702,72 +2727,91 @@ async def send_batch_via_browser(
         context.set_default_timeout(25000)
         page = await context.new_page()
         try:
-            logger.info("browser batch login jobs=%s", len(jobs))
+            logger.info(
+                "browser batch login jobs=%s parallel=%s",
+                len(work),
+                n_parallel,
+            )
             await asyncio.wait_for(
                 playwright_sign_in_on_page(page, email.strip(), password),
                 timeout=120.0,
             )
-            org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
             first_ch = ""
-            for job in jobs:
-                if len(job) > 3 and (job[3] or "").strip():
-                    first_ch = (job[3] or "").strip()
+            for _, _, _, _, channel_hint, _ in work:
+                if channel_hint:
+                    first_ch = channel_hint
                     break
+            org_inbox = f"{PAGER_BASE}/{locale}/{slug}/chats"
             if first_ch:
                 org_inbox += f"?channelId={first_ch}"
-            await page.goto(org_inbox, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(2000)
-            await _wait_for_inbox_hydrated(
-                page, org_id=oid, channel_id=first_ch, timeout_ms=60000
-            )
-            await _click_no_status_tab(page)
+            await page.goto(org_inbox, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(1500)
             await _verify_logged_in_operator(page, uid)
-            logger.info("browser inbox ready")
+            logger.info("browser session ready — parallel send")
 
-            for job in jobs:
-                conv_id = job[0]
-                texts = job[1]
-                client_name = (job[2] if len(job) > 2 else "").strip()
-                channel_hint = (job[3] if len(job) > 3 else "").strip()
-                script_keys = list(job[4]) if len(job) > 4 else []
-                status_patches = list(job[5]) if len(job) > 5 else []
-                keys = filter_auto_script_keys(
-                    [k.strip() for k in script_keys if (k or "").strip()]
-                )
-                bodies = [t.strip() for t in texts if (t or "").strip()]
-                if not bodies and not keys:
-                    continue
-                try:
-                    logger.info(
-                        "browser batch conv=%s texts=%s keys=%s status=%s channel=%s client=%r",
-                        conv_id[:8],
-                        len(bodies),
-                        keys,
-                        [s[:8] for s in status_patches],
-                        channel_hint[:8] if channel_hint else "?",
-                        (client_name or "")[:24],
+            async def _run_one(
+                conv_id: str,
+                bodies: list[str],
+                keys: list[str],
+                client_name: str,
+                channel_hint: str,
+                status_patches: list[str],
+            ) -> str | None:
+                async with sem:
+                    tab = await context.new_page()
+                    try:
+                        logger.info(
+                            "browser batch conv=%s texts=%s keys=%s status=%s channel=%s client=%r",
+                            conv_id[:8],
+                            len(bodies),
+                            keys,
+                            [s[:8] for s in status_patches],
+                            channel_hint[:8] if channel_hint else "?",
+                            (client_name or "")[:24],
+                        )
+                        await _batch_send_one_conv(
+                            context,
+                            tab,
+                            conv_id=conv_id,
+                            texts=bodies,
+                            script_keys=keys,
+                            client_name=client_name,
+                            channel_hint=channel_hint,
+                            org_id=oid,
+                            org_slug=slug,
+                            user_id=uid,
+                            locale=locale,
+                            status_patches=status_patches,
+                        )
+                        return conv_id
+                    except Exception as exc:
+                        logger.warning(
+                            "browser batch conv=%s failed: %s",
+                            conv_id[:8],
+                            exc,
+                        )
+                        return None
+                    finally:
+                        try:
+                            await tab.close()
+                        except Exception:
+                            pass
+
+            results = await asyncio.gather(
+                *[
+                    _run_one(
+                        conv_id, bodies, keys, client_name, channel_hint, patches
                     )
-                    await _batch_send_one_conv(
-                        context,
-                        page,
-                        conv_id=conv_id,
-                        texts=bodies,
-                        script_keys=keys,
-                        client_name=client_name,
-                        channel_hint=channel_hint,
-                        org_id=oid,
-                        org_slug=slug,
-                        user_id=uid,
-                        locale=locale,
-                        status_patches=status_patches,
-                    )
-                    ok.add(conv_id)
-                except Exception as exc:
-                    logger.warning(
-                        "browser batch conv=%s failed: %s",
-                        conv_id[:8],
-                        exc,
-                    )
+                    for conv_id, bodies, keys, client_name, channel_hint, patches in work
+                ]
+            )
+            ok = {cid for cid in results if cid}
+            logger.info(
+                "browser batch done delivered=%s/%s parallel=%s",
+                len(ok),
+                len(work),
+                n_parallel,
+            )
         except asyncio.CancelledError:
             try:
                 fresh_cookies = await _export_context_cookies(context)
