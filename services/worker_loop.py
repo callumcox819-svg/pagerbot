@@ -756,6 +756,15 @@ async def _handle_conversation(
             keys = scripts_for_positive_reply(effective_step)
         elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
             keys = scripts_to_resend_for_step(effective_step)
+        elif effective_step < 5:
+            keys = scripts_for_positive_reply(effective_step)
+            logger.info(
+                "conv=%s no_status fallback eff_step=%s intent=%s keys=%s",
+                conv_id[:8],
+                effective_step,
+                intent.value,
+                keys,
+            )
         if keys:
             logger.info(
                 "conv=%s no_status eff_step=%s keys=%s",
@@ -1117,7 +1126,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             return int(st.get("step") or 0) >= 1
 
         funnel_active = [c for c in inbound_convs if await _in_funnel(c)]
-        fresh_inbound = [c for c in inbound_convs if c not in funnel_active]
+        funnel_active_ids = {str(c.get("id") or "") for c in funnel_active}
+        fresh_inbound = [
+            c for c in inbound_convs if str(c.get("id") or "") not in funnel_active_ids
+        ]
         if funnel_active:
             logger.info(
                 "Worker account=%s: funnel-active=%s fresh-inbound=%s",
@@ -1145,16 +1157,21 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             account.get("pager_user_id"),
             org_slug=org_slug,
         )
-        batch_chunk = max(
-            1,
-            int(os.getenv("PAGER_BROWSER_BATCH_SIZE", "0")),
-        )
-        if batch_chunk < 1:
+        batch_env = (os.getenv("PAGER_BROWSER_BATCH_SIZE") or "").strip()
+        try:
+            batch_env_n = int(batch_env) if batch_env else 0
+        except ValueError:
+            batch_env_n = 0
+        if batch_env_n >= 4:
+            batch_chunk = batch_env_n
+        else:
             batch_chunk = 16 if n_enabled <= 1 else 8
-        browser_parallel = max(
-            1,
-            int(os.getenv("PAGER_BROWSER_PARALLEL", "4")),
-        )
+        par_env = (os.getenv("PAGER_BROWSER_PARALLEL") or "").strip()
+        try:
+            par_env_n = int(par_env) if par_env else 0
+        except ValueError:
+            par_env_n = 0
+        browser_parallel = par_env_n if par_env_n >= 1 else 4
         funnel_cap = max(6, (max_plans * 2 + 1) // 3)
         logger.info(
             "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s (no_status=%s)",
@@ -1177,11 +1194,14 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
         planned = 0
         funnel_planned = 0
+        max_total = max_plans + funnel_cap
         for conv in process_order:
-            if conv in funnel_active:
+            cid = str(conv.get("id") or "")
+            in_funnel = cid in funnel_active_ids
+            if in_funnel:
                 if funnel_planned >= funnel_cap:
                     continue
-            elif planned >= max_plans:
+            if planned + funnel_planned >= max_total:
                 break
             conv_id = str(conv.get("id") or "")
             try:
@@ -1199,7 +1219,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 elif result == "no_script":
                     skipped["no_script"] += 1
                 elif result:
-                    if conv in funnel_active:
+                    if in_funnel:
                         funnel_planned += 1
                     else:
                         planned += 1

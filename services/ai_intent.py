@@ -22,8 +22,11 @@ _INTERESTED = re.compile(
     r"\b(interested|interest|312|teach me|need help|need job|i am interested|"
     r"i'm interested|tell me more|am interested|kindly explain|explain it|"
     r"your help|help me|go ahead|hi go ahead|interested please|"
-    r"i'm serious|i am serious|very interested)\b",
+    r"i'm serious|i am serious|very interested|yess?\s+sir)\b",
     re.I,
+)
+_GREETING = re.compile(
+    r"\b(good (morning|afternoon|evening)|hello|hi|hey)\b", re.I
 )
 _ACK = re.compile(
     r"\b(sure|done|ok|okay|thanks|thank you|i have done|as you said|"
@@ -31,7 +34,7 @@ _ACK = re.compile(
     re.I,
 )
 _POSITIVE = re.compile(
-    r"\b(yes|ok|okay|explain|i am|you can|sure|alright|got it|"
+    r"\b(yess?|ok|okay|explain|i am|you can|sure|alright|got it|"
     r"how can i start|how do i start|how to start)\b",
     re.I,
 )
@@ -120,6 +123,8 @@ def classify(
     if _READY.search(t):
         return Intent.READY
     if _INTERESTED.search(t):
+        return Intent.INTERESTED
+    if _GREETING.search(t) and len(t.split()) <= 6:
         return Intent.INTERESTED
     if re.fullmatch(r"how\??", t.strip(), re.I):
         return Intent.QUESTION
