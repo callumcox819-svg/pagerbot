@@ -140,6 +140,49 @@ def infer_step_from_history(
     return step
 
 
+def infer_step_from_thread(messages: list[dict]) -> int:
+    """Funnel step from any delivered team reply (manual operator sends count too)."""
+    step = 0
+    for m in messages:
+        if (m.get("messageDirection") or "").lower() not in ("outgoing", "out"):
+            continue
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        if not (m.get("isDelivered") or m.get("facebookMessageId")):
+            continue
+        step = max(step, _step_for_outgoing_text(text))
+    return step
+
+
+def should_send_deposit_script(
+    text: str,
+    step: int,
+    outgoing_texts: list[str],
+    *,
+    folder_step: int = 0,
+) -> bool:
+    """Client confirmed reg / on 1xbet — send 06_deposit once link was sent."""
+    from services.ai_intent import (
+        is_deferral_reply,
+        is_registration_confirmed,
+        is_registration_pending,
+    )
+
+    if is_deferral_reply(text) or is_registration_pending(text):
+        return False
+    if not is_registration_confirmed(text):
+        return False
+    link_sent = script_sent_in_history(
+        outgoing_texts, script_ui_snippet("05_link")
+    )
+    if not link_sent and max(step, folder_step) < 4:
+        return False
+    if script_sent_in_history(outgoing_texts, script_ui_snippet("06_deposit")):
+        return False
+    return True
+
+
 def scripts_for_registration_resend(hist_step: int) -> list[str]:
     """Client has not registered yet — resend registration + link."""
     if hist_step < 1:
@@ -225,7 +268,9 @@ def resolve_funnel_scripts(
         if intent == "game_id_text":
             return []
         if is_registration_confirmed(t) or intent == "joined":
-            if not script_sent_in_history(out, script_ui_snippet("06_deposit")):
+            if should_send_deposit_script(
+                t, effective_step, out, folder_step=0
+            ):
                 return ["06_deposit"]
         return []
 

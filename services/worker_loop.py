@@ -20,7 +20,6 @@ from services.ai_intent import (
     is_commitment_reply,
     is_deposit_confirmation,
     is_deferral_reply,
-    is_reg_confirmed_funnel_message,
     is_ready_for_registration,
     is_registration_complete,
     is_registration_pending,
@@ -34,6 +33,7 @@ from services.pager_browser_send import send_batch_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
     infer_step_from_history,
+    infer_step_from_thread,
     load_script,
     scripts_for_positive_reply,
     resolve_funnel_scripts,
@@ -43,8 +43,15 @@ from services.script_engine import (
     script_ui_snippet,
     scripts_to_send_after_intent,
     filter_auto_script_keys,
+    should_send_deposit_script,
 )
-from services.status_ids import EXCELLENT, ZM_STATUSES, is_no_status, should_process_conversation
+from services.status_ids import (
+    EXCELLENT,
+    ZM_STATUSES,
+    infer_step_from_status,
+    is_no_status,
+    should_process_conversation,
+)
 from services.telegram_notify import notify_escalation
 
 logger = logging.getLogger(__name__)
@@ -478,9 +485,41 @@ async def _handle_conversation(
     has_image = bool(attachments)
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
-    hist_step = infer_step_from_history(msg_only, pager_user_id)
+    hist_step = max(
+        infer_step_from_history(msg_only, pager_user_id),
+        infer_step_from_thread(msg_only),
+    )
+    folder_step = infer_step_from_status(conv)
     stored_step = int(state.get("step") or 0)
-    effective_step_early = max(hist_step, stored_step)
+    effective_step_early = max(hist_step, stored_step, folder_step)
+
+    op_texts_early = [
+        (m.get("text") or "")
+        for m in msg_only
+        if _is_outgoing_direction(str(m.get("messageDirection") or ""))
+        and (m.get("text") or "").strip()
+        and (m.get("isDelivered") or m.get("facebookMessageId"))
+    ]
+    deposit_funnel_early = should_send_deposit_script(
+        text,
+        effective_step_early,
+        op_texts_early,
+        folder_step=folder_step,
+    )
+    if deposit_funnel_early and (
+        state.get("pause_scripts") or state.get("last_escalation_msg_id")
+    ):
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            pause_scripts=0,
+            last_escalation_msg_id="",
+        )
+        state = {
+            **state,
+            "pause_scripts": 0,
+            "last_escalation_msg_id": "",
+        }
 
     if _has_failed_ghost_after(last_in_ts):
         logger.warning(
@@ -497,9 +536,7 @@ async def _handle_conversation(
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         if not needs_reply:
             return "done"
-        if state.get("pause_scripts") and not is_reg_confirmed_funnel_message(
-            text, effective_step_early
-        ):
+        if state.get("pause_scripts") and not deposit_funnel_early:
             logger.info(
                 "conv=%s skip — already handled (paused, no client reply yet)",
                 conv_id[:8],
@@ -508,7 +545,7 @@ async def _handle_conversation(
         if (
             msg_id
             and msg_id == str(state.get("last_escalation_msg_id") or "")
-            and not is_reg_confirmed_funnel_message(text, effective_step_early)
+            and not deposit_funnel_early
         ):
             logger.info(
                 "conv=%s skip — already escalated for this message",
@@ -571,8 +608,11 @@ async def _handle_conversation(
         and is_registration_pending(text)
     )
 
-    reg_confirmed_funnel = (
-        needs_reply and is_reg_confirmed_funnel_message(text, effective_step)
+    reg_confirmed_funnel = needs_reply and should_send_deposit_script(
+        text,
+        effective_step,
+        op_texts_early,
+        folder_step=folder_step,
     )
 
     auto_funnel = (
@@ -1193,6 +1233,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             ts = _last_msg_ts(conv)
             fails = int(st.get("send_failures") or 0)
             st_step = int(st.get("step") or 0)
+            status_id = str(conv.get("statusId") or "").strip()
+            if status_id == ZM_STATUSES["in_progress"] and (
+                st.get("pause_scripts") or st.get("last_escalation_msg_id")
+            ):
+                return (-2, ts)
             if st.get("human_takeover"):
                 return (3, ts)
             # Paused early funnel stays low; post-reg pauses still need 06_deposit.

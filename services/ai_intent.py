@@ -61,8 +61,8 @@ _DEFERRAL = re.compile(
     re.I,
 )
 _REG_COMPLETE = re.compile(
-    r"\b(registered|registration done|done registering|i registered|"
-    r"have registered|finished registering|signed up|account created|"
+    r"\b(registered|registration done|done registering|done with registration|"
+    r"i registered|have registered|finished registering|signed up|account created|"
     r"created (my |an )?account|i have registered)\b",
     re.I,
 )

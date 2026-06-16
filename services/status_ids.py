@@ -72,3 +72,15 @@ def should_process_conversation(conv: dict) -> bool:
         return True
     status_id = str(conv.get("statusId") or "").strip()
     return status_id in ACTIVE_FUNNEL_STATUS_IDS
+
+
+def infer_step_from_status(conv: dict) -> int:
+    """Minimum funnel step implied by Pager folder (link sent, waiting ID, etc.)."""
+    status_id = str(conv.get("statusId") or "").strip()
+    if status_id == ZM_STATUSES["in_progress"]:
+        return 4
+    if status_id == ZM_STATUSES["wait_id"]:
+        return 6
+    if status_id == ZM_STATUSES["registration"]:
+        return 7
+    return 0
