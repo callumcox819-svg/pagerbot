@@ -702,6 +702,16 @@ async def _handle_conversation(
                     img_url, _settings.openai_api_key
                 )
 
+        if has_image:
+            deposit_reason = "Клиент прислал скрин — проверьте депозит"
+        elif is_deposit_confirmation(text):
+            deposit_reason = (
+                "Клиент написал что сделал депозит (без скрина) — "
+                "проверьте вручную или попросите скрин"
+            )
+        else:
+            deposit_reason = "Возможный депозит — проверьте чат"
+
         await notify_escalation(
             bot,
             esc_chat,
@@ -709,7 +719,7 @@ async def _handle_conversation(
             client_name=client_name,
             channel_name=channel_name,
             folder=folder,
-            reason="Клиент сделал депозит — проверьте скрин",
+            reason=deposit_reason,
             last_message=text or "(photo)",
             conv_id=conv_id,
             extra=f"Game ID: {gid}" if gid else "",
