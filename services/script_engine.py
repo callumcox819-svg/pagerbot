@@ -174,10 +174,10 @@ def scripts_to_resend_for_step(hist_step: int) -> list[str]:
         return ["02_how_it_works", "03_zmw_table"]
     if hist_step < 5:
         return ["04_registration", "05_link"]
-    if hist_step < 6:
-        return ["07_game_id"]
     if hist_step < 7:
         return ["06_deposit"]
+    if hist_step < 8:
+        return ["07_game_id"]
     if hist_step < 9:
         return ["08_tg_invite", "09_tg_link"]
     return []
@@ -194,7 +194,7 @@ def resolve_funnel_scripts(
     from services.ai_intent import (
         is_deferral_reply,
         is_ready_for_registration,
-        is_registration_complete,
+        is_registration_confirmed,
         is_registration_pending,
     )
 
@@ -221,16 +221,16 @@ def resolve_funnel_scripts(
     if is_registration_pending(t):
         return ["04_registration", "05_link"]
 
-    if effective_step < 6:
+    if effective_step < 7:
         if intent == "game_id_text":
             return []
-        if is_registration_complete(t) or intent == "joined":
-            if not script_sent_in_history(out, script_ui_snippet("07_game_id")):
-                return ["07_game_id"]
+        if is_registration_confirmed(t) or intent == "joined":
+            if not script_sent_in_history(out, script_ui_snippet("06_deposit")):
+                return ["06_deposit"]
         return []
 
-    if effective_step < 7 and intent == "game_id_text":
-        return ["06_deposit"] if effective_step >= 6 else ["07_game_id"]
+    if effective_step < 8 and intent == "game_id_text":
+        return ["07_game_id"]
 
     return []
 

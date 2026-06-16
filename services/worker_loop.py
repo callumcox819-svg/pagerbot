@@ -660,12 +660,7 @@ async def _handle_conversation(
         )
 
         next_keys: list[str] = []
-        if effective_step < 6 and not script_sent_in_history(
-            op_outgoing, script_ui_snippet("07_game_id")
-        ):
-            next_keys = ["07_game_id"]
-        elif effective_step >= 7:
-            next_keys = ["08_tg_invite", "09_tg_link"]
+        # After deposit screenshot — operator checks; TG scripts later.
 
         if next_keys:
             send_buf.queue_script_send(
@@ -929,6 +924,12 @@ async def _handle_conversation(
         new_step = max(new_step, 3)
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
+    elif "06_deposit" in keys:
+        new_step = max(new_step, 7)
+        if pager_user_id:
+            send_buf.queue_status_patch(
+                conv_id, ZM_STATUSES["registration"]
+            )
     elif "07_game_id" in keys:
         new_step = max(new_step, 6)
         if pager_user_id:

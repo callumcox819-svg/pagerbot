@@ -109,11 +109,49 @@ def is_deferral_reply(text: str) -> bool:
 
 
 def is_registration_complete(text: str) -> bool:
-    """Client finished registration — OK to ask for game ID."""
+    """Client finished registration — OK to send deposit script."""
     t = (text or "").strip()
     if not t:
         return False
     return bool(_REG_COMPLETE.search(t))
+
+
+def is_on_registration_site(text: str) -> bool:
+    """Client opened the reg link / is on 1xbet."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b(1xbet|xbet|on the site|opened the link|opening the link|"
+            r"taking me|it'?s taking me|i'?m on|went to the link)\b",
+            t,
+            re.I,
+        )
+    )
+
+
+def is_post_reg_ack(text: str) -> bool:
+    """Short yes after reg link — treat as registered, send deposit script."""
+    t = re.sub(r"[^\w\s]", "", (text or "").strip())
+    if not t:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(yeah|yes|yep|yess|ok|okay|sure|alright|done|finished)\s*",
+            t,
+            re.I,
+        )
+    )
+
+
+def is_registration_confirmed(text: str) -> bool:
+    """After 04+05 — client registered or clearly on the site."""
+    return (
+        is_registration_complete(text)
+        or is_on_registration_site(text)
+        or is_post_reg_ack(text)
+    )
 
 
 def is_deposit_tier_choice(text: str) -> bool:
