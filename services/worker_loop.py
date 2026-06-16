@@ -353,13 +353,24 @@ async def _escalate_once(
     pause: bool = True,
 ) -> bool:
     """Notify operator once per inbound message; return True if sent."""
-    if msg_id and msg_id == str(state.get("last_escalation_msg_id") or ""):
+    fresh = await db.get_conversation_state(account_id, conv_id)
+    if msg_id and msg_id == str(fresh.get("last_escalation_msg_id") or ""):
         logger.info(
             "conv=%s skip duplicate escalation msg=%s",
             conv_id[:8],
             msg_id[:8],
         )
         return False
+
+    patch: dict[str, Any] = {
+        "last_processed_msg_id": msg_id,
+        "last_escalation_msg_id": msg_id,
+    }
+    if pause:
+        patch["pause_scripts"] = 1
+    # Claim before send — parallel worker ticks must not double-notify TG.
+    await db.save_conversation_state(account_id, conv_id, **patch)
+
     await notify_escalation(
         bot,
         esc_chat,
@@ -373,13 +384,6 @@ async def _escalate_once(
         extra=extra,
         **_escalation_link_kwargs(account, channel_id),
     )
-    patch: dict[str, Any] = {
-        "last_processed_msg_id": msg_id,
-        "last_escalation_msg_id": msg_id,
-    }
-    if pause:
-        patch["pause_scripts"] = 1
-    await db.save_conversation_state(account_id, conv_id, **patch)
     return True
 
 
@@ -712,18 +716,23 @@ async def _handle_conversation(
         else:
             deposit_reason = "Возможный депозит — проверьте чат"
 
-        await notify_escalation(
+        await _escalate_once(
             bot,
             esc_chat,
+            account_id=account_id,
+            conv_id=conv_id,
+            msg_id=msg_id,
+            state=state,
+            account=account,
+            channel_id=channel_id,
             title="Депозит",
             client_name=client_name,
             channel_name=channel_name,
             folder=folder,
             reason=deposit_reason,
             last_message=text or "(photo)",
-            conv_id=conv_id,
             extra=f"Game ID: {gid}" if gid else "",
-            **_escalation_link_kwargs(account, channel_id),
+            pause=False,
         )
 
         next_keys: list[str] = []
@@ -823,49 +832,61 @@ async def _handle_conversation(
                     extracted_game_id=extracted,
                     last_processed_msg_id=msg_id,
                 )
-                await notify_escalation(
+                await _escalate_once(
                     bot,
                     esc_chat,
+                    account_id=account_id,
+                    conv_id=conv_id,
+                    msg_id=msg_id,
+                    state=state,
+                    account=account,
+                    channel_id=channel_id,
                     title="Game ID распознан",
                     client_name=client_name,
                     channel_name=channel_name,
                     folder=folder,
                     reason="Проверьте депозит при необходимости",
                     last_message=text or "(photo)",
-                    conv_id=conv_id,
                     extra=f"ID: {extracted}",
-                    **_escalation_link_kwargs(account, channel_id),
+                    pause=False,
                 )
                 return True
-            await notify_escalation(
+            await _escalate_once(
                 bot,
                 esc_chat,
+                account_id=account_id,
+                conv_id=conv_id,
+                msg_id=msg_id,
+                state=state,
+                account=account,
+                channel_id=channel_id,
                 title="Фото — ID не распознан",
                 client_name=client_name,
                 channel_name=channel_name,
                 folder=folder,
                 reason="Нужен оператор",
                 last_message="(photo)",
-                conv_id=conv_id,
-                **_escalation_link_kwargs(account, channel_id),
-            )
-            await db.save_conversation_state(
-                account_id, conv_id, last_processed_msg_id=msg_id, pause_scripts=1
+                pause=True,
             )
             return True
 
         if step >= 7:
-            await notify_escalation(
+            await _escalate_once(
                 bot,
                 esc_chat,
+                account_id=account_id,
+                conv_id=conv_id,
+                msg_id=msg_id,
+                state=state,
+                account=account,
+                channel_id=channel_id,
                 title="Скрин депозита",
                 client_name=client_name,
                 channel_name=channel_name,
                 folder=folder,
                 reason="Подтвердите депозит вручную",
                 last_message="(photo)",
-                conv_id=conv_id,
-                **_escalation_link_kwargs(account, channel_id),
+                pause=False,
             )
             await _outbound_send(
                 [EXCELLENT],
@@ -920,7 +941,7 @@ async def _handle_conversation(
                 keys,
                 (folder[:20] if folder else ""),
             )
-    elif needs_reply and not keys:
+    elif needs_reply and not deposit_signal and not keys:
         if (
             intent in (Intent.QUESTION, Intent.UNKNOWN)
             and step >= 4
@@ -941,7 +962,7 @@ async def _handle_conversation(
                 folder=folder,
                 reason=f"Вопрос на шаге {step}: {intent.value}",
                 last_message=text or "(photo)",
-                pause=False,
+                pause=True,
             )
             return True if escalated else "paused"
         logger.info(
