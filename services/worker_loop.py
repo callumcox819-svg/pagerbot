@@ -19,6 +19,9 @@ from services.ai_intent import (
     classify,
     is_commitment_reply,
     is_deposit_confirmation,
+    is_deferral_reply,
+    is_ready_for_registration,
+    is_registration_complete,
     is_registration_pending,
     needs_human_for_text,
     wants_registration_followup,
@@ -32,6 +35,7 @@ from services.script_engine import (
     infer_step_from_history,
     load_script,
     scripts_for_positive_reply,
+    resolve_funnel_scripts,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -547,11 +551,8 @@ async def _handle_conversation(
         and effective_step >= 1
         and effective_step < 4
         and not deposit_signal
-        and (
-            intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
-            or wants_registration_followup(text)
-            or is_commitment_reply(text)
-        )
+        and not is_deferral_reply(text)
+        and is_ready_for_registration(text)
     )
 
     registration_resend = (
@@ -562,6 +563,17 @@ async def _handle_conversation(
     )
 
     auto_funnel = post_intro_followup or registration_resend
+
+    if is_deferral_reply(text) and needs_reply and effective_step < 6:
+        logger.info(
+            "conv=%s deferral — waiting, no scripts text=%r",
+            conv_id[:8],
+            text[:40],
+        )
+        await db.save_conversation_state(
+            account_id, conv_id, last_processed_msg_id=msg_id
+        )
+        return "done"
 
     if (
         not auto_funnel
@@ -824,95 +836,66 @@ async def _handle_conversation(
             return True
 
     # --- Script chain (strict funnel order) ---
+    op_outgoing = [
+        (m.get("text") or "")
+        for m in msg_only
+        if _valid_outgoing_reply(m)
+    ]
     keys: list[str] = []
-
-    if no_status and needs_reply:
-        if effective_step < 1:
-            keys = ["01_intro"]
-        elif registration_resend:
-            keys = scripts_for_registration_resend(effective_step)
-        elif post_intro_followup or intent in (
-            Intent.POSITIVE,
-            Intent.READY,
-            Intent.INTERESTED,
-        ):
-            keys = scripts_for_positive_reply(effective_step)
-        elif intent == Intent.DEPOSIT_DONE:
-            keys = []
-        elif intent in (Intent.IMAGE_ONLY, Intent.GAME_ID_TEXT):
-            keys = scripts_to_resend_for_step(effective_step)
-        elif effective_step < 5:
-            keys = scripts_for_positive_reply(effective_step)
+    if needs_reply and not deposit_signal:
+        keys = resolve_funnel_scripts(
+            effective_step,
+            text,
+            intent.value,
+            outgoing_texts=op_outgoing,
+        )
+        if keys:
             logger.info(
-                "conv=%s no_status fallback eff_step=%s intent=%s keys=%s",
+                "conv=%s funnel eff_step=%s intent=%s keys=%s folder=%r",
                 conv_id[:8],
                 effective_step,
                 intent.value,
                 keys,
+                (folder[:20] if folder else ""),
             )
-        if keys:
-            logger.info(
-                "conv=%s no_status eff_step=%s keys=%s",
-                conv_id[:8],
-                effective_step,
-                keys,
+    elif needs_reply and not keys:
+        if (
+            intent in (Intent.QUESTION, Intent.UNKNOWN)
+            and step >= 4
+            and not auto_funnel
+        ):
+            escalated = await _escalate_once(
+                bot,
+                esc_chat,
+                account_id=account_id,
+                conv_id=conv_id,
+                msg_id=msg_id,
+                state=state,
+                account=account,
+                channel_id=channel_id,
+                title="Нужен оператор",
+                client_name=client_name,
+                channel_name=channel_name,
+                folder=folder,
+                reason=f"Вопрос на шаге {step}: {intent.value}",
+                last_message=text or "(photo)",
+                pause=False,
             )
-    else:
-        keys = scripts_to_send_after_intent(step, intent.value, geo)
-
-        if intent == Intent.INTERESTED and effective_step < 1:
-            keys = ["01_intro"]
-        elif registration_resend:
-            keys = scripts_for_registration_resend(effective_step)
-        elif intent == Intent.DEPOSIT_DONE or deposit_signal:
-            keys = []
-        elif intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY) and effective_step < 4:
-            keys = scripts_for_positive_reply(effective_step)
-        elif effective_step >= 1 and wants_registration_followup(text):
-            keys = scripts_for_positive_reply(effective_step)
-        elif needs_reply and not keys:
-            if (
-                intent in (Intent.QUESTION, Intent.UNKNOWN)
-                and step >= 3
-                and not auto_funnel
-            ):
-                escalated = await _escalate_once(
-                    bot,
-                    esc_chat,
-                    account_id=account_id,
-                    conv_id=conv_id,
-                    msg_id=msg_id,
-                    state=state,
-                    account=account,
-                    channel_id=channel_id,
-                    title="Нужен оператор",
-                    client_name=client_name,
-                    channel_name=channel_name,
-                    folder=folder,
-                    reason=f"Вопрос на шаге {step}: {intent.value}",
-                    last_message=text or "(photo)",
-                    pause=False,
-                )
-                return True if escalated else "paused"
-            if intent in (
-                Intent.POSITIVE,
-                Intent.INTERESTED,
-                Intent.READY,
-                Intent.IMAGE_ONLY,
-                Intent.GAME_ID_TEXT,
-            ):
-                keys = scripts_to_resend_for_step(effective_step)
-                if keys:
-                    logger.info(
-                        "conv=%s resend eff_step=%s keys=%s",
-                        conv_id[:8],
-                        effective_step,
-                        keys,
-                    )
+            return True if escalated else "paused"
+        logger.info(
+            "conv=%s no script eff_step=%s intent=%s — wait",
+            conv_id[:8],
+            effective_step,
+            intent.value,
+        )
+        await db.save_conversation_state(
+            account_id, conv_id, last_processed_msg_id=msg_id
+        )
+        return "done"
 
     keys = filter_auto_script_keys(keys)
 
-    if intent == Intent.JOINED:
+    if intent == Intent.JOINED and effective_step >= 8:
         await db.save_conversation_state(
             account_id, conv_id, step=10, last_processed_msg_id=msg_id
         )
@@ -946,7 +929,7 @@ async def _handle_conversation(
         new_step = max(new_step, 3)
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
-    elif "07_game_id" in keys and hist_step >= 4:
+    elif "07_game_id" in keys:
         new_step = max(new_step, 6)
         if pager_user_id:
             send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])

@@ -53,6 +53,20 @@ _REGISTRATION_FOLLOWUP = re.compile(
     r"what is next|what's next|next step|get started|start now)\b",
     re.I,
 )
+_DEFERRAL = re.compile(
+    r"\b(let you know|when i'?m ready|not ready|maybe later|tomorrow|"
+    r"next day|another day|only today|hand cash|unfortunately|"
+    r"will tell you|get back to you|not now|not today|later on|"
+    r"give me time|need time|only have)\b",
+    re.I,
+)
+_REG_COMPLETE = re.compile(
+    r"\b(registered|registration done|done registering|i registered|"
+    r"have registered|finished registering|signed up|account created|"
+    r"created (my |an )?account|i have registered)\b",
+    re.I,
+)
+_DEPOSIT_TIER = re.compile(r"^(30|50|100|200|300|500|1000|2000)$")
 
 
 def is_commitment_reply(text: str) -> bool:
@@ -82,6 +96,58 @@ def wants_registration_followup(text: str) -> bool:
     if re.fullmatch(r"explain\??", t, re.I):
         return True
     return bool(_REGISTRATION_FOLLOWUP.search(t))
+
+
+def is_deferral_reply(text: str) -> bool:
+    """Client postpones — do not send registration or game ID scripts."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"no\.?", t, re.I):
+        return True
+    return bool(_DEFERRAL.search(t))
+
+
+def is_registration_complete(text: str) -> bool:
+    """Client finished registration — OK to ask for game ID."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_REG_COMPLETE.search(t))
+
+
+def is_deposit_tier_choice(text: str) -> bool:
+    """Answer to ZMW table (30 / 50 / 100…) — treat as ready for registration."""
+    return bool(_DEPOSIT_TIER.match((text or "").strip()))
+
+
+def is_ready_for_registration(text: str) -> bool:
+    """After 02+03 — client wants reg link (not vague okay / later)."""
+    t = (text or "").strip()
+    if not t or is_deferral_reply(t):
+        return False
+    if is_deposit_tier_choice(t):
+        return True
+    if re.fullmatch(r"yes\.?", t, re.I):
+        return True
+    if is_commitment_reply(t):
+        return True
+    if _READY.search(t):
+        return True
+    if wants_registration_followup(t):
+        return True
+    if _INTERESTED.search(t) and "explain" in t.lower():
+        return True
+    if re.fullmatch(r"explain\??", t, re.I):
+        return True
+    # Short ack only — not enough for registration link
+    if _ACK.search(t) and len(t.split()) <= 4:
+        return False
+    if _POSITIVE.search(t) and not _DEFERRAL.search(t):
+        if len(t.split()) > 5:
+            return False
+        return True
+    return False
 
 
 def is_deposit_confirmation(text: str) -> bool:
@@ -135,6 +201,10 @@ def classify(
         return Intent.COMPLAINT
     if is_deposit_confirmation(t):
         return Intent.DEPOSIT_DONE
+    if is_deferral_reply(t):
+        return Intent.UNKNOWN
+    if is_deposit_tier_choice(t):
+        return Intent.READY
     if _ACK.search(t):
         return Intent.POSITIVE
     if _JOINED.search(t):
@@ -159,8 +229,8 @@ def classify(
 def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
     if intent == Intent.COMPLAINT:
         return True
-    # New leads in «Без статусу» — always try scripts, never escalate on unknown.
-    if no_status and step < 3 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+    # Funnel steps 1–3 — try scripts, never escalate on unknown/no.
+    if step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
     if step >= 5 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
@@ -172,6 +242,12 @@ def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
 def needs_human_for_text(
     intent: Intent, step: int, text: str, *, no_status: bool = False
 ) -> bool:
+    if is_deferral_reply(text) and step < 6:
+        return False
     if is_registration_pending(text) and step < 6:
+        return False
+    if is_ready_for_registration(text) and step < 5:
+        return False
+    if is_deposit_tier_choice(text) and step < 5:
         return False
     return needs_human(intent, step, no_status=no_status)

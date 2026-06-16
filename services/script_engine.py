@@ -172,7 +172,7 @@ def scripts_to_resend_for_step(hist_step: int) -> list[str]:
         return ["01_intro"]
     if hist_step < 3:
         return ["02_how_it_works", "03_zmw_table"]
-    if hist_step < 4:
+    if hist_step < 5:
         return ["04_registration", "05_link"]
     if hist_step < 6:
         return ["07_game_id"]
@@ -180,6 +180,58 @@ def scripts_to_resend_for_step(hist_step: int) -> list[str]:
         return ["06_deposit"]
     if hist_step < 9:
         return ["08_tg_invite", "09_tg_link"]
+    return []
+
+
+def resolve_funnel_scripts(
+    effective_step: int,
+    text: str,
+    intent: str,
+    *,
+    outgoing_texts: list[str] | None = None,
+) -> list[str]:
+    """Pick next Pager saved-reply keys from funnel step + client message."""
+    from services.ai_intent import (
+        is_deferral_reply,
+        is_ready_for_registration,
+        is_registration_complete,
+        is_registration_pending,
+    )
+
+    out = outgoing_texts or []
+    t = (text or "").strip()
+
+    if is_deferral_reply(t):
+        return []
+
+    if effective_step < 1:
+        return ["01_intro"]
+
+    if effective_step < 3:
+        if intent in ("interested", "ready") or is_ready_for_registration(t):
+            return ["02_how_it_works", "03_zmw_table"]
+        return []
+
+    if effective_step < 4:
+        if is_ready_for_registration(t) or intent == "ready":
+            return ["04_registration", "05_link"]
+        return []
+
+    # Link already sent (step 4+)
+    if is_registration_pending(t):
+        return ["04_registration", "05_link"]
+
+    if effective_step < 6:
+        if intent == "game_id_text":
+            return []
+        if is_registration_complete(t) or intent == "joined":
+            if not script_sent_in_history(out, script_ui_snippet("07_game_id")):
+                return ["07_game_id"]
+        return []
+
+    if effective_step < 7 and intent == "game_id_text":
+        return ["06_deposit"] if effective_step >= 6 else ["07_game_id"]
+
     return []
 
 
