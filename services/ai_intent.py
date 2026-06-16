@@ -23,7 +23,9 @@ _INTERESTED = re.compile(
     r"\b(interested|interest|312|teach me|need help|need job|i am interested|"
     r"i'm interested|tell me more|am interested|kindly explain|explain it|"
     r"your help|help me|go ahead|hi go ahead|interested please|"
-    r"i'm serious|i am serious|very interested|yess?\s+sir)\b",
+    r"i'm serious|i am serious|very interested|yess?\s+sir|"
+    r"would like to join|would love to join|wanna join|want to join|"
+    r"like to join|count me in)\b",
     re.I,
 )
 _GREETING = re.compile(
@@ -44,7 +46,8 @@ _READY = re.compile(
 )
 _JOINED = re.compile(r"\b(have joined|joined|i joined)\b", re.I)
 _COMPLAINT = re.compile(
-    r"\b(lost|didn'?t win|scam|taking my money|stop|refund|nothing happened)\b", re.I
+    r"\b(lost|losed|didn'?t win|scam|taking my money|stop|refund|nothing happened|lied)\b",
+    re.I,
 )
 _GAME_ID = re.compile(r"\b16\d{6,}\b")
 _REGISTRATION_FOLLOWUP = re.compile(

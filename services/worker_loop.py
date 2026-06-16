@@ -976,6 +976,12 @@ async def _handle_conversation(
         )
         return "done"
 
+    if not needs_reply and not keys:
+        await db.save_conversation_state(
+            account_id, conv_id, last_processed_msg_id=msg_id
+        )
+        return "done"
+
     keys = filter_auto_script_keys(keys)
 
     if intent == Intent.JOINED and effective_step >= 8:
@@ -1265,21 +1271,21 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             fails = int(st.get("send_failures") or 0)
             st_step = int(st.get("step") or 0)
             status_id = str(conv.get("statusId") or "").strip()
+            if is_no_status(conv) and st_step < 1:
+                return (-3, ts + fails * 1e12)
             if status_id == ZM_STATUSES["in_progress"] and (
                 st.get("pause_scripts") or st.get("last_escalation_msg_id")
             ):
                 return (-2, ts)
             if st.get("human_takeover"):
-                return (3, ts)
-            # Paused early funnel stays low; post-reg pauses still need 06_deposit.
+                return (4, ts)
             if st.get("pause_scripts") and st_step < 4:
-                return (3, ts)
-            # Active funnel (client already got intro / explain) — before new backlog.
-            if st_step >= 1:
+                return (4, ts)
+            if st_step >= 1 and not st.get("pause_scripts"):
                 return (-1, ts)
             if is_no_status(conv):
                 return (0, ts + fails * 1e12)
-            return (2, ts)
+            return (1, ts)
 
         scored: list[tuple[tuple[int, float], dict]] = []
         for c in inbound_convs:
@@ -1304,21 +1310,22 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 len(funnel_active),
                 len(fresh_inbound),
             )
-        process_order = funnel_active + fresh_inbound
+        # Keep priority sort — do not push all funnel chats ahead of new leads.
+        process_order = inbound_convs
 
         inbound = len(process_order)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
         n_enabled = len(enabled)
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "12")))
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "24")))
         if n_enabled <= 1:
-            max_plans = min(16, base_plans)
+            max_plans = min(24, base_plans)
         elif no_status_n > 15:
-            max_plans = min(10, base_plans)
+            max_plans = min(16, base_plans)
         elif no_status_n > 8:
-            max_plans = min(8, base_plans)
+            max_plans = min(12, base_plans)
         else:
-            max_plans = min(6, base_plans)
+            max_plans = min(8, base_plans)
         pager_user_id = resolve_operator_user_id(
             _settings.pager_user_id,
             account.get("pager_user_id"),
@@ -1339,14 +1346,17 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         except ValueError:
             par_env_n = 0
         browser_parallel = par_env_n if par_env_n >= 1 else 4
-        funnel_cap = max(6, (max_plans * 2 + 1) // 3)
+        funnel_cap = max(8, (max_plans * 2 + 1) // 3)
+        max_handle = max(24, int(os.getenv("PAGER_MAX_HANDLE", "56") or "56"))
         logger.info(
-            "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s (no_status=%s)",
+            "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s "
+            "max_handle=%s (no_status=%s)",
             account.get("id"),
             max_plans,
             funnel_cap,
             batch_chunk,
             browser_parallel,
+            max_handle,
             no_status_n,
         )
         send_buf = _CycleSendBuffer(
@@ -1362,14 +1372,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         planned = 0
         funnel_planned = 0
         max_total = max_plans + funnel_cap
+        handled = 0
         for conv in process_order:
+            if handled >= max_handle or planned + funnel_planned >= max_total:
+                break
+            handled += 1
             cid = str(conv.get("id") or "")
             in_funnel = cid in funnel_active_ids
-            if in_funnel:
-                if funnel_planned >= funnel_cap:
-                    continue
-            if planned + funnel_planned >= max_total:
-                break
+            if in_funnel and funnel_planned >= funnel_cap:
+                continue
             conv_id = str(conv.get("id") or "")
             try:
                 result = await _handle_conversation(
