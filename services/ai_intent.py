@@ -225,6 +225,15 @@ def is_registration_pending(text: str) -> bool:
     )
 
 
+def is_reg_confirmed_funnel_message(text: str, step: int) -> bool:
+    """After reg link — client on site or confirmed; send 06_deposit."""
+    if step < 4 or step >= 7:
+        return False
+    if is_registration_pending(text):
+        return False
+    return is_registration_confirmed(text)
+
+
 def classify(
     text: str, *, has_image: bool = False, has_ad: bool = False
 ) -> Intent:
@@ -239,6 +248,8 @@ def classify(
         return Intent.COMPLAINT
     if is_deposit_confirmation(t):
         return Intent.DEPOSIT_DONE
+    if is_registration_confirmed(t):
+        return Intent.POSITIVE
     if is_deferral_reply(t):
         return Intent.UNKNOWN
     if is_deposit_tier_choice(t):
@@ -281,6 +292,8 @@ def needs_human_for_text(
     intent: Intent, step: int, text: str, *, no_status: bool = False
 ) -> bool:
     if is_deferral_reply(text) and step < 6:
+        return False
+    if is_reg_confirmed_funnel_message(text, step):
         return False
     if is_registration_pending(text) and step < 6:
         return False

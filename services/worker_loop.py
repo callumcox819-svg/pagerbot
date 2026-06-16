@@ -20,6 +20,7 @@ from services.ai_intent import (
     is_commitment_reply,
     is_deposit_confirmation,
     is_deferral_reply,
+    is_reg_confirmed_funnel_message,
     is_ready_for_registration,
     is_registration_complete,
     is_registration_pending,
@@ -472,6 +473,15 @@ async def _handle_conversation(
         return False
 
     last_in_ts = str(last_in.get("createdAt") or "")
+    text = (last_in.get("text") or "").strip()
+    attachments = last_in.get("attachments") or []
+    has_image = bool(attachments)
+    has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
+
+    hist_step = infer_step_from_history(msg_only, pager_user_id)
+    stored_step = int(state.get("step") or 0)
+    effective_step_early = max(hist_step, stored_step)
+
     if _has_failed_ghost_after(last_in_ts):
         logger.warning(
             "conv=%s skip — undelivered ghost in thread (no resend)",
@@ -487,13 +497,19 @@ async def _handle_conversation(
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         if not needs_reply:
             return "done"
-        if state.get("pause_scripts"):
+        if state.get("pause_scripts") and not is_reg_confirmed_funnel_message(
+            text, effective_step_early
+        ):
             logger.info(
                 "conv=%s skip — already handled (paused, no client reply yet)",
                 conv_id[:8],
             )
             return "paused"
-        if msg_id and msg_id == str(state.get("last_escalation_msg_id") or ""):
+        if (
+            msg_id
+            and msg_id == str(state.get("last_escalation_msg_id") or "")
+            and not is_reg_confirmed_funnel_message(text, effective_step_early)
+        ):
             logger.info(
                 "conv=%s skip — already escalated for this message",
                 conv_id[:8],
@@ -505,14 +521,7 @@ async def _handle_conversation(
         )
         is_retry = True
 
-    text = (last_in.get("text") or "").strip()
-    attachments = last_in.get("attachments") or []
-    has_image = bool(attachments)
-    has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
-
-    hist_step = infer_step_from_history(msg_only, pager_user_id)
-    stored_step = int(state.get("step") or 0)
-    effective_step = max(hist_step, stored_step)
+    effective_step = effective_step_early
     if needs_reply:
         step = effective_step
     else:
@@ -562,7 +571,13 @@ async def _handle_conversation(
         and is_registration_pending(text)
     )
 
-    auto_funnel = post_intro_followup or registration_resend
+    reg_confirmed_funnel = (
+        needs_reply and is_reg_confirmed_funnel_message(text, effective_step)
+    )
+
+    auto_funnel = (
+        post_intro_followup or registration_resend or reg_confirmed_funnel
+    )
 
     if is_deferral_reply(text) and needs_reply and effective_step < 6:
         logger.info(
@@ -580,6 +595,7 @@ async def _handle_conversation(
         and needs_reply
         and msg_id
         and msg_id == str(state.get("last_escalation_msg_id") or "")
+        and not reg_confirmed_funnel
     ):
         logger.info(
             "conv=%s skip — already escalated for this message",
@@ -588,7 +604,7 @@ async def _handle_conversation(
         return "paused"
 
     logger.info(
-        "conv=%s intent=%s step=%s hist_step=%s eff_step=%s post_intro=%s reg_resend=%s folder=%r retry=%s text=%r",
+        "conv=%s intent=%s step=%s hist_step=%s eff_step=%s post_intro=%s reg_resend=%s reg_ok=%s folder=%r retry=%s text=%r",
         conv_id[:8],
         intent.value,
         step,
@@ -596,6 +612,7 @@ async def _handle_conversation(
         effective_step,
         post_intro_followup,
         registration_resend,
+        reg_confirmed_funnel,
         folder[:24] if folder else "",
         is_retry,
         (text or "(photo)")[:40],
@@ -1176,7 +1193,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             ts = _last_msg_ts(conv)
             fails = int(st.get("send_failures") or 0)
             st_step = int(st.get("step") or 0)
-            if st.get("pause_scripts") or st.get("human_takeover"):
+            if st.get("human_takeover"):
+                return (3, ts)
+            # Paused early funnel stays low; post-reg pauses still need 06_deposit.
+            if st.get("pause_scripts") and st_step < 4:
                 return (3, ts)
             # Active funnel (client already got intro / explain) — before new backlog.
             if st_step >= 1:
