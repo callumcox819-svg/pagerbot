@@ -673,6 +673,7 @@ async def _handle_conversation(
             or is_funnel_positive_reaction(
                 text, attachments, funnel_step=effective_step
             )
+            or intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.QUESTION)
         )
     )
 

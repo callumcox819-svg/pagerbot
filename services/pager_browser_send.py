@@ -1621,6 +1621,7 @@ async def _browser_prepare_outbound(
                 headers: {{'Content-Type': 'application/json'}},
                 body: JSON.stringify({{
                     responsibleUserId: userId,
+                    conversationState: 'read',
                 }}),
             }});
             const convR = await safeJsonFetch(convUrl);

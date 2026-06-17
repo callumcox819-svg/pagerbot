@@ -53,7 +53,14 @@ _GAME_ID = re.compile(r"\b16\d{6,}\b")
 _GAME_ID_EG = re.compile(r"\b17\d{6,}\b")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _AR_INTERESTED = re.compile(
-    r"مهتم|اهتم|عايز|عاوز|حابب|ابي|أبي|عاوزه|عايزه|محتاج|مساعد|ساعد|ممكن"
+    r"مهتم|اهتم|عايز|عاوز|حابب|حابة|ابي|أبي|عاوزه|عايزه|محتاج|مساعد|ساعد|ممكن|"
+    r"ارغب|أرغب|انضم|أنضم|انضمام|أنضمام|حابب اعرف|عايز اعرف"
+)
+_AR_JOIN_DETAILS = re.compile(
+    r"اعمل\s*ايه|أعمل\s*ايه|اعمل\s*إيه|أعمل\s*إيه|"
+    r"المطلوب|الفكره|الفكرة|اي\s+المطلوب|ايه\s+الفكره|إيه\s+الفكرة|"
+    r"من\s+فين|منين|توضيح|توضيخ|تفاصيل|اشرح|فهمني|ازاي|إزاي|"
+    r"انضمام\s+لي|الانضمام"
 )
 _AR_GREETING = re.compile(
     r"السلام|سلام|مرحب|أهلا|اهلا|هلا|صباح|مساء|ازيك|إزيك"
@@ -423,7 +430,13 @@ def _classify_arabic(t: str) -> Intent | None:
         return Intent.UNKNOWN
     if is_app_or_browser_question(t):
         return Intent.QUESTION
+    if _AR_JOIN_DETAILS.search(t):
+        return Intent.INTERESTED
     if _AR_INTERESTED.search(t) or _AR_DETAILS.search(t):
+        return Intent.INTERESTED
+    if re.fullmatch(r"تم\.?", t.strip()) or t.strip() in ("تم", "تمام", "ماشي", "معك", "موافق"):
+        return Intent.POSITIVE
+    if "من مصر" in t or "مصري" in t:
         return Intent.INTERESTED
     if _AR_READY.search(t):
         return Intent.READY

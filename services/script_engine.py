@@ -301,6 +301,8 @@ def resolve_funnel_scripts(
 ) -> list[str]:
     """Pick next Pager saved-reply keys from funnel step + client message."""
     from services.ai_intent import (
+        _AR_INTERESTED,
+        _AR_POSITIVE,
         is_app_or_browser_question,
         is_deferral_reply,
         is_funnel_positive_reaction,
@@ -402,6 +404,13 @@ def resolve_funnel_scripts(
                     t, effective_step, out, folder_step=0, geo=geo
                 ):
                     return ["06_deposit"]
+            if effective_step >= 4 and not link_sent and (
+                intent in ("interested", "positive", "ready", "question")
+                or _positive_signal()
+                or _AR_INTERESTED.search(t)
+                or _AR_POSITIVE.search(t)
+            ):
+                return _eg_reg_scripts()
             return []
         if effective_step < 8 and intent == "game_id_text":
             return ["07_game_id"]
