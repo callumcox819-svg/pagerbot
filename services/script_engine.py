@@ -284,6 +284,7 @@ def resolve_funnel_scripts(
     from services.ai_intent import (
         is_app_or_browser_question,
         is_deferral_reply,
+        is_funnel_positive_reaction,
         is_ready_for_registration,
         is_registration_confirmed,
         is_registration_pending,
@@ -313,11 +314,18 @@ def resolve_funnel_scripts(
                 intent in ("interested", "positive", "ready", "question")
                 or wants_details_after_intro(t)
                 or is_ready_for_registration(t)
+                or is_funnel_positive_reaction(
+                    t, funnel_step=effective_step
+                )
             ):
                 return ["02_how_it_works"]
             return []
         if effective_step < 4:
-            if is_ready_for_registration(t) or intent in ("ready", "positive"):
+            if (
+                is_ready_for_registration(t)
+                or intent in ("ready", "positive")
+                or is_funnel_positive_reaction(t, funnel_step=effective_step)
+            ):
                 return ["04_registration", "05_link"]
             return []
         if is_registration_pending(t):

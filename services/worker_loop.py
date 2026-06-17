@@ -17,6 +17,7 @@ from config import load_settings, resolve_account_operator_id, resolve_pager_org
 from services.ai_intent import (
     Intent,
     classify,
+    is_funnel_positive_reaction,
     is_commitment_reply,
     is_deposit_confirmation,
     is_deferral_reply,
@@ -582,7 +583,14 @@ async def _handle_conversation(
 
     no_status = is_no_status(conv)
 
-    intent = classify(text, has_image=has_image, has_ad=has_ad, geo=geo)
+    intent = classify(
+        text,
+        has_image=has_image,
+        has_ad=has_ad,
+        geo=geo,
+        attachments=attachments,
+        funnel_step=effective_step,
+    )
     thread_has_ad = has_ad or any(
         bool(m.get("adId") or m.get("adUrl")) for m in msg_only
     )
@@ -613,7 +621,12 @@ async def _handle_conversation(
         and effective_step < 4
         and not deposit_signal
         and not is_deferral_reply(text)
-        and is_ready_for_registration(text)
+        and (
+            is_ready_for_registration(text)
+            or is_funnel_positive_reaction(
+                text, attachments, funnel_step=effective_step
+            )
+        )
     )
 
     registration_resend = (

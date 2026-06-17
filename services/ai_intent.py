@@ -55,8 +55,63 @@ _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _AR_INTERESTED = re.compile(
     r"مهتم|اهتم|عايز|عاوز|حابب|ابي|أبي|عاوزه|عايزه|محتاج|مساعد|ساعد|ممكن"
 )
+_POSITIVE_EMOJI = re.compile(
+    r"^[\s"
+    r"\U0001F44D\U0001F44C\U0001F44F\U0001F600-\U0001F64F"
+    r"\U0001F970\U0001F60A\U0001F603\U00002764\U00002705\U0001F49D"
+    r"\U0001F64F\U0001F4AF"
+    r"👍👌❤✅🙏😊😄💯🙂😆❤️👏"
+    r"]+$"
+)
+
+
+def is_positive_emoji_only(text: str) -> bool:
+    """Thumbs-up / heart / smiley only — treat as yes after intro."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t in (
+        "👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿",
+        "👌", "❤", "❤️", "💯", "🙂", "😊", "😄", "🙏", "👏", "✅",
+    ):
+        return True
+    return bool(_POSITIVE_EMOJI.match(t))
+
+
+def is_messenger_reaction_attachment(attachments: list) -> bool:
+    """Facebook like / sticker — not a deposit or ID screenshot."""
+    for att in attachments or []:
+        typ = (att.get("type") or "").lower()
+        if typ in ("sticker", "like", "thumbs_up", "emoji", "fallback"):
+            return True
+        if typ == "image":
+            payload = att.get("payload") or {}
+            if payload.get("sticker_id") or att.get("sticker_id"):
+                return True
+            url = (payload.get("url") or "").lower()
+            if "sticker" in url or "/t39.1997" in url:
+                return True
+    return False
+
+
+def is_funnel_positive_reaction(
+    text: str, attachments: list | None = None, *, funnel_step: int = 0
+) -> bool:
+    """Early funnel — emoji / FB like means «yes, continue»."""
+    if funnel_step < 1 or funnel_step >= 4:
+        return False
+    if is_positive_emoji_only(text):
+        return True
+    if not (text or "").strip() and is_messenger_reaction_attachment(
+        attachments or []
+    ):
+        return True
+    return False
+
+
 _AR_POSITIVE = re.compile(
-    r"تمام|أيوه|ايوه|آه|اه|اوك|نعم|يلا|بينا|ماشي|حاضر|طيب|كويس"
+    r"تمام|أيوه|ايوه|آه|اه|اوك|نعم|يلا|بينا|ماشي|حاضر|طيب|كويس|"
+    r"ياريت|اكيد|أكيد|طبعا|حلو|جميل"
 )
 _AR_DETAILS = re.compile(
     r"قولي|قول|تفاصيل|فهمني|اشرح|علمني|ازاي|إزاي|وضح|فهمني"
@@ -345,11 +400,21 @@ def classify(
     has_image: bool = False,
     has_ad: bool = False,
     geo: str = "zm",
+    attachments: list | None = None,
+    funnel_step: int = 0,
 ) -> Intent:
     t = (text or "").strip()
+    if is_funnel_positive_reaction(
+        t, attachments, funnel_step=funnel_step
+    ):
+        return Intent.POSITIVE
+    if is_positive_emoji_only(t):
+        return Intent.POSITIVE
     if has_ad and not t and not has_image:
         return Intent.INTERESTED
     if has_image and not t:
+        if funnel_step >= 1 and funnel_step < 4:
+            return Intent.POSITIVE
         return Intent.IMAGE_ONLY
     game_re = _GAME_ID_EG if geo == "eg" else _GAME_ID
     if game_re.search(t):
