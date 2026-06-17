@@ -82,15 +82,39 @@ def is_messenger_reaction_attachment(attachments: list) -> bool:
     """Facebook like / sticker — not a deposit or ID screenshot."""
     for att in attachments or []:
         typ = (att.get("type") or "").lower()
-        if typ in ("sticker", "like", "thumbs_up", "emoji", "fallback"):
+        if typ in (
+            "sticker",
+            "like",
+            "thumbs_up",
+            "emoji",
+            "fallback",
+            "reaction",
+        ):
             return True
         if typ == "image":
             payload = att.get("payload") or {}
             if payload.get("sticker_id") or att.get("sticker_id"):
                 return True
             url = (payload.get("url") or "").lower()
-            if "sticker" in url or "/t39.1997" in url:
+            if any(
+                x in url
+                for x in (
+                    "sticker",
+                    "/t39.1997",
+                    "reaction",
+                    "like_thumb",
+                    "thumbs",
+                    "emoji.php",
+                )
+            ):
                 return True
+            w = payload.get("width") or att.get("width")
+            h = payload.get("height") or att.get("height")
+            try:
+                if w and h and int(w) <= 160 and int(h) <= 160:
+                    return True
+            except (TypeError, ValueError):
+                pass
     return False
 
 
@@ -98,7 +122,7 @@ def is_funnel_positive_reaction(
     text: str, attachments: list | None = None, *, funnel_step: int = 0
 ) -> bool:
     """Early funnel — emoji / FB like means «yes, continue»."""
-    if funnel_step < 1 or funnel_step >= 4:
+    if funnel_step >= 4:
         return False
     if is_positive_emoji_only(text):
         return True
@@ -425,9 +449,13 @@ def classify(
         return Intent.POSITIVE
     if is_positive_emoji_only(t):
         return Intent.POSITIVE
+    if not t and is_messenger_reaction_attachment(attachments or []):
+        return Intent.POSITIVE
     if has_ad and not t and not has_image:
         return Intent.INTERESTED
     if has_image and not t:
+        if is_messenger_reaction_attachment(attachments or []):
+            return Intent.POSITIVE
         if funnel_step >= 1 and funnel_step < 4:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY

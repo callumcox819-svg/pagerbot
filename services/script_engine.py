@@ -134,6 +134,11 @@ def _step_for_outgoing_text_eg(text: str) -> int:
         return 2
     if "إنت من مصر" in t or "انت من مصر" in t:
         return 1
+    if "أهلاً" in text or "اهلا" in t:
+        if "مصر" in t or "دخل" in t or "كازينو" in t:
+            return 1
+    if "حابب تفاصيل" in t or "تفاصيل" in t and "قولي" in t:
+        return 1
     return 0
 
 

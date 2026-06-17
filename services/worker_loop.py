@@ -554,7 +554,27 @@ async def _handle_conversation(
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         if not needs_reply:
             return "done"
-        if state.get("pause_scripts") and not deposit_funnel_early:
+        pre_intent = classify(
+            text,
+            has_image=has_image,
+            has_ad=has_ad,
+            geo=geo,
+            attachments=attachments,
+            funnel_step=max(effective_step_early, 1),
+        )
+        funnel_retry = (
+            effective_step_early >= 1
+            and effective_step_early < 6
+            and (
+                pre_intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY)
+                or is_funnel_positive_reaction(
+                    text,
+                    attachments,
+                    funnel_step=max(effective_step_early, 1),
+                )
+            )
+        )
+        if state.get("pause_scripts") and not deposit_funnel_early and not funnel_retry:
             logger.info(
                 "conv=%s skip — already handled (paused, no client reply yet)",
                 conv_id[:8],
@@ -564,12 +584,32 @@ async def _handle_conversation(
             msg_id
             and msg_id == str(state.get("last_escalation_msg_id") or "")
             and not deposit_funnel_early
+            and not funnel_retry
         ):
             logger.info(
                 "conv=%s skip — already escalated for this message",
                 conv_id[:8],
             )
             return "paused"
+        if funnel_retry and (
+            state.get("pause_scripts")
+            or msg_id == str(state.get("last_escalation_msg_id") or "")
+        ):
+            logger.info(
+                "conv=%s funnel retry — clearing escalation pause",
+                conv_id[:8],
+            )
+            await db.save_conversation_state(
+                account_id,
+                conv_id,
+                pause_scripts=0,
+                last_escalation_msg_id="",
+            )
+            state = {
+                **state,
+                "pause_scripts": 0,
+                "last_escalation_msg_id": "",
+            }
         logger.info(
             "conv=%s retry: was marked processed but no reply sent",
             conv_id[:8],
@@ -1365,7 +1405,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         if n_enabled <= 1:
             max_plans = min(24, base_plans)
         elif no_status_n > 15:
-            max_plans = min(16, base_plans)
+            max_plans = min(20, base_plans)
+            batch_chunk = max(batch_chunk, 10)
+            browser_parallel = max(browser_parallel, 6)
         elif no_status_n > 8:
             max_plans = min(12, base_plans)
         else:
