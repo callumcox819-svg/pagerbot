@@ -40,7 +40,7 @@ def resolve_pager_org_id(*values: str, org_slug: str = "") -> str:
 
 
 def resolve_operator_user_id(*values: str, org_slug: str = "") -> str:
-    """Тех Саппорт operator id — never use Clerk/page identity for send."""
+    """Pager operator id for take/send — first user_* in values wins."""
     for raw in values:
         v = (raw or "").strip()
         if v.startswith("user_"):

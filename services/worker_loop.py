@@ -450,6 +450,7 @@ async def _handle_conversation(
         account.get("org_slug") or _settings.pager_org_slug or ""
     ).strip()
     pager_user_id = resolve_operator_user_id(
+        account.get("pager_user_id"),
         _settings.pager_user_id,
         org_slug=org_slug,
     )
@@ -1129,8 +1130,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
 
         def _make_client(cookie_dict: dict[str, str]) -> PagerClient:
             session_uid = resolve_operator_user_id(
-                _settings.pager_user_id,
                 account.get("pager_user_id"),
+                _settings.pager_user_id,
                 org_slug=org_slug,
             )
             merged = dict(cookie_dict)
@@ -1351,8 +1352,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         else:
             max_plans = min(8, base_plans)
         pager_user_id = resolve_operator_user_id(
-            _settings.pager_user_id,
             account.get("pager_user_id"),
+            _settings.pager_user_id,
             org_slug=org_slug,
         )
         batch_env = (os.getenv("PAGER_BROWSER_BATCH_SIZE") or "").strip()
@@ -1477,9 +1478,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
 
         if client.org_id:
             pager_uid = resolve_operator_user_id(
-                _settings.pager_user_id,
-                client.session_user_id,
                 account.get("pager_user_id"),
+                client.session_user_id,
+                _settings.pager_user_id,
                 org_slug=str(
                     account.get("org_slug") or _settings.pager_org_slug or ""
                 ),

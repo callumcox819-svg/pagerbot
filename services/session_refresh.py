@@ -85,9 +85,10 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
 
     session_enc = _secrets.encrypt(json.dumps(cookies))
     operator_id = resolve_operator_user_id(
-        _settings.pager_user_id,
-        user_hint,
+        account.get("pager_user_id"),
         probe.get("pager_user_id"),
+        user_hint,
+        _settings.pager_user_id,
         org_slug=org_slug,
     )
     await db.upsert_account(

@@ -73,7 +73,7 @@ async def _verify_logged_in_operator(page, expected_uid: str) -> None:
     if clerk_uid and clerk_uid != uid:
         raise RuntimeError(
             f"Wrong Pager login: session user={clerk_uid[:20]}, "
-            f"need operator={uid[:20]} (sapportteh / Тех Саппорт)"
+            f"need operator={uid[:20]}"
         )
     if clerk_uid:
         logger.info("browser session operator=%s", clerk_uid[:16])
