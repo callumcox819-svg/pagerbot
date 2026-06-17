@@ -55,6 +55,9 @@ _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _AR_INTERESTED = re.compile(
     r"مهتم|اهتم|عايز|عاوز|حابب|ابي|أبي|عاوزه|عايزه|محتاج|مساعد|ساعد|ممكن"
 )
+_AR_GREETING = re.compile(
+    r"السلام|سلام|مرحب|أهلا|اهلا|هلا|صباح|مساء|ازيك|إزيك"
+)
 _POSITIVE_EMOJI = re.compile(
     r"^[\s"
     r"\U0001F44D\U0001F44C\U0001F44F\U0001F600-\U0001F64F"

@@ -30,7 +30,12 @@ from services.ai_intent import (
 )
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
-from services.pager_api import PagerAPIError, PagerClient, is_session_error
+from services.pager_api import (
+    PagerAPIError,
+    PagerClient,
+    is_org_id_error,
+    is_session_error,
+)
 from services.pager_browser_send import send_batch_via_browser
 from services.session_refresh import refresh_pager_session
 from services.script_engine import (
@@ -1217,6 +1222,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                         "Worker account=%s: poll retry after warm",
                         account_id,
                     )
+                    if is_org_id_error(exc):
+                        await client.resolve_org_id_live()
                     await client.warm_session()
                     continue
                 logger.warning(
