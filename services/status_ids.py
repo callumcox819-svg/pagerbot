@@ -73,10 +73,12 @@ def process_funnel_folders() -> bool:
     )
 
 
-def should_process_conversation(conv: dict) -> bool:
+def should_process_conversation(conv: dict, *, geo: str = "zm") -> bool:
     """Process new leads in «Без статусу»; funnel folders only if enabled."""
     if should_skip_processing(conv):
         return False
+    if geo == "eg":
+        return True
     if is_no_status(conv):
         return True
     if not process_funnel_folders():

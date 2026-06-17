@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _ACCOUNT_RE = re.compile(r"ACCOUNT\s*(\d+)", re.I)
 _ID16_RE = re.compile(r"\b(16\d{6,})\b")
+_ID17_RE = re.compile(r"\b(17\d{6,})\b")
 
 
 async def download_image(url: str) -> bytes:
@@ -20,16 +21,18 @@ async def download_image(url: str) -> bytes:
             return await resp.read()
 
 
-async def extract_id_from_image_url(url: str, openai_key: str = "") -> str:
+async def extract_id_from_image_url(
+    url: str, openai_key: str = "", *, geo: str = "zm"
+) -> str:
     if openai_key:
         try:
-            return await _vision_openai(url, openai_key)
+            return await _vision_openai(url, openai_key, geo=geo)
         except Exception:
             logger.exception("OpenAI vision failed")
     return ""
 
 
-async def _vision_openai(url: str, api_key: str) -> str:
+async def _vision_openai(url: str, api_key: str, *, geo: str = "zm") -> str:
     import base64
 
     data = await download_image(url)
@@ -44,7 +47,9 @@ async def _vision_openai(url: str, api_key: str) -> str:
                         "type": "text",
                         "text": (
                             "This is a casino app screenshot. Extract the ACCOUNT number or "
-                            "game ID (often starts with 16). Reply with digits only, or NONE."
+                            "game ID (often starts with "
+                            + ("17" if geo == "eg" else "16")
+                            + "). Reply with digits only, or NONE."
                         ),
                     },
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
@@ -66,11 +71,17 @@ async def _vision_openai(url: str, api_key: str) -> str:
     text = (body["choices"][0]["message"]["content"] or "").strip()
     if text.upper() == "NONE":
         return ""
-    m = _ID16_RE.search(text) or re.search(r"(\d{8,})", text)
+    m = _ID17_RE.search(text) if geo == "eg" else _ID16_RE.search(text)
+    if not m:
+        m = _ID16_RE.search(text) or _ID17_RE.search(text)
     return m.group(1) if m else ""
 
 
-def extract_id_from_text(text: str) -> str:
+def extract_id_from_text(text: str, *, geo: str = "zm") -> str:
+    if geo == "eg":
+        m = _ID17_RE.search(text or "")
+        if m:
+            return m.group(1)
     m = _ID16_RE.search(text or "")
     if m:
         return m.group(1)

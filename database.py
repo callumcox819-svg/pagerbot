@@ -166,6 +166,7 @@ async def set_account_flags(
     auto_reply: int | None = None,
     paused: int | None = None,
     escalation_chat_id: int | None = None,
+    geo: str | None = None,
 ) -> None:
     parts: list[str] = []
     vals: list[Any] = []
@@ -178,6 +179,9 @@ async def set_account_flags(
     if escalation_chat_id is not None:
         parts.append("escalation_chat_id = ?")
         vals.append(escalation_chat_id)
+    if geo is not None:
+        parts.append("geo = ?")
+        vals.append(geo.strip().lower() or "zm")
     if not parts:
         return
     parts.append("updated_at = datetime('now')")

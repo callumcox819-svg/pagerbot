@@ -50,6 +50,35 @@ _COMPLAINT = re.compile(
     re.I,
 )
 _GAME_ID = re.compile(r"\b16\d{6,}\b")
+_GAME_ID_EG = re.compile(r"\b17\d{6,}\b")
+_ARABIC = re.compile(r"[\u0600-\u06FF]")
+_AR_INTERESTED = re.compile(
+    r"مهتم|اهتم|عايز|عاوز|حابب|ابي|أبي|عاوزه|عايزه|محتاج"
+)
+_AR_POSITIVE = re.compile(
+    r"تمام|أيوه|ايوه|آه|اه|اوك|نعم|يلا|بينا|ماشي|حاضر|طيب|كويس"
+)
+_AR_DETAILS = re.compile(
+    r"قولي|قول|تفاصيل|فهمني|اشرح|علمني|ازاي|إزاي|وضح|فهمني"
+)
+_AR_READY = re.compile(r"جاهز|هبدأ|نبدأ|ابدأ|جاهزين|يلا بينا")
+_AR_REG_COMPLETE = re.compile(
+    r"خلصت|سجلت|انهيت|انتهيت|عملت حساب|فتحت حساب|عملت التسجيل|خلصت التسجيل"
+)
+_AR_REG_PENDING = re.compile(
+    r"لسه|مش خلصت|مش سجلت|بسجل|هسجل|بعمل|لسا|لسه مش|مش عملت"
+)
+_AR_DEFERRAL = re.compile(
+    r"بكرة|كمان شويه|مش دلوقتي|بعدين|مش جاهز|مش دلوقت|بعدين"
+)
+_AR_DEPOSIT = re.compile(
+    r"إيداع|ايداع|عملت إيداع|عملت ايداع|حطيت|ودعت|عملت ديبوزيت"
+)
+_AR_COMPLAINT = re.compile(r"نصب|كذب|خسارة|سرق|احتيال|غش")
+_AR_APP = re.compile(
+    r"تطبيق|متصفح|انزل|البرنامج|الابليكيشن|كروم|chrome|download|app"
+)
+_AR_GREETING = re.compile(r"مرحب|أهلا|اهلا|السلام|هاي|هلا")
 _REGISTRATION_FOLLOWUP = re.compile(
     r"\b(explain|how can i start|how do i start|how to start|tell me how|"
     r"how does it work|how it works|what do i do|what should i do|"
@@ -108,6 +137,8 @@ def is_deferral_reply(text: str) -> bool:
         return False
     if re.fullmatch(r"no\.?", t, re.I):
         return True
+    if _AR_DEFERRAL.search(t):
+        return True
     return bool(_DEFERRAL.search(t))
 
 
@@ -116,6 +147,8 @@ def is_registration_complete(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _AR_REG_COMPLETE.search(t):
+        return True
     return bool(_REG_COMPLETE.search(t))
 
 
@@ -136,7 +169,14 @@ def is_on_registration_site(text: str) -> bool:
 
 def is_post_reg_ack(text: str) -> bool:
     """Short yes after reg link — treat as registered, send deposit script."""
-    t = re.sub(r"[^\w\s]", "", (text or "").strip())
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _AR_DETAILS.search(raw):
+        return False
+    if _AR_POSITIVE.search(raw) and len(raw.split()) <= 3:
+        return True
+    t = re.sub(r"[^\w\s]", "", raw)
     if not t:
         return False
     return bool(
@@ -162,11 +202,41 @@ def is_deposit_tier_choice(text: str) -> bool:
     return bool(_DEPOSIT_TIER.match((text or "").strip()))
 
 
+def wants_details_after_intro(text: str) -> bool:
+    """After intro — client asks for explanation."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_DETAILS.search(t):
+        return True
+    return wants_registration_followup(t)
+
+
+def is_app_or_browser_question(text: str) -> bool:
+    """Client asks app vs browser — send 08_app_or_browser."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_APP.search(t):
+        return True
+    return bool(
+        re.search(
+            r"\b(app|browser|download|install|play store|apk)\b",
+            t,
+            re.I,
+        )
+    )
+
+
 def is_ready_for_registration(text: str) -> bool:
     """After 02+03 — client wants reg link (not vague okay / later)."""
     t = (text or "").strip()
     if not t or is_deferral_reply(t):
         return False
+    if _AR_READY.search(t):
+        return True
+    if _AR_POSITIVE.search(t) and len(t.split()) <= 5 and not _AR_DETAILS.search(t):
+        return True
     if is_deposit_tier_choice(t):
         return True
     if re.fullmatch(r"yes\.?", t, re.I):
@@ -196,6 +266,8 @@ def is_deposit_confirmation(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _AR_DEPOSIT.search(t):
+        return True
     return bool(
         re.search(
             r"\b(done deposit|deposit done|deposited|made (a |my )?deposit|"
@@ -213,6 +285,8 @@ def is_registration_pending(text: str) -> bool:
     if not t:
         return False
     if re.fullmatch(r"(no|not)\s+yet\.?", t, re.I):
+        return True
+    if _AR_REG_PENDING.search(t):
         return True
     return bool(
         re.search(
@@ -237,16 +311,53 @@ def is_reg_confirmed_funnel_message(text: str, step: int) -> bool:
     return is_registration_confirmed(text)
 
 
+def _classify_arabic(t: str) -> Intent | None:
+    if not t or not _ARABIC.search(t):
+        return None
+    if _GAME_ID_EG.search(t):
+        return Intent.GAME_ID_TEXT
+    if _AR_COMPLAINT.search(t):
+        return Intent.COMPLAINT
+    if _AR_DEPOSIT.search(t):
+        return Intent.DEPOSIT_DONE
+    if is_registration_confirmed(t):
+        return Intent.POSITIVE
+    if is_deferral_reply(t):
+        return Intent.UNKNOWN
+    if is_app_or_browser_question(t):
+        return Intent.QUESTION
+    if _AR_INTERESTED.search(t) or _AR_DETAILS.search(t):
+        return Intent.INTERESTED
+    if _AR_READY.search(t):
+        return Intent.READY
+    if _AR_POSITIVE.search(t):
+        return Intent.POSITIVE
+    if _AR_GREETING.search(t) and len(t.split()) <= 8:
+        return Intent.INTERESTED
+    if "؟" in t or "?" in t:
+        return Intent.QUESTION
+    return None
+
+
 def classify(
-    text: str, *, has_image: bool = False, has_ad: bool = False
+    text: str,
+    *,
+    has_image: bool = False,
+    has_ad: bool = False,
+    geo: str = "zm",
 ) -> Intent:
     t = (text or "").strip()
     if has_ad and not t and not has_image:
         return Intent.INTERESTED
     if has_image and not t:
         return Intent.IMAGE_ONLY
-    if _GAME_ID.search(t):
+    game_re = _GAME_ID_EG if geo == "eg" else _GAME_ID
+    if game_re.search(t):
         return Intent.GAME_ID_TEXT
+    if geo == "eg" or _ARABIC.search(t):
+        ar = _classify_arabic(t)
+        if ar is not None:
+            return ar
     if _COMPLAINT.search(t):
         return Intent.COMPLAINT
     if is_deposit_confirmation(t):

@@ -213,6 +213,7 @@ class _CycleSendBuffer:
                         email=email,
                         password=password,
                         parallel=self.parallel,
+                        geo=str(self.account.get("geo") or "zm"),
                     ),
                     timeout=timeout,
                 )
@@ -397,6 +398,7 @@ async def _handle_conversation(
 ) -> bool | str:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
+    geo = str(account.get("geo") or "zm").strip().lower() or "zm"
     if not conv_id:
         return False
 
@@ -410,11 +412,11 @@ async def _handle_conversation(
     if not enabled or channel_id not in enabled:
         return False
 
-    if not should_process_conversation(conv):
+    if not should_process_conversation(conv, geo=geo):
         return False
 
     state = await db.get_conversation_state(account_id, conv_id)
-    if not process_funnel_folders():
+    if geo == "zm" and not process_funnel_folders():
         st_step = int(state.get("step") or 0)
         if state.get("human_takeover") or st_step >= 4:
             logger.info(
@@ -499,8 +501,8 @@ async def _handle_conversation(
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
     hist_step = max(
-        infer_step_from_history(msg_only, pager_user_id),
-        infer_step_from_thread(msg_only),
+        infer_step_from_history(msg_only, pager_user_id, geo=geo),
+        infer_step_from_thread(msg_only, geo=geo),
     )
     folder_step = infer_step_from_status(conv)
     stored_step = int(state.get("step") or 0)
@@ -518,6 +520,7 @@ async def _handle_conversation(
         effective_step_early,
         op_texts_early,
         folder_step=folder_step,
+        geo=geo,
     )
     if deposit_funnel_early and (
         state.get("pause_scripts") or state.get("last_escalation_msg_id")
@@ -577,10 +580,9 @@ async def _handle_conversation(
     else:
         step = max(stored_step, hist_step)
 
-    geo = account.get("geo") or "zm"
     no_status = is_no_status(conv)
 
-    intent = classify(text, has_image=has_image, has_ad=has_ad)
+    intent = classify(text, has_image=has_image, has_ad=has_ad, geo=geo)
     thread_has_ad = has_ad or any(
         bool(m.get("adId") or m.get("adUrl")) for m in msg_only
     )
@@ -626,6 +628,7 @@ async def _handle_conversation(
         effective_step,
         op_texts_early,
         folder_step=folder_step,
+        geo=geo,
     )
 
     auto_funnel = (
@@ -703,7 +706,7 @@ async def _handle_conversation(
             for m in msg_only
             if _valid_outgoing_reply(m)
         ]
-        gid = extract_id_from_text(text)
+        gid = extract_id_from_text(text, geo=geo)
         if not gid and has_image:
             img_url = ""
             for att in attachments:
@@ -712,7 +715,7 @@ async def _handle_conversation(
                     break
             if img_url:
                 gid = await extract_id_from_image_url(
-                    img_url, _settings.openai_api_key
+                    img_url, _settings.openai_api_key, geo=geo
                 )
 
         if has_image:
@@ -824,9 +827,11 @@ async def _handle_conversation(
             if att.get("type") == "image":
                 img_url = (att.get("payload") or {}).get("url") or ""
                 break
-        extracted = extract_id_from_text(text)
+        extracted = extract_id_from_text(text, geo=geo)
         if not extracted and img_url:
-            extracted = await extract_id_from_image_url(img_url, _settings.openai_api_key)
+            extracted = await extract_id_from_image_url(
+                img_url, _settings.openai_api_key, geo=geo
+            )
 
         if step >= 5 and step < 7:
             if extracted:
@@ -899,9 +904,11 @@ async def _handle_conversation(
             )
             await _outbound_send(
                 [EXCELLENT],
-                script_keys=["08_tg_invite", "09_tg_link"],
+                script_keys=["08_tg_invite", "09_tg_link"]
+                if geo != "eg"
+                else [],
             )
-            if pager_user_id:
+            if pager_user_id and geo != "eg":
                 send_buf.queue_status_patch(
                     conv_id, ZM_STATUSES["deps_pending"]
                 )
@@ -912,7 +919,7 @@ async def _handle_conversation(
 
     # --- Text game ID at wait_id step ---
     if intent == Intent.GAME_ID_TEXT:
-        gid = extract_id_from_text(text)
+        gid = extract_id_from_text(text, geo=geo)
         if gid and step >= 5 and step < 7:
             await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
             if pager_user_id:
@@ -940,6 +947,7 @@ async def _handle_conversation(
             text,
             intent.value,
             outgoing_texts=op_outgoing,
+            geo=geo,
         )
         if keys:
             logger.info(
@@ -1017,7 +1025,7 @@ async def _handle_conversation(
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     explain_keys = {"02_how_it_works", "03_zmw_table"}
-    reg_handoff = bool(reg_keys.intersection(keys))
+    reg_handoff = geo == "zm" and bool(reg_keys.intersection(keys))
     if reg_handoff:
         new_step = 4
         if pager_user_id:
@@ -1025,7 +1033,7 @@ async def _handle_conversation(
                 conv_id, ZM_STATUSES["in_progress"]
             )
     elif explain_keys.intersection(keys):
-        new_step = max(new_step, 3)
+        new_step = max(new_step, 2 if geo == "eg" else 3)
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
     elif "06_deposit" in keys:
@@ -1211,6 +1219,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             convs = await client.collect_conversations(
                 enabled,
                 max_pages=10 if len(enabled) <= 1 else 6,
+                geo=str(account.get("geo") or "zm"),
             )
         except PagerAPIError as exc:
             if not is_session_error(exc):
@@ -1230,6 +1239,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             convs = await client.collect_conversations(
                 enabled,
                 max_pages=10 if len(enabled) <= 1 else 6,
+                geo=str(account.get("geo") or "zm"),
             )
         inbound_convs = [
             c

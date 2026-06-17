@@ -40,23 +40,44 @@ AUTO_SKIP_SCRIPT_KEYS: frozenset[str] = frozenset({"10_reg_screenshot"})
 
 SAVED_REPLY_FOLDER_NAMES = ("Замбія", "Замбия", "Zambia", "Замб")
 
+# Egypt — folder name in Pager «Збережені відповіді» (create manually).
+EG_SAVED_REPLY_FOLDER_NAMES = ("hapkatest", "Hapkatest", "HAPKATEST")
+
+EG_SCRIPT_UI_SNIPPETS: dict[str, str] = {
+    "01_intro": "إنت من مصر",
+    "02_how_it_works": "تمام كده",
+    "04_registration": "EG011",
+    "05_link": "tinyurl.com/Egypt0011",
+    "06_deposit": "+ الأخضر",
+    "07_game_id": "يبدأ ب 17",
+    "08_app_or_browser": "ينفع الاتنين",
+}
+
 _cache: dict[str, str] = {}
 
 
-def script_ui_snippet(key: str) -> str:
+def saved_reply_folder_names(geo: str = "zm") -> tuple[str, ...]:
+    if geo == "eg":
+        return EG_SAVED_REPLY_FOLDER_NAMES
+    return SAVED_REPLY_FOLDER_NAMES
+
+
+def script_ui_snippet(key: str, geo: str = "zm") -> str:
     """Text needle for locating a saved reply in Pager UI."""
-    sn = SCRIPT_UI_SNIPPETS.get(key, "").strip()
+    snippets = EG_SCRIPT_UI_SNIPPETS if geo == "eg" else SCRIPT_UI_SNIPPETS
+    sn = snippets.get(key, "").strip()
     if sn:
         return sn
     try:
-        return load_script("zm", key)[:48].strip()
+        return load_script(geo, key)[:48].strip()
     except FileNotFoundError:
         return key
 
 
 def script_verify_snippet(key: str, geo: str = "zm") -> str:
     """Substring used to verify delivery in message history."""
-    sn = SCRIPT_UI_SNIPPETS.get(key, "").strip()
+    snippets = EG_SCRIPT_UI_SNIPPETS if geo == "eg" else SCRIPT_UI_SNIPPETS
+    sn = snippets.get(key, "").strip()
     if sn:
         return sn
     return load_script(geo, key)[:80].strip()
@@ -84,8 +105,29 @@ def script_sent_in_history(outgoing_texts: list[str], snippet: str) -> bool:
     return False
 
 
-def _step_for_outgoing_text(text: str) -> int:
+def _step_for_outgoing_text_eg(text: str) -> int:
+    t = (text or "").lower()
+    if "يبدأ ب 17" in t or "يبدا ب 17" in t:
+        return 7
+    if "+ الأخضر" in t or "الأخضر" in t and "إيداع" in t:
+        return 6
+    if "ينفع الاتنين" in t:
+        return 5
+    if "tinyurl.com/egypt0011" in t:
+        return 4
+    if "eg011" in t and ("كروم" in t or "chrome" in t or "مصر" in t):
+        return 4
+    if "تمام كده" in t:
+        return 2
+    if "إنت من مصر" in t or "انت من مصر" in t:
+        return 1
+    return 0
+
+
+def _step_for_outgoing_text(text: str, geo: str = "zm") -> int:
     """Map one operator message to funnel step (strict markers only)."""
+    if geo == "eg":
+        return _step_for_outgoing_text_eg(text)
     t = (text or "").lower()
     if "t.me/+" in t or "vhfjiofy" in t:
         return 9
@@ -115,7 +157,7 @@ def _step_for_outgoing_text(text: str) -> int:
 
 
 def infer_step_from_history(
-    messages: list[dict], operator_id: str = ""
+    messages: list[dict], operator_id: str = "", *, geo: str = "zm"
 ) -> int:
     """0=new … 9=TG link sent. Uses chronological operator messages (max step)."""
     uid = (operator_id or "").strip()
@@ -136,11 +178,11 @@ def infer_step_from_history(
 
     step = 0
     for text in outgoing:
-        step = max(step, _step_for_outgoing_text(text))
+        step = max(step, _step_for_outgoing_text(text, geo))
     return step
 
 
-def infer_step_from_thread(messages: list[dict]) -> int:
+def infer_step_from_thread(messages: list[dict], *, geo: str = "zm") -> int:
     """Funnel step from any delivered team reply (manual operator sends count too)."""
     step = 0
     for m in messages:
@@ -151,7 +193,7 @@ def infer_step_from_thread(messages: list[dict]) -> int:
             continue
         if not (m.get("isDelivered") or m.get("facebookMessageId")):
             continue
-        step = max(step, _step_for_outgoing_text(text))
+        step = max(step, _step_for_outgoing_text(text, geo))
     return step
 
 
@@ -161,6 +203,7 @@ def should_send_deposit_script(
     outgoing_texts: list[str],
     *,
     folder_step: int = 0,
+    geo: str = "zm",
 ) -> bool:
     """Client confirmed reg / on 1xbet — send 06_deposit once link was sent."""
     from services.ai_intent import (
@@ -174,11 +217,14 @@ def should_send_deposit_script(
     if not is_registration_confirmed(text):
         return False
     link_sent = script_sent_in_history(
-        outgoing_texts, script_ui_snippet("05_link")
+        outgoing_texts, script_ui_snippet("05_link", geo)
     )
-    if not link_sent and max(step, folder_step) < 4:
+    min_step = 4 if geo == "eg" else 4
+    if not link_sent and max(step, folder_step) < min_step:
         return False
-    if script_sent_in_history(outgoing_texts, script_ui_snippet("06_deposit")):
+    if script_sent_in_history(
+        outgoing_texts, script_ui_snippet("06_deposit", geo)
+    ):
         return False
     return True
 
@@ -232,13 +278,16 @@ def resolve_funnel_scripts(
     intent: str,
     *,
     outgoing_texts: list[str] | None = None,
+    geo: str = "zm",
 ) -> list[str]:
     """Pick next Pager saved-reply keys from funnel step + client message."""
     from services.ai_intent import (
+        is_app_or_browser_question,
         is_deferral_reply,
         is_ready_for_registration,
         is_registration_confirmed,
         is_registration_pending,
+        wants_details_after_intro,
     )
 
     out = outgoing_texts or []
@@ -249,6 +298,42 @@ def resolve_funnel_scripts(
 
     if effective_step < 1:
         return ["01_intro"]
+
+    if geo == "eg":
+        if (
+            is_app_or_browser_question(t)
+            and 2 <= effective_step < 6
+            and not script_sent_in_history(
+                out, script_ui_snippet("08_app_or_browser", geo)
+            )
+        ):
+            return ["08_app_or_browser"]
+        if effective_step < 2:
+            if (
+                intent in ("interested", "positive", "ready", "question")
+                or wants_details_after_intro(t)
+                or is_ready_for_registration(t)
+            ):
+                return ["02_how_it_works"]
+            return []
+        if effective_step < 4:
+            if is_ready_for_registration(t) or intent in ("ready", "positive"):
+                return ["04_registration", "05_link"]
+            return []
+        if is_registration_pending(t):
+            return ["04_registration", "05_link"]
+        if effective_step < 7:
+            if intent == "game_id_text":
+                return []
+            if is_registration_confirmed(t) or intent == "joined":
+                if should_send_deposit_script(
+                    t, effective_step, out, folder_step=0, geo=geo
+                ):
+                    return ["06_deposit"]
+            return []
+        if effective_step < 8 and intent == "game_id_text":
+            return ["07_game_id"]
+        return []
 
     if effective_step < 3:
         if intent in ("interested", "ready") or is_ready_for_registration(t):
@@ -301,7 +386,11 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
     return []
 
 
-def extract_game_id(text: str) -> str:
+def extract_game_id(text: str, geo: str = "zm") -> str:
+    if geo == "eg":
+        m = re.search(r"\b(17\d{6,})\b", text or "")
+        if m:
+            return m.group(1)
     m = re.search(r"\b(16\d{6,})\b", text or "")
     if m:
         return m.group(1)

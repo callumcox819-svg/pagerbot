@@ -437,6 +437,7 @@ class PagerClient:
         enabled_channel_ids: set[str],
         *,
         max_pages: int = 5,
+        geo: str = "zm",
     ) -> list[dict]:
         """Chats for enabled channels: «Без статусу» (+ funnel folders if enabled)."""
         from services.status_ids import (
@@ -453,7 +454,7 @@ class PagerClient:
                 ch = str(conv.get("channelId") or "")
                 if ch not in enabled_channel_ids:
                     continue
-                if not should_process_conversation(conv):
+                if not should_process_conversation(conv, geo=geo):
                     continue
                 cid = str(conv.get("id") or "")
                 if cid:

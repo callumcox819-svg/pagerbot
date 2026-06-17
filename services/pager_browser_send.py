@@ -14,6 +14,7 @@ from services.script_engine import (
     SAVED_REPLY_FOLDER_NAMES,
     filter_auto_script_keys,
     load_script,
+    saved_reply_folder_names,
     script_ui_snippet,
     script_verify_snippet,
 )
@@ -776,10 +777,12 @@ async def _fetch_saved_reply_text_via_api(
     *,
     org_id: str,
     script_key: str,
+    geo: str = "zm",
 ) -> str:
     """Load reply text from /api/reply/folder + /api/reply (same as UI sidebar)."""
     oid = (org_id or "").strip()
-    snippet = script_ui_snippet(script_key)
+    snippet = script_ui_snippet(script_key, geo)
+    folder_names = list(saved_reply_folder_names(geo))
     folder_url = _api(f"/api/reply/folder?orgId={oid}")
     result = await page.evaluate(
         f"""async ({{folderUrl, snippet, folderNames}}) => {{
@@ -804,7 +807,7 @@ async def _fetch_saved_reply_text_via_api(
         {
             "folderUrl": folder_url,
             "snippet": snippet,
-            "folderNames": list(SAVED_REPLY_FOLDER_NAMES),
+            "folderNames": folder_names,
         },
     )
     if isinstance(result, dict) and result.get("ok") and result.get("text"):
@@ -1138,13 +1141,14 @@ async def _send_via_saved_reply(
     locale: str = "uk",
     org_slug: str = "",
     channel_hint: str = "",
+    geo: str = "zm",
 ) -> None:
-    """Send canned reply: load text from /api/reply (Замбія), POST like Pager SPA."""
+    """Send canned reply: load text from /api/reply, POST like Pager SPA."""
     uid = (user_id or "").strip()
     oid = (org_id or "").strip()
     try:
         text = await _fetch_saved_reply_text_via_api(
-            page, org_id=oid, script_key=script_key
+            page, org_id=oid, script_key=script_key, geo=geo
         )
     except Exception as exc:
         logger.warning(
@@ -1152,7 +1156,7 @@ async def _send_via_saved_reply(
             script_key,
             exc,
         )
-        text = load_script("zm", script_key)
+        text = load_script(geo, script_key)
 
     result = await _browser_post_message_spa(
         page,
@@ -1381,6 +1385,7 @@ async def _batch_send_one_conv(
     user_id: str,
     locale: str,
     status_patches: list[str] | None = None,
+    geo: str = "zm",
 ) -> None:
     """Open chat, take, send via saved replies (Замбія) or POST fallback."""
     uid = (user_id or "").strip()
@@ -1477,6 +1482,7 @@ async def _batch_send_one_conv(
                 locale=locale,
                 org_slug=slug,
                 channel_hint=ch,
+                geo=geo,
             )
         except Exception as exc:
             logger.warning(
@@ -2669,6 +2675,7 @@ async def send_batch_via_browser(
     email: str = "",
     password: str = "",
     parallel: int = 4,
+    geo: str = "zm",
 ) -> tuple[set[str], dict[str, str]]:
     """One Playwright login; send to multiple chats in parallel tabs."""
     if not jobs:
@@ -2782,6 +2789,7 @@ async def send_batch_via_browser(
                             user_id=uid,
                             locale=locale,
                             status_patches=status_patches,
+                            geo=geo,
                         )
                         return conv_id
                     except Exception as exc:

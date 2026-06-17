@@ -83,13 +83,32 @@ async def pager_menu(message: Message) -> None:
             f"✅ Pager подключён\n"
             f"Email: <code>{acc.get('email') or '—'}</code>\n"
             f"Org: <code>{acc.get('org_id') or '—'}</code>\n"
+            f"Geo: <code>{acc.get('geo') or 'zm'}</code> "
+            f"(zm / eg)\n"
             f"Авто-ответ: {'вкл' if acc.get('auto_reply') else 'выкл'}\n"
-            f"Пауза: {'да' if acc.get('paused') else 'нет'}"
+            f"Пауза: {'да' if acc.get('paused') else 'нет'}\n\n"
+            f"Сменить geo: /set_geo zm или /set_geo eg"
         )
     else:
         err = (acc or {}).get("last_error") or ""
         text = "Pager не подключён." + (f"\n⚠️ {err}" if err else "")
     await message.answer(text, parse_mode="HTML", reply_markup=connect_kb())
+
+
+@router.message(Command("set_geo"))
+async def cmd_set_geo(message: Message) -> None:
+    parts = (message.text or "").strip().split()
+    if len(parts) < 2 or parts[1].lower() not in ("zm", "eg"):
+        await message.answer("Использование: /set_geo zm  или  /set_geo eg")
+        return
+    acc = await db.get_account_by_tg(message.from_user.id)
+    if not acc or not acc.get("session_ok"):
+        await message.answer("Сначала подключите Pager (🔐 Pager аккаунт).")
+        return
+    geo = parts[1].lower()
+    await db.set_account_flags(message.from_user.id, geo=geo)
+    label = "Замбия" if geo == "zm" else "Египет (hapkatest)"
+    await message.answer(f"✅ Geo = <code>{geo}</code> ({label})", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pager:login")
