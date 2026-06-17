@@ -800,7 +800,9 @@ async def _fetch_saved_reply_text_via_api(
             if (rr.html || !rr.ok) return {{ error: 'replies fetch failed' }};
             const replies = Array.isArray(rr.data) ? rr.data : [];
             const needle = snippet.toLowerCase();
-            const hit = replies.find(r => (r.text || '').toLowerCase().includes(needle));
+            const hits = replies.filter(r =>
+                (r.text || '').toLowerCase().includes(needle));
+            const hit = hits.length ? hits[hits.length - 1] : null;
             if (!hit || !hit.text) return {{ error: 'reply not found', folder: folder.name }};
             return {{ ok: true, text: hit.text, folder: folder.name }};
         }}""",

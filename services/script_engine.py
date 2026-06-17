@@ -46,7 +46,7 @@ EG_SAVED_REPLY_FOLDER_NAMES = ("hapkatest", "Hapkatest", "HAPKATEST")
 EG_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "01_intro": "إنت من مصر",
     "02_how_it_works": "تمام كده",
-    "04_registration": "EG011",
+    "04_registration": "هبعتلك اللينك دلوقتي",
     "05_link": "tinyurl.com/Egypt0011",
     "06_deposit": "+ الأخضر",
     "07_game_id": "يبدأ ب 17",
@@ -114,6 +114,8 @@ def _step_for_outgoing_text_eg(text: str) -> int:
     if "ينفع الاتنين" in t:
         return 5
     if "tinyurl.com/egypt0011" in t:
+        return 4
+    if "هبعتلك اللينك" in t or "انسخه وحطه في chrome" in t:
         return 4
     if "eg011" in t and ("كروم" in t or "chrome" in t or "مصر" in t):
         return 4
@@ -289,6 +291,7 @@ def resolve_funnel_scripts(
         is_registration_confirmed,
         is_registration_pending,
         wants_details_after_intro,
+        wants_registration_link,
     )
 
     out = outgoing_texts or []
@@ -301,6 +304,18 @@ def resolve_funnel_scripts(
         return ["01_intro"]
 
     if geo == "eg":
+        how_sent = script_sent_in_history(
+            out, script_ui_snippet("02_how_it_works", geo)
+        )
+        link_sent = script_sent_in_history(
+            out, script_ui_snippet("05_link", geo)
+        )
+
+        def _eg_reg_scripts() -> list[str]:
+            if link_sent:
+                return []
+            return ["04_registration", "05_link"]
+
         if (
             is_app_or_browser_question(t)
             and 2 <= effective_step < 6
@@ -310,6 +325,17 @@ def resolve_funnel_scripts(
         ):
             return ["08_app_or_browser"]
         if effective_step < 2:
+            if how_sent:
+                if (
+                    is_ready_for_registration(t)
+                    or wants_registration_link(t)
+                    or is_funnel_positive_reaction(
+                        t, funnel_step=effective_step
+                    )
+                    or intent in ("ready", "positive", "question")
+                ):
+                    return _eg_reg_scripts()
+                return []
             if (
                 intent in ("interested", "positive", "ready", "question")
                 or wants_details_after_intro(t)
@@ -323,13 +349,14 @@ def resolve_funnel_scripts(
         if effective_step < 4:
             if (
                 is_ready_for_registration(t)
-                or intent in ("ready", "positive")
+                or wants_registration_link(t)
+                or intent in ("ready", "positive", "question")
                 or is_funnel_positive_reaction(t, funnel_step=effective_step)
             ):
-                return ["04_registration", "05_link"]
+                return _eg_reg_scripts()
             return []
         if is_registration_pending(t):
-            return ["04_registration", "05_link"]
+            return _eg_reg_scripts()
         if effective_step < 7:
             if intent == "game_id_text":
                 return []

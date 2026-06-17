@@ -133,7 +133,12 @@ _AR_COMPLAINT = re.compile(r"نصب|كذب|خسارة|سرق|احتيال|غش")
 _AR_APP = re.compile(
     r"تطبيق|متصفح|انزل|البرنامج|الابليكيشن|كروم|chrome|download|app"
 )
-_AR_GREETING = re.compile(r"مرحب|أهلا|اهلا|السلام|هاي|هلا")
+_AR_REG_LINK = re.compile(
+    r"فين.*(حساب|سجل|تسجيل|لينك|رابط)|"
+    r"(اعمل|أعمل|عمل).*(حساب|تسجيل)|"
+    r"(اللينك|الرابط|لينك|رابط)|"
+    r"ازاي.*(سجل|تسجيل|حساب)"
+)
 _REGISTRATION_FOLLOWUP = re.compile(
     r"\b(explain|how can i start|how do i start|how to start|tell me how|"
     r"how does it work|how it works|what do i do|what should i do|"
@@ -180,9 +185,19 @@ def wants_registration_followup(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _AR_REG_LINK.search(t):
+        return True
     if re.fullmatch(r"explain\??", t, re.I):
         return True
     return bool(_REGISTRATION_FOLLOWUP.search(t))
+
+
+def wants_registration_link(text: str) -> bool:
+    """Client asks where/how to register — send 04+05, not 02 again."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_AR_REG_LINK.search(t)) or wants_registration_followup(t)
 
 
 def is_deferral_reply(text: str) -> bool:

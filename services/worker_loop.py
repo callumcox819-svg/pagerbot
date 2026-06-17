@@ -26,6 +26,7 @@ from services.ai_intent import (
     is_registration_pending,
     needs_human_for_text,
     wants_registration_followup,
+    wants_registration_link,
 )
 from services.encryption import Secrets
 from services.image_extract import extract_id_from_image_url, extract_id_from_text
@@ -623,6 +624,7 @@ async def _handle_conversation(
         and not is_deferral_reply(text)
         and (
             is_ready_for_registration(text)
+            or wants_registration_link(text)
             or is_funnel_positive_reaction(
                 text, attachments, funnel_step=effective_step
             )
