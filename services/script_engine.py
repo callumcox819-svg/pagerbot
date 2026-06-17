@@ -367,7 +367,7 @@ def resolve_funnel_scripts(
                     is_ready_for_registration(t)
                     or wants_registration_link(t)
                     or is_funnel_positive_reaction(
-                        t, funnel_step=effective_step
+                        t, attachments, funnel_step=effective_step
                     )
                     or intent in ("ready", "positive", "question")
                 ):
