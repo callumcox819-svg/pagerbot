@@ -432,16 +432,40 @@ class PagerClient:
             convs = [c for c in convs if str(c.get("channelId") or "") == channel_id]
         return convs
 
+    async def list_statuses_api(self) -> list[dict[str, str]]:
+        """Pager status folders from GET /api/status."""
+        org_id = await self._ensure_org_id()
+        try:
+            data = await self._request(
+                "GET", "/api/status", params={"orgId": org_id}
+            )
+        except PagerAPIError as exc:
+            logger.warning("GET /api/status orgId=%s: %s", org_id, exc)
+            return []
+        if not isinstance(data, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            sid = str(item.get("id") or item.get("statusId") or "").strip()
+            name = str(item.get("name") or sid).strip()
+            if sid:
+                out.append({"status_id": sid, "name": name})
+        return out
+
     async def collect_conversations(
         self,
         enabled_channel_ids: set[str],
         *,
         max_pages: int = 5,
         geo: str = "zm",
+        channel_folders: dict[str, set[str] | None] | None = None,
     ) -> list[dict]:
-        """Chats for enabled channels: «Без статусу» (+ funnel folders if enabled)."""
+        """Chats for enabled channels (legacy geo rules or per-channel folder pick)."""
         from services.status_ids import (
             ACTIVE_FUNNEL_STATUS_IDS,
+            NO_STATUS_FOLDER_ID,
             is_no_status,
             process_funnel_folders,
             should_process_conversation,
@@ -460,7 +484,7 @@ class PagerClient:
                 if cid:
                     seen[cid] = conv
 
-        for channel_id in enabled_channel_ids:
+        async def _legacy_channel(channel_id: str) -> None:
             for page in range(1, max_pages + 1):
                 convs = await self.list_conversations(
                     page=page,
@@ -471,25 +495,101 @@ class PagerClient:
                     break
                 _add(convs)
 
-        # «Без статусу» — extra pass (Pager tab often not in first pages per channel).
-        for page in range(1, max(max_pages, 12) + 1):
-            convs = await self.list_conversations(page=page, page_size=100)
-            no_status = [c for c in convs if is_no_status(c)]
-            if not convs:
-                break
-            _add(no_status)
+        async def _legacy_global() -> None:
+            for channel_id in enabled_channel_ids:
+                await _legacy_channel(channel_id)
 
-        if process_funnel_folders():
-            for status_id in ACTIVE_FUNNEL_STATUS_IDS:
-                for page in range(1, 3):
-                    convs = await self.list_conversations(
-                        page=page,
-                        page_size=50,
-                        status_id=status_id,
-                    )
-                    if not convs:
-                        break
-                    _add(convs)
+            for page in range(1, max(max_pages, 12) + 1):
+                convs = await self.list_conversations(page=page, page_size=100)
+                if not convs:
+                    break
+                _add([c for c in convs if is_no_status(c)])
+
+            if process_funnel_folders():
+                for status_id in ACTIVE_FUNNEL_STATUS_IDS:
+                    for page in range(1, 3):
+                        convs = await self.list_conversations(
+                            page=page,
+                            page_size=50,
+                            status_id=status_id,
+                        )
+                        if not convs:
+                            break
+                        _add(convs)
+
+        async def _collect_by_folders(channel_id: str, allowed: set[str]) -> None:
+            for status_id in allowed:
+                if status_id == NO_STATUS_FOLDER_ID:
+                    for page in range(1, max(max_pages, 12) + 1):
+                        convs = await self.list_conversations(
+                            page=page,
+                            page_size=100,
+                            channel_id=channel_id,
+                        )
+                        if not convs:
+                            break
+                        _add([c for c in convs if is_no_status(c)])
+                else:
+                    for page in range(1, max_pages + 1):
+                        convs = await self.list_conversations(
+                            page=page,
+                            page_size=50,
+                            channel_id=channel_id,
+                            status_id=status_id,
+                        )
+                        if not convs:
+                            break
+                        _add(convs)
+
+        if not channel_folders:
+            await _legacy_global()
+            return list(seen.values())
+
+        for channel_id in enabled_channel_ids:
+            allowed = channel_folders.get(channel_id)
+            if allowed is None:
+                await _legacy_channel(channel_id)
+                continue
+            if not allowed:
+                continue
+            await _collect_by_folders(channel_id, allowed)
+
+        # «Без статусу» for legacy channels only (no explicit folder config).
+        legacy_channels = [
+            cid
+            for cid in enabled_channel_ids
+            if channel_folders.get(cid) is None
+        ]
+        if legacy_channels:
+            for page in range(1, max(max_pages, 12) + 1):
+                convs = await self.list_conversations(page=page, page_size=100)
+                if not convs:
+                    break
+                _add(
+                    [
+                        c
+                        for c in convs
+                        if is_no_status(c)
+                        and str(c.get("channelId") or "") in legacy_channels
+                    ]
+                )
+            if process_funnel_folders():
+                for status_id in ACTIVE_FUNNEL_STATUS_IDS:
+                    for page in range(1, 3):
+                        convs = await self.list_conversations(
+                            page=page,
+                            page_size=50,
+                            status_id=status_id,
+                        )
+                        if not convs:
+                            break
+                        _add(
+                            [
+                                c
+                                for c in convs
+                                if str(c.get("channelId") or "") in legacy_channels
+                            ]
+                        )
 
         return list(seen.values())
 

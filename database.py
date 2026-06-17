@@ -61,6 +61,27 @@ async def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_channels_account ON pager_channels(account_id);
+
+            CREATE TABLE IF NOT EXISTS pager_statuses (
+                account_id INTEGER NOT NULL,
+                status_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (account_id, status_id),
+                FOREIGN KEY (account_id) REFERENCES pager_accounts(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS pager_channel_folders (
+                account_id INTEGER NOT NULL,
+                channel_id TEXT NOT NULL,
+                status_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (account_id, channel_id, status_id),
+                FOREIGN KEY (account_id) REFERENCES pager_accounts(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_channel_folders
+                ON pager_channel_folders(account_id, channel_id);
             """
         )
         for stmt in (
@@ -326,6 +347,169 @@ async def toggle_channel(account_id: int, channel_id: str, enabled: bool) -> Non
             (1 if enabled else 0, account_id, channel_id),
         )
         await db.commit()
+
+
+async def sync_statuses(
+    account_id: int, statuses: list[dict[str, str]]
+) -> None:
+    """Upsert Pager folder list from GET /api/status."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for i, st in enumerate(statuses):
+            sid = str(st.get("status_id") or "").strip()
+            name = str(st.get("name") or sid).strip()
+            if not sid:
+                continue
+            await db.execute(
+                """
+                INSERT INTO pager_statuses (account_id, status_id, name, sort_order)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(account_id, status_id) DO UPDATE SET
+                    name = excluded.name,
+                    sort_order = excluded.sort_order
+                """,
+                (account_id, sid, name, i),
+            )
+        await db.commit()
+
+
+async def list_statuses(account_id: int) -> list[dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT status_id, name, sort_order FROM pager_statuses
+            WHERE account_id = ? ORDER BY sort_order, name
+            """,
+            (account_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def has_folder_config(account_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM pager_channel_folders WHERE account_id = ? LIMIT 1",
+            (account_id,),
+        )
+        return await cur.fetchone() is not None
+
+
+async def ensure_channel_folder_defaults(account_id: int, channel_id: str) -> None:
+    """First open: only «Без статусу» enabled."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT COUNT(*) FROM pager_channel_folders
+            WHERE account_id = ? AND channel_id = ?
+            """,
+            (account_id, channel_id),
+        )
+        row = await cur.fetchone()
+        if row and int(row[0] or 0) > 0:
+            return
+        await db.execute(
+            """
+            INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
+            VALUES (?, ?, ?, 1)
+            """,
+            (account_id, channel_id, ""),
+        )
+        await db.commit()
+
+
+async def list_channel_folder_rows(
+    account_id: int, channel_id: str
+) -> list[dict[str, Any]]:
+    """All folders for channel with enabled flags (includes «Без статусу»)."""
+    await ensure_channel_folder_defaults(account_id, channel_id)
+    statuses = await list_statuses(account_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT status_id, enabled FROM pager_channel_folders
+            WHERE account_id = ? AND channel_id = ?
+            """,
+            (account_id, channel_id),
+        )
+        enabled_map = {
+            str(r["status_id"]): int(r["enabled"] or 0)
+            for r in await cur.fetchall()
+        }
+    rows: list[dict[str, Any]] = [
+        {
+            "status_id": "",
+            "name": "Без статусу",
+            "enabled": enabled_map.get("", 0),
+        }
+    ]
+    for st in statuses:
+        sid = str(st["status_id"])
+        rows.append(
+            {
+                "status_id": sid,
+                "name": st.get("name") or sid[:8],
+                "enabled": enabled_map.get(sid, 0),
+            }
+        )
+    return rows
+
+
+async def toggle_channel_folder(
+    account_id: int, channel_id: str, status_id: str, enabled: bool
+) -> None:
+    sid = status_id if status_id is not None else ""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(account_id, channel_id, status_id) DO UPDATE SET
+                enabled = excluded.enabled
+            """,
+            (account_id, channel_id, sid, 1 if enabled else 0),
+        )
+        await db.commit()
+
+
+async def set_all_channel_folders(
+    account_id: int, channel_id: str, enabled: bool
+) -> None:
+    rows = await list_channel_folder_rows(account_id, channel_id)
+    for row in rows:
+        await toggle_channel_folder(
+            account_id, channel_id, str(row["status_id"]), enabled
+        )
+
+
+async def get_channel_enabled_folders(
+    account_id: int, channel_id: str
+) -> set[str] | None:
+    """Enabled folder ids for channel; None if never configured."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT status_id, enabled FROM pager_channel_folders
+            WHERE account_id = ? AND channel_id = ?
+            """,
+            (account_id, channel_id),
+        )
+        rows = await cur.fetchall()
+    if not rows:
+        return None
+    return {str(sid) for sid, en in rows if int(en or 0)}
+
+
+async def build_channel_folders_map(
+    account_id: int, enabled_channel_ids: set[str]
+) -> dict[str, set[str] | None] | None:
+    """Per-channel enabled folders; None = use legacy worker rules."""
+    if not await has_folder_config(account_id):
+        return None
+    out: dict[str, set[str] | None] = {}
+    for cid in enabled_channel_ids:
+        out[cid] = await get_channel_enabled_folders(account_id, cid)
+    return out
 
 
 async def clear_pauses_for_account(account_id: int) -> int:

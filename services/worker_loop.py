@@ -1228,11 +1228,14 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             if not uid and _settings.pager_user_id:
                 client.session_user_id = _settings.pager_user_id
 
+        channel_folders = await db.build_channel_folders_map(account_id, enabled)
+
         try:
             convs = await client.collect_conversations(
                 enabled,
                 max_pages=10 if len(enabled) <= 1 else 6,
                 geo=str(account.get("geo") or "zm"),
+                channel_folders=channel_folders,
             )
         except PagerAPIError as exc:
             if not is_session_error(exc):
@@ -1249,10 +1252,12 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 account.update(acc)
             client = _make_client(fresh)
             await client.warm_session()
+            channel_folders = await db.build_channel_folders_map(account_id, enabled)
             convs = await client.collect_conversations(
                 enabled,
                 max_pages=10 if len(enabled) <= 1 else 6,
                 geo=str(account.get("geo") or "zm"),
+                channel_folders=channel_folders,
             )
         inbound_convs = [
             c
