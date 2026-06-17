@@ -53,7 +53,7 @@ _GAME_ID = re.compile(r"\b16\d{6,}\b")
 _GAME_ID_EG = re.compile(r"\b17\d{6,}\b")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _AR_INTERESTED = re.compile(
-    r"مهتم|اهتم|عايز|عاوز|حابب|ابي|أبي|عاوزه|عايزه|محتاج"
+    r"مهتم|اهتم|عايز|عاوز|حابب|ابي|أبي|عاوزه|عايزه|محتاج|مساعد|ساعد|ممكن"
 )
 _AR_POSITIVE = re.compile(
     r"تمام|أيوه|ايوه|آه|اه|اوك|نعم|يلا|بينا|ماشي|حاضر|طيب|كويس"
@@ -403,8 +403,10 @@ def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
 
 
 def needs_human_for_text(
-    intent: Intent, step: int, text: str, *, no_status: bool = False
+    intent: Intent, step: int, text: str, *, no_status: bool = False, geo: str = "zm"
 ) -> bool:
+    if geo == "eg" and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+        return False
     if is_deferral_reply(text) and step < 6:
         return False
     if is_reg_confirmed_funnel_message(text, step):

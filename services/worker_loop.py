@@ -13,7 +13,7 @@ from typing import Any
 from aiogram import Bot
 
 import database as db
-from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
+from config import load_settings, resolve_account_operator_id, resolve_pager_org_id, resolve_operator_user_id
 from services.ai_intent import (
     Intent,
     classify,
@@ -449,10 +449,9 @@ async def _handle_conversation(
     org_slug = str(
         account.get("org_slug") or _settings.pager_org_slug or ""
     ).strip()
-    pager_user_id = resolve_operator_user_id(
-        account.get("pager_user_id"),
-        _settings.pager_user_id,
-        org_slug=org_slug,
+    acct_cookies = _cookies(account)
+    pager_user_id = resolve_account_operator_id(
+        account, acct_cookies, org_slug=org_slug
     )
 
     def _valid_outgoing_reply(m: dict[str, Any]) -> bool:
@@ -797,7 +796,7 @@ async def _handle_conversation(
 
     # --- Complaints / unclear → TG only ---
     if (
-        needs_human_for_text(intent, step, text, no_status=no_status)
+        needs_human_for_text(intent, step, text, no_status=no_status, geo=geo)
         and not auto_funnel
         and intent != Intent.IMAGE_ONLY
     ):
@@ -1129,10 +1128,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         def _make_client(cookie_dict: dict[str, str]) -> PagerClient:
-            session_uid = resolve_operator_user_id(
-                account.get("pager_user_id"),
-                _settings.pager_user_id,
-                org_slug=org_slug,
+            session_uid = resolve_account_operator_id(
+                account, cookie_dict, org_slug=org_slug
             )
             merged = dict(cookie_dict)
             if org_id:
@@ -1351,10 +1348,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             max_plans = min(12, base_plans)
         else:
             max_plans = min(8, base_plans)
-        pager_user_id = resolve_operator_user_id(
-            account.get("pager_user_id"),
-            _settings.pager_user_id,
-            org_slug=org_slug,
+        pager_user_id = resolve_account_operator_id(
+            account, cookies, org_slug=org_slug
         )
         batch_env = (os.getenv("PAGER_BROWSER_BATCH_SIZE") or "").strip()
         try:
@@ -1477,13 +1472,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         )
 
         if client.org_id:
-            pager_uid = resolve_operator_user_id(
-                account.get("pager_user_id"),
-                client.session_user_id,
-                _settings.pager_user_id,
-                org_slug=str(
-                    account.get("org_slug") or _settings.pager_org_slug or ""
-                ),
+            pager_uid = resolve_account_operator_id(
+                account, client.cookies, org_slug=org_slug
             )
             if not pager_uid and inbound_convs:
                 pager_uid = str(

@@ -52,6 +52,28 @@ def resolve_operator_user_id(*values: str, org_slug: str = "") -> str:
     return DEFAULT_USER_ID_BY_SLUG.get(slug, "")
 
 
+def resolve_account_operator_id(
+    account: dict,
+    cookies: dict | None = None,
+    *,
+    org_slug: str = "",
+) -> str:
+    """Session cookie user wins over DB / env (multi-org accounts)."""
+    c = cookies or {}
+    slug = (
+        org_slug
+        or str(account.get("org_slug") or "")
+        or os.getenv("PAGER_ORG_SLUG")
+        or ""
+    ).strip()
+    return resolve_operator_user_id(
+        c.get("_pager_user_id"),
+        account.get("pager_user_id"),
+        os.getenv("PAGER_USER_ID"),
+        org_slug=slug,
+    )
+
+
 @dataclass
 class Settings:
     bot_token: str

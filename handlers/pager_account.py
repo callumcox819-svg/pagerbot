@@ -108,7 +108,32 @@ async def cmd_set_geo(message: Message) -> None:
     geo = parts[1].lower()
     await db.set_account_flags(message.from_user.id, geo=geo)
     label = "Замбия" if geo == "zm" else "Египет (hapkatest)"
-    await message.answer(f"✅ Geo = <code>{geo}</code> ({label})", parse_mode="HTML")
+    cleared = 0
+    uid = ""
+    try:
+        from config import resolve_account_operator_id
+
+        raw = acc.get("session_enc") or ""
+        if raw:
+            cookies = json.loads(_secrets.decrypt(raw))
+            uid = resolve_account_operator_id(acc, cookies)
+            if uid:
+                await db.upsert_account(
+                    message.from_user.id, pager_user_id=uid, session_ok=1
+                )
+        cleared = await db.clear_pauses_for_account(int(acc["id"]))
+    except Exception as exc:
+        logger.warning("set_geo sync: %s", exc)
+    extra = ""
+    if uid:
+        extra = f"\nOperator: <code>{uid[:24]}…</code>"
+    if cleared:
+        extra += f"\nСброшено пауз: {cleared} (чаты снова в очереди)"
+    await message.answer(
+        f"✅ Geo = <code>{geo}</code> ({label}){extra}\n\n"
+        "Если ответов нет — ещё раз /reset_pauses",
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "pager:login")
