@@ -296,6 +296,7 @@ def resolve_funnel_scripts(
     intent: str,
     *,
     outgoing_texts: list[str] | None = None,
+    attachments: list | None = None,
     geo: str = "zm",
 ) -> list[str]:
     """Pick next Pager saved-reply keys from funnel step + client message."""
@@ -312,6 +313,11 @@ def resolve_funnel_scripts(
 
     out = outgoing_texts or []
     t = (text or "").strip()
+
+    def _positive_signal() -> bool:
+        return is_funnel_positive_reaction(
+            t, attachments, funnel_step=effective_step
+        )
 
     if is_deferral_reply(t):
         return []
@@ -339,7 +345,7 @@ def resolve_funnel_scripts(
                 or is_ready_for_registration(t)
                 or is_registration_pending(t)
                 or is_funnel_positive_reaction(
-                    t, funnel_step=effective_step
+                    t, attachments, funnel_step=effective_step
                 )
                 or intent
                 in ("ready", "positive", "question", "interested")
@@ -372,7 +378,7 @@ def resolve_funnel_scripts(
                 or wants_details_after_intro(t)
                 or is_ready_for_registration(t)
                 or is_funnel_positive_reaction(
-                    t, funnel_step=effective_step
+                    t, attachments, funnel_step=effective_step
                 )
             ):
                 return ["02_how_it_works"]
@@ -382,7 +388,7 @@ def resolve_funnel_scripts(
                 is_ready_for_registration(t)
                 or wants_registration_link(t)
                 or intent in ("ready", "positive", "question")
-                or is_funnel_positive_reaction(t, funnel_step=effective_step)
+                or is_funnel_positive_reaction(t, attachments, funnel_step=effective_step)
             ):
                 return _eg_reg_scripts()
             return []
@@ -399,6 +405,13 @@ def resolve_funnel_scripts(
             return []
         if effective_step < 8 and intent == "game_id_text":
             return ["07_game_id"]
+        if effective_step < 4 and (
+            intent in ("positive", "interested", "ready") or _positive_signal()
+        ):
+            if not how_sent:
+                return ["02_how_it_works"]
+            if not link_sent:
+                return _eg_reg_scripts()
         return []
 
     if effective_step < 3:

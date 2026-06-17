@@ -1007,6 +1007,7 @@ async def _handle_conversation(
             text,
             intent.value,
             outgoing_texts=op_outgoing,
+            attachments=attachments,
             geo=geo,
         )
         if keys:
@@ -1048,10 +1049,7 @@ async def _handle_conversation(
             effective_step,
             intent.value,
         )
-        await db.save_conversation_state(
-            account_id, conv_id, last_processed_msg_id=msg_id
-        )
-        return "done"
+        return "no_script"
 
     if not needs_reply and not keys:
         await db.save_conversation_state(
@@ -1246,6 +1244,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 account.update(acc)
             client = _make_client(fresh)
             await client.warm_session()
+            await client.resolve_org_id_live()
             try:
                 await client.list_conversations(page_size=1)
             except PagerAPIError as exc:
