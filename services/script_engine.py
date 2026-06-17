@@ -53,6 +53,11 @@ EG_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "08_app_or_browser": "ينفع الاتنين",
 }
 
+# When needle is a substring of another template, exclude those bodies.
+EG_SCRIPT_EXCLUDE_SNIPPETS: dict[str, tuple[str, ...]] = {
+    "04_registration": ("تمام كده", "هتعمل إيداع"),
+}
+
 _cache: dict[str, str] = {}
 
 
@@ -60,6 +65,12 @@ def saved_reply_folder_names(geo: str = "zm") -> tuple[str, ...]:
     if geo == "eg":
         return EG_SAVED_REPLY_FOLDER_NAMES
     return SAVED_REPLY_FOLDER_NAMES
+
+
+def script_exclude_snippets(key: str, geo: str = "zm") -> tuple[str, ...]:
+    if geo == "eg":
+        return EG_SCRIPT_EXCLUDE_SNIPPETS.get(key, ())
+    return ()
 
 
 def script_ui_snippet(key: str, geo: str = "zm") -> str:
@@ -315,6 +326,21 @@ def resolve_funnel_scripts(
             if link_sent:
                 return []
             return ["04_registration", "05_link"]
+
+        # After «как работает» — only reg instructions + link, never 02 again.
+        if how_sent and not link_sent:
+            if (
+                wants_registration_link(t)
+                or is_ready_for_registration(t)
+                or is_registration_pending(t)
+                or is_funnel_positive_reaction(
+                    t, funnel_step=effective_step
+                )
+                or intent
+                in ("ready", "positive", "question", "interested")
+                or effective_step >= 2
+            ):
+                return _eg_reg_scripts()
 
         if (
             is_app_or_browser_question(t)

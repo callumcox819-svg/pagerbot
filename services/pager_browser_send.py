@@ -15,6 +15,7 @@ from services.script_engine import (
     filter_auto_script_keys,
     load_script,
     saved_reply_folder_names,
+    script_exclude_snippets,
     script_ui_snippet,
     script_verify_snippet,
 )
@@ -782,10 +783,11 @@ async def _fetch_saved_reply_text_via_api(
     """Load reply text from /api/reply/folder + /api/reply (same as UI sidebar)."""
     oid = (org_id or "").strip()
     snippet = script_ui_snippet(script_key, geo)
+    excludes = list(script_exclude_snippets(script_key, geo))
     folder_names = list(saved_reply_folder_names(geo))
     folder_url = _api(f"/api/reply/folder?orgId={oid}")
     result = await page.evaluate(
-        f"""async ({{folderUrl, snippet, folderNames}}) => {{
+        f"""async ({{folderUrl, snippet, folderNames, scriptKey, excludeNeedles}}) => {{
             {_SAFE_FETCH}
             const fr = await safeJsonFetch(folderUrl);
             if (fr.html || !fr.ok) return {{ error: 'folder fetch failed' }};
@@ -800,16 +802,28 @@ async def _fetch_saved_reply_text_via_api(
             if (rr.html || !rr.ok) return {{ error: 'replies fetch failed' }};
             const replies = Array.isArray(rr.data) ? rr.data : [];
             const needle = snippet.toLowerCase();
-            const hits = replies.filter(r =>
-                (r.text || '').toLowerCase().includes(needle));
+            const excludes = (excludeNeedles || []).map(n => n.toLowerCase());
+            const hits = replies.filter(r => {{
+                const text = (r.text || '').toLowerCase();
+                if (!text.includes(needle)) return false;
+                for (const ex of excludes) {{
+                    if (text.includes(ex)) return false;
+                }}
+                if (scriptKey === '04_registration' && text.includes('تمام كده')) {{
+                    return false;
+                }}
+                return true;
+            }});
             const hit = hits.length ? hits[hits.length - 1] : null;
-            if (!hit || !hit.text) return {{ error: 'reply not found', folder: folder.name }};
+            if (!hit || !hit.text) return {{ error: 'reply not found', folder: folder.name, needle }};
             return {{ ok: true, text: hit.text, folder: folder.name }};
         }}""",
         {
             "folderUrl": folder_url,
             "snippet": snippet,
             "folderNames": folder_names,
+            "scriptKey": script_key,
+            "excludeNeedles": excludes,
         },
     )
     if isinstance(result, dict) and result.get("ok") and result.get("text"):
