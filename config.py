@@ -74,6 +74,23 @@ def resolve_account_operator_id(
     )
 
 
+def resolve_session_org_id(
+    cookies: dict | None,
+    *,
+    account_org_id: str = "",
+    env_org_id: str = "",
+    org_slug: str = "",
+) -> str:
+    """Cookie session org wins over DB / Railway env."""
+    c = cookies or {}
+    return resolve_pager_org_id(
+        c.get("_pager_org_id"),
+        account_org_id,
+        env_org_id,
+        org_slug=org_slug,
+    )
+
+
 @dataclass
 class Settings:
     bot_token: str

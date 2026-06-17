@@ -10,7 +10,12 @@ from typing import Any
 
 import aiohttp
 
-from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
+from config import (
+    DEFAULT_ORG_ID_BY_SLUG,
+    load_settings,
+    resolve_operator_user_id,
+    resolve_pager_org_id,
+)
 
 _settings = load_settings()
 from services.pager_auth import UA
@@ -28,6 +33,11 @@ def is_session_error(exc: PagerAPIError) -> bool:
     if "invalid or expired token" in body:
         return True
     return False
+
+
+def is_org_id_error(exc: PagerAPIError) -> bool:
+    body = (exc.body or "").lower()
+    return exc.status == 400 and "organization id required" in body
 
 
 def message_delivered(result: Any) -> bool:
@@ -343,6 +353,53 @@ class PagerClient:
                 logger.debug("discover org via %s: %s", path, exc)
         return ""
 
+    async def resolve_org_id_live(self) -> str:
+        """Re-detect org from session (cookies / HTML) — not env defaults."""
+        saved_org = self.org_id
+        saved_fallback = self.org_id_fallback
+        self.org_id = ""
+        self.org_id_fallback = ""
+
+        cookie_org = str(self.cookies.get("_pager_org_id") or "").strip()
+        if cookie_org.startswith("org_"):
+            self.org_id = cookie_org
+            self.org_id_fallback = saved_fallback or cookie_org
+            return cookie_org
+
+        await self.warm_session()
+        cookie_org = str(self.cookies.get("_pager_org_id") or "").strip()
+        if cookie_org.startswith("org_"):
+            self.org_id = cookie_org
+            self.org_id_fallback = saved_fallback or cookie_org
+            return cookie_org
+
+        for getter in (self._try_org_from_conversations, self._try_org_by_slug):
+            org_id = await getter()
+            if org_id:
+                self.org_id_fallback = saved_fallback or org_id
+                return org_id
+
+        try:
+            html = await self._fetch_chats_html()
+            if html:
+                org_id = _org_from_html(html)
+                if org_id:
+                    self.org_id = org_id
+                    if not self.org_slug:
+                        slug = _org_slug_from_html(html)
+                        if slug:
+                            self.org_slug = slug
+                    self.org_id_fallback = saved_fallback or org_id
+                    return org_id
+        except Exception as exc:
+            logger.debug("resolve_org_id_live html: %s", exc)
+
+        self.org_id = saved_org
+        self.org_id_fallback = saved_fallback
+        if self.org_id:
+            return self.org_id
+        return await self.discover_org_id()
+
     async def discover_org_id(self) -> str:
         if self.org_id:
             return self.org_id
@@ -423,10 +480,17 @@ class PagerClient:
         try:
             data = await self._request("GET", "/api/conversation", params=params)
         except PagerAPIError as exc:
-            if not is_session_error(exc):
+            if is_org_id_error(exc):
+                org_id = await self.resolve_org_id_live()
+                if not org_id:
+                    raise
+                params["orgId"] = org_id
+                data = await self._request("GET", "/api/conversation", params=params)
+            elif not is_session_error(exc):
                 raise
-            await self.warm_session()
-            data = await self._request("GET", "/api/conversation", params=params)
+            else:
+                await self.warm_session()
+                data = await self._request("GET", "/api/conversation", params=params)
         convs = data if isinstance(data, list) else []
         if channel_id:
             convs = [c for c in convs if str(c.get("channelId") or "") == channel_id]
@@ -1187,14 +1251,25 @@ class PagerClient:
 
     async def list_channels_api(self) -> list[dict[str, str]]:
         """All Messenger/IG channels from Pager API."""
+        await self.warm_session()
         org_id = await self._ensure_org_id()
-        try:
-            data = await self._request(
-                "GET", "/api/channel", params={"orgId": org_id}
-            )
-        except PagerAPIError as exc:
-            logger.warning("GET /api/channel orgId=%s: %s", org_id, exc)
-            data = None
+        data: Any = None
+        for attempt in range(2):
+            try:
+                org_id = await self._ensure_org_id()
+                data = await self._request(
+                    "GET", "/api/channel", params={"orgId": org_id}
+                )
+                break
+            except PagerAPIError as exc:
+                if attempt == 0 and is_org_id_error(exc):
+                    org_id = await self.resolve_org_id_live()
+                    if not org_id:
+                        raise
+                    continue
+                logger.warning("GET /api/channel orgId=%s: %s", org_id, exc)
+                data = None
+                break
         if isinstance(data, list):
             out: list[dict[str, str]] = []
             for item in data:

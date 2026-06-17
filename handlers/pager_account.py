@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import database as db
-from config import load_settings, resolve_pager_org_id
+from config import load_settings, resolve_session_org_id
 from handlers.states import PagerConnect
 from keyboards.main_menu import channels_kb, connect_kb
 from services.encryption import Secrets
@@ -32,7 +32,12 @@ def _pager_client(
     locale: str = "",
 ) -> PagerClient:
     slug = org_slug or _settings.pager_org_slug
-    resolved_org = resolve_pager_org_id(org_id, _settings.pager_org_id, org_slug=slug)
+    resolved_org = resolve_session_org_id(
+        cookies,
+        account_org_id=org_id,
+        env_org_id=_settings.pager_org_id,
+        org_slug=slug,
+    )
     return PagerClient(
         _settings.pager_base_url,
         cookies,
@@ -290,6 +295,8 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
             org_slug=str(acc.get("org_slug") or _settings.pager_org_slug),
             locale=str(acc.get("pager_locale") or ""),
         )
+        await client.warm_session()
+        await client.resolve_org_id_live()
         channels = await client.list_channels_api()
         if client.org_id:
             await db.upsert_account(
@@ -316,7 +323,7 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
     except PagerAPIError as exc:
         await cb.message.answer(
             f"Ошибка API: {exc}\n\n"
-            "Добавьте в Railway Variables:\n"
-            "PAGER_ORG_ID=org_… (из Network → status?orgId=…)\n"
-            "PAGER_ORG_SLUG=tehsup"
+            "Перелогиньтесь: 🔐 Pager аккаунт → Email + пароль.\n"
+            "Если Zambia — в Railway: PAGER_ORG_SLUG=tehsup\n"
+            "Если Egypt — свой org из Network (status?orgId=…)."
         )

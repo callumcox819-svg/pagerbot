@@ -1137,6 +1137,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             account.get("org_slug") or _settings.pager_org_slug or ""
         ).strip()
         org_id = resolve_pager_org_id(
+            cookies.get("_pager_org_id"),
             str(account.get("org_id") or ""),
             _settings.pager_org_id,
             org_slug=org_slug,
@@ -1147,7 +1148,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 account, cookie_dict, org_slug=org_slug
             )
             merged = dict(cookie_dict)
-            if org_id:
+            cookie_org = str(merged.get("_pager_org_id") or "").strip()
+            if org_id and not cookie_org.startswith("org_"):
                 merged["_pager_org_id"] = org_id
             if session_uid:
                 merged["_pager_user_id"] = session_uid

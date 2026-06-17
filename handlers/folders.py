@@ -28,12 +28,15 @@ async def _require_account(tg_user_id: int) -> dict | None:
 
 async def _pager_for_account(acc: dict):
     cookies = json.loads(_secrets.decrypt(acc["session_enc"]))
-    return _pager_client(
+    client = _pager_client(
         cookies,
         org_id=str(acc.get("org_id") or ""),
         org_slug=str(acc.get("org_slug") or _settings.pager_org_slug),
         locale=str(acc.get("pager_locale") or ""),
     )
+    await client.warm_session()
+    await client.resolve_org_id_live()
+    return client
 
 
 async def _sync_statuses(acc: dict) -> int:
