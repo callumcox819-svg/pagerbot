@@ -438,8 +438,13 @@ class PagerClient:
         *,
         max_pages: int = 5,
     ) -> list[dict]:
-        """Chats for enabled channels: «Без статусу» + active funnel folders."""
-        from services.status_ids import ACTIVE_FUNNEL_STATUS_IDS, is_no_status, should_process_conversation
+        """Chats for enabled channels: «Без статусу» (+ funnel folders if enabled)."""
+        from services.status_ids import (
+            ACTIVE_FUNNEL_STATUS_IDS,
+            is_no_status,
+            process_funnel_folders,
+            should_process_conversation,
+        )
 
         seen: dict[str, dict] = {}
 
@@ -473,16 +478,17 @@ class PagerClient:
                 break
             _add(no_status)
 
-        for status_id in ACTIVE_FUNNEL_STATUS_IDS:
-            for page in range(1, 3):
-                convs = await self.list_conversations(
-                    page=page,
-                    page_size=50,
-                    status_id=status_id,
-                )
-                if not convs:
-                    break
-                _add(convs)
+        if process_funnel_folders():
+            for status_id in ACTIVE_FUNNEL_STATUS_IDS:
+                for page in range(1, 3):
+                    convs = await self.list_conversations(
+                        page=page,
+                        page_size=50,
+                        status_id=status_id,
+                    )
+                    if not convs:
+                        break
+                    _add(convs)
 
         return list(seen.values())
 

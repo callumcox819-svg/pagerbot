@@ -50,6 +50,7 @@ from services.status_ids import (
     ZM_STATUSES,
     infer_step_from_status,
     is_no_status,
+    process_funnel_folders,
     should_process_conversation,
 )
 from services.telegram_notify import notify_escalation
@@ -413,6 +414,14 @@ async def _handle_conversation(
         return False
 
     state = await db.get_conversation_state(account_id, conv_id)
+    if not process_funnel_folders():
+        st_step = int(state.get("step") or 0)
+        if state.get("human_takeover") or st_step >= 4:
+            logger.info(
+                "conv=%s skip — handed off after registration link",
+                conv_id[:8],
+            )
+            return "done"
     if int(state.get("send_failures") or 0) >= 5:
         logger.info(
             "conv=%s skipped send_failures=%s (use /reset_pauses)",
@@ -1008,7 +1017,8 @@ async def _handle_conversation(
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     explain_keys = {"02_how_it_works", "03_zmw_table"}
-    if reg_keys.intersection(keys):
+    reg_handoff = bool(reg_keys.intersection(keys))
+    if reg_handoff:
         new_step = 4
         if pager_user_id:
             send_buf.queue_status_patch(
@@ -1030,11 +1040,15 @@ async def _handle_conversation(
             send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])
 
     if actions_sent:
-        send_buf.queue_commit(
-            conv_id,
-            step=new_step,
-            last_processed_msg_id=msg_id,
-        )
+        commit: dict[str, Any] = {
+            "step": new_step,
+            "last_processed_msg_id": msg_id,
+        }
+        if reg_handoff:
+            # After reg+link — operator takes over; bot must not re-enter.
+            commit["human_takeover"] = 1
+            commit["pause_scripts"] = 0
+        send_buf.queue_commit(conv_id, **commit)
         return True
     if keys:
         logger.warning(

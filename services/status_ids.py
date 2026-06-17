@@ -64,12 +64,23 @@ def should_skip_processing(conv: dict) -> bool:
     return any(frag in name for frag in _SKIP_NAME_FRAGMENTS)
 
 
+def process_funnel_folders() -> bool:
+    """Continue scripts in «В процесі» / «Чекаю ID» etc. (off by default)."""
+    return os.getenv("PAGER_PROCESS_FUNNEL_FOLDERS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def should_process_conversation(conv: dict) -> bool:
-    """Process Kelvin (etc.) chats in «Без статусу» + active funnel folders."""
+    """Process new leads in «Без статусу»; funnel folders only if enabled."""
     if should_skip_processing(conv):
         return False
     if is_no_status(conv):
         return True
+    if not process_funnel_folders():
+        return False
     status_id = str(conv.get("statusId") or "").strip()
     return status_id in ACTIVE_FUNNEL_STATUS_IDS
 
