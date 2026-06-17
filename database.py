@@ -385,6 +385,45 @@ async def list_statuses(account_id: int) -> list[dict[str, Any]]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+# Account-wide folder selection (not per Messenger channel).
+ACCOUNT_FOLDER_SCOPE = "*"
+
+
+async def has_account_folder_config(account_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT 1 FROM pager_channel_folders
+            WHERE account_id = ? AND channel_id = ?
+            LIMIT 1
+            """,
+            (account_id, ACCOUNT_FOLDER_SCOPE),
+        )
+        return await cur.fetchone() is not None
+
+
+async def ensure_account_folder_defaults(account_id: int) -> None:
+    await ensure_channel_folder_defaults(account_id, ACCOUNT_FOLDER_SCOPE)
+
+
+async def list_account_folder_rows(account_id: int) -> list[dict[str, Any]]:
+    return await list_channel_folder_rows(account_id, ACCOUNT_FOLDER_SCOPE)
+
+
+async def toggle_account_folder(
+    account_id: int, status_id: str, enabled: bool
+) -> None:
+    await toggle_channel_folder(account_id, ACCOUNT_FOLDER_SCOPE, status_id, enabled)
+
+
+async def set_all_account_folders(account_id: int, enabled: bool) -> None:
+    await set_all_channel_folders(account_id, ACCOUNT_FOLDER_SCOPE, enabled)
+
+
+async def get_account_enabled_folders(account_id: int) -> set[str] | None:
+    return await get_channel_enabled_folders(account_id, ACCOUNT_FOLDER_SCOPE)
+
+
 async def has_folder_config(account_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
@@ -503,7 +542,11 @@ async def get_channel_enabled_folders(
 async def build_channel_folders_map(
     account_id: int, enabled_channel_ids: set[str]
 ) -> dict[str, set[str] | None] | None:
-    """Per-channel enabled folders; None = use legacy worker rules."""
+    """Enabled status folders applied to all enabled channels."""
+    account_folders = await get_account_enabled_folders(account_id)
+    if account_folders is not None:
+        return {cid: account_folders for cid in enabled_channel_ids}
+
     if not await has_folder_config(account_id):
         return None
     out: dict[str, set[str] | None] = {}
