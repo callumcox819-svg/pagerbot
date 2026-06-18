@@ -1409,19 +1409,6 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
         n_enabled = len(enabled)
         base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "24")))
-        if n_enabled <= 1:
-            max_plans = min(24, base_plans)
-        elif no_status_n > 15:
-            max_plans = min(20, base_plans)
-            batch_chunk = max(batch_chunk, 10)
-            browser_parallel = max(browser_parallel, 6)
-        elif no_status_n > 8:
-            max_plans = min(12, base_plans)
-        else:
-            max_plans = min(8, base_plans)
-        pager_user_id = resolve_account_operator_id(
-            account, cookies, org_slug=org_slug
-        )
         batch_env = (os.getenv("PAGER_BROWSER_BATCH_SIZE") or "").strip()
         try:
             batch_env_n = int(batch_env) if batch_env else 0
@@ -1436,7 +1423,20 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             par_env_n = int(par_env) if par_env else 0
         except ValueError:
             par_env_n = 0
-        browser_parallel = par_env_n if par_env_n >= 1 else 4
+        browser_parallel = par_env_n if par_env_n >= 1 else 2
+        if n_enabled <= 1:
+            max_plans = min(24, base_plans)
+        elif no_status_n > 15:
+            max_plans = min(20, base_plans)
+            batch_chunk = max(batch_chunk, 10)
+            browser_parallel = min(max(browser_parallel, 3), 4)
+        elif no_status_n > 8:
+            max_plans = min(12, base_plans)
+        else:
+            max_plans = min(8, base_plans)
+        pager_user_id = resolve_account_operator_id(
+            account, cookies, org_slug=org_slug
+        )
         funnel_cap = max(8, (max_plans * 2 + 1) // 3)
         max_handle = max(24, int(os.getenv("PAGER_MAX_HANDLE", "56") or "56"))
         logger.info(

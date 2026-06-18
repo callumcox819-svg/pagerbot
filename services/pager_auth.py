@@ -92,6 +92,43 @@ def extract_clerk_session_info(payload: dict[str, Any]) -> dict[str, str]:
     return {"org_id": org_id, "pager_user_id": pager_user_id}
 
 
+def merge_clerk_session_cookies(
+    jar_cookies: dict[str, str],
+    clerk_payload: dict[str, Any],
+) -> dict[str, str]:
+    """Inject __session JWT from Clerk client — jar alone lacks Pager API cookies."""
+    merged = dict(jar_cookies)
+    client = clerk_payload.get("response") or clerk_payload
+    if not isinstance(client, dict):
+        return merged
+
+    jwt = ""
+    for sess in client.get("sessions") or []:
+        if not isinstance(sess, dict):
+            continue
+        status = str(sess.get("status") or "").lower()
+        if status and status not in ("active", "pending"):
+            continue
+        lat = sess.get("last_active_token") or {}
+        if isinstance(lat, dict):
+            jwt = str(lat.get("jwt") or "").strip()
+        if jwt:
+            break
+
+    if not jwt:
+        return merged
+
+    merged["__session"] = jwt
+    suffix = ""
+    for key in merged:
+        if key.startswith("__client_uat_"):
+            suffix = key[len("__client_uat_") :]
+            break
+    if suffix:
+        merged[f"__session_{suffix}"] = jwt
+    return merged
+
+
 async def _validate_cookies(
     cookies: dict[str, str],
     *,
@@ -220,21 +257,29 @@ async def login_with_clerk_http(email: str, password: str) -> dict[str, str]:
         org_id_hint = clerk_info.get("org_id") or ""
         pager_user_hint = clerk_info.get("pager_user_id") or ""
 
+        clerk_client_payload: dict[str, Any] = {}
         async with session.get(
             f"{CLERK_BASE}/v1/client",
             params=params,
             headers=headers,
         ) as resp:
             if resp.status == 200:
-                clerk_client = await resp.json()
-                info = extract_clerk_session_info(clerk_client)
+                clerk_client_payload = await resp.json()
+                info = extract_clerk_session_info(clerk_client_payload)
                 org_id_hint = org_id_hint or info.get("org_id") or ""
                 pager_user_hint = pager_user_hint or info.get("pager_user_id") or ""
 
-        async with session.get(f"{PAGER_BASE}/chats", headers=headers) as resp:
-            await resp.text()
+        for path in ("/chats", "/uk/chats"):
+            async with session.get(
+                f"{PAGER_BASE}{path}",
+                headers=headers,
+                allow_redirects=True,
+            ) as resp:
+                await resp.text()
 
         cookies = _jar_to_dict(jar)
+        if clerk_client_payload:
+            cookies = merge_clerk_session_cookies(cookies, clerk_client_payload)
         await _validate_cookies(cookies, org_id_hint=org_id_hint)
         if org_id_hint:
             cookies["_pager_org_id"] = org_id_hint
@@ -306,36 +351,39 @@ async def login_with_playwright(email: str, password: str) -> dict[str, str]:
     """Headless browser login — fallback if Clerk HTTP fails."""
     from playwright.async_api import async_playwright
 
+    from services.playwright_lock import launch_chromium, playwright_exclusive
+
     launch_args = [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
     ]
 
-    async with async_playwright() as p:
-        try:
-            browser = await p.chromium.launch(headless=True, args=launch_args)
-        except Exception as exc:
-            msg = str(exc)
-            if "Executable doesn't exist" in msg:
-                raise RuntimeError(
-                    "Chromium не установлен на сервере. Пересоберите Docker-образ."
-                ) from exc
-            raise
+    async with playwright_exclusive():
+        async with async_playwright() as p:
+            try:
+                browser = await launch_chromium(p, headless=True, args=launch_args)
+            except Exception as exc:
+                msg = str(exc)
+                if "Executable doesn't exist" in msg:
+                    raise RuntimeError(
+                        "Chromium не установлен на сервере. Пересоберите Docker-образ."
+                    ) from exc
+                raise
 
-        context = await browser.new_context(
-            user_agent=UA,
-            locale="en-US",
-            viewport={"width": 1280, "height": 720},
-        )
-        page = await context.new_page()
-        try:
-            await playwright_sign_in_on_page(page, email, password)
-            cookies_list = await context.cookies()
-            cookies = {c["name"]: c["value"] for c in cookies_list}
-            return await _validate_cookies(cookies)
-        finally:
-            await browser.close()
+            context = await browser.new_context(
+                user_agent=UA,
+                locale="en-US",
+                viewport={"width": 1280, "height": 720},
+            )
+            page = await context.new_page()
+            try:
+                await playwright_sign_in_on_page(page, email, password)
+                cookies_list = await context.cookies()
+                cookies = {c["name"]: c["value"] for c in cookies_list}
+                return await _validate_cookies(cookies)
+            finally:
+                await browser.close()
 
 
 async def authenticate(
@@ -353,10 +401,10 @@ async def authenticate(
 
     if email and password:
         errors: list[str] = []
-        # Railway/Docker: Clerk HTTP cookies often fail Pager API — use browser login first.
+        # Clerk HTTP first — Playwright crashes when worker already runs Chromium.
         login_methods = (
-            ("playwright", login_with_playwright),
             ("clerk_http", login_with_clerk_http),
+            ("playwright", login_with_playwright),
         )
         for method_name, login_fn in login_methods:
             try:

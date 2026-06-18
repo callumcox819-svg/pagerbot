@@ -9,6 +9,7 @@ import re
 from typing import Sequence
 
 from services.pager_auth import PAGER_BASE, UA, playwright_sign_in_on_page
+from services.playwright_lock import chromium_session
 
 from services.script_engine import (
     SAVED_REPLY_FOLDER_NAMES,
@@ -2457,8 +2458,6 @@ async def _run_browser_session(
     locale: str,
     skip_take: bool = False,
 ) -> None:
-    from playwright.async_api import async_playwright
-
     slug = (org_slug or "").strip()
     oid = (org_id or "").strip()
     uid = (user_id or "").strip()
@@ -2477,8 +2476,7 @@ async def _run_browser_session(
         "--disable-blink-features=AutomationControlled",
     ]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=launch_args)
+    async with chromium_session(headless=True, args=launch_args) as browser:
         context = await browser.new_context(
             user_agent=UA,
             locale="uk-UA",
@@ -2496,42 +2494,39 @@ async def _run_browser_session(
             ]
         )
         page = await context.new_page()
-        try:
-            await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
-            await page.wait_for_timeout(2000)
+        await page.goto(chat_url, wait_until="domcontentloaded", timeout=90000)
+        await page.wait_for_timeout(2000)
 
-            if "sign-in" in page.url:
-                raise RuntimeError("Browser session expired (redirected to sign-in)")
+        if "sign-in" in page.url:
+            raise RuntimeError("Browser session expired (redirected to sign-in)")
 
-            await _verify_logged_in_operator(page, uid)
-            if not await _open_conversation_in_ui(
-                page, locale=locale, org_slug=slug, conv_id=conv_id
-            ):
-                raise RuntimeError(f"Chat thread not open conv={conv_id[:8]}")
-            channel_id = await _browser_prepare_outbound(
+        await _verify_logged_in_operator(page, uid)
+        if not await _open_conversation_in_ui(
+            page, locale=locale, org_slug=slug, conv_id=conv_id
+        ):
+            raise RuntimeError(f"Chat thread not open conv={conv_id[:8]}")
+        channel_id = await _browser_prepare_outbound(
+            page,
+            conv_id=conv_id,
+            org_id=oid,
+            user_id=uid,
+        )
+        await page.wait_for_timeout(800)
+
+        for i, body in enumerate(texts):
+            if i:
+                await page.wait_for_timeout(1200)
+            await _send_operator_text(
+                context,
                 page,
                 conv_id=conv_id,
                 org_id=oid,
                 user_id=uid,
+                text=body,
+                locale=locale,
+                org_slug=slug,
+                channel_id=channel_id,
             )
-            await page.wait_for_timeout(800)
-
-            for i, body in enumerate(texts):
-                if i:
-                    await page.wait_for_timeout(1200)
-                await _send_operator_text(
-                    context,
-                    page,
-                    conv_id=conv_id,
-                    org_id=oid,
-                    user_id=uid,
-                    text=body,
-                    locale=locale,
-                    org_slug=slug,
-                    channel_id=channel_id,
-                )
-        finally:
-            await browser.close()
 
 
 async def send_message_via_browser(
@@ -2570,8 +2565,6 @@ async def send_messages_via_browser_ui(
     password: str = "",
 ) -> None:
     """Send via Playwright — full UI login when credentials available."""
-    from playwright.async_api import async_playwright
-
     slug = (org_slug or "").strip()
     oid = (org_id or "").strip()
     uid = (user_id or "").strip()
@@ -2598,8 +2591,7 @@ async def send_messages_via_browser_ui(
         "--disable-blink-features=AutomationControlled",
     ]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=launch_args)
+    async with chromium_session(headless=True, args=launch_args) as browser:
         context = await browser.new_context(
             user_agent=UA,
             locale="uk-UA",
@@ -2607,74 +2599,71 @@ async def send_messages_via_browser_ui(
         )
         context.set_default_timeout(25000)
         page = await context.new_page()
-        try:
-            if use_login:
-                logger.info("browser login for send conv=%s", conv_id[:8])
-                await playwright_sign_in_on_page(page, email.strip(), password)
-                chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
-                await page.goto(
-                    chat_url, wait_until="domcontentloaded", timeout=60000
-                )
-                await page.wait_for_timeout(1500)
-            else:
-                await context.add_cookies(
-                    [
-                        {
-                            "name": name,
-                            "value": value,
-                            "domain": ".pager.co.ua",
-                            "path": "/",
-                        }
-                        for name, value in clean.items()
-                    ]
-                )
+        if use_login:
+            logger.info("browser login for send conv=%s", conv_id[:8])
+            await playwright_sign_in_on_page(page, email.strip(), password)
+            chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
+            await page.goto(
+                chat_url, wait_until="domcontentloaded", timeout=60000
+            )
+            await page.wait_for_timeout(1500)
+        else:
+            await context.add_cookies(
+                [
+                    {
+                        "name": name,
+                        "value": value,
+                        "domain": ".pager.co.ua",
+                        "path": "/",
+                    }
+                    for name, value in clean.items()
+                ]
+            )
 
-            if "sign-in" in page.url:
-                raise RuntimeError("Browser session expired (redirected to sign-in)")
+        if "sign-in" in page.url:
+            raise RuntimeError("Browser session expired (redirected to sign-in)")
 
-            await _verify_logged_in_operator(page, uid)
-            if not await _open_conversation_in_ui(
-                page, locale=locale, org_slug=slug, conv_id=conv_id
-            ):
-                logger.warning(
-                    "composer not ready conv=%s — POST fallback",
-                    conv_id[:8],
-                )
+        await _verify_logged_in_operator(page, uid)
+        if not await _open_conversation_in_ui(
+            page, locale=locale, org_slug=slug, conv_id=conv_id
+        ):
+            logger.warning(
+                "composer not ready conv=%s — POST fallback",
+                conv_id[:8],
+            )
 
-            if skip_take:
-                channel_id = await _browser_prepare_outbound(
-                    page, conv_id=conv_id, org_id=oid, user_id=uid
-                )
-            else:
-                chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
-                await _browser_take_and_verify(
-                    page,
-                    conv_id=conv_id,
-                    org_id=oid,
-                    user_id=uid,
-                    chat_url=chat_url,
-                )
-                channel_id = await _browser_prepare_outbound(
-                    page, conv_id=conv_id, org_id=oid, user_id=uid
-                )
+        if skip_take:
+            channel_id = await _browser_prepare_outbound(
+                page, conv_id=conv_id, org_id=oid, user_id=uid
+            )
+        else:
+            chat_url = f"{PAGER_BASE}/{locale}/{slug}/chats/{conv_id}"
+            await _browser_take_and_verify(
+                page,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+                chat_url=chat_url,
+            )
+            channel_id = await _browser_prepare_outbound(
+                page, conv_id=conv_id, org_id=oid, user_id=uid
+            )
 
-            await page.wait_for_timeout(1000)
-            for i, body in enumerate(bodies):
-                if i:
-                    await page.wait_for_timeout(1200)
-                await _send_operator_text(
-                    context,
-                    page,
-                    conv_id=conv_id,
-                    org_id=oid,
-                    user_id=uid,
-                    text=body,
-                    locale=locale,
-                    org_slug=slug,
-                    channel_id=channel_id,
-                )
-        finally:
-            await browser.close()
+        await page.wait_for_timeout(1000)
+        for i, body in enumerate(bodies):
+            if i:
+                await page.wait_for_timeout(1200)
+            await _send_operator_text(
+                context,
+                page,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+                text=body,
+                locale=locale,
+                org_slug=slug,
+                channel_id=channel_id,
+            )
 
 
 async def send_batch_via_browser(
@@ -2736,13 +2725,10 @@ async def send_batch_via_browser(
         "--disable-dev-shm-usage",
         "--disable-blink-features=AutomationControlled",
     ]
-    from playwright.async_api import async_playwright
-
     ok: set[str] = set()
     fresh_cookies: dict[str, str] = {}
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=launch_args)
+    async with chromium_session(headless=True, args=launch_args) as browser:
         context = await browser.new_context(
             user_agent=UA,
             locale="uk-UA",
@@ -2848,7 +2834,6 @@ async def send_batch_via_browser(
                 fresh_cookies = await _export_context_cookies(context)
             except Exception:
                 pass
-            await browser.close()
     return ok, fresh_cookies
 
 

@@ -10,11 +10,44 @@ import database as db
 from config import load_settings, resolve_pager_org_id, resolve_operator_user_id
 from services.encryption import Secrets
 from services.pager_api import PagerAPIError, PagerClient, is_session_error
-from services.pager_auth import authenticate
+from services.pager_auth import (
+    login_with_clerk_http,
+    login_with_playwright,
+)
 
 logger = logging.getLogger(__name__)
 _settings = load_settings()
 _secrets = Secrets(_settings.encryption_key)
+
+
+def _is_transient_playwright_error(exc: BaseException) -> bool:
+    err = str(exc)
+    return (
+        "TargetClosedError" in type(exc).__name__
+        or "Target page, context or browser has been closed" in err
+    )
+
+
+async def _login_for_refresh(email: str, password: str) -> dict[str, str]:
+    """Prefer Clerk HTTP — avoids Chromium while worker may hold the browser lock."""
+    errors: list[str] = []
+    for method_name, login_fn in (
+        ("clerk_http", login_with_clerk_http),
+        ("playwright", login_with_playwright),
+    ):
+        try:
+            return await login_fn(email, password)
+        except RuntimeError as exc:
+            logger.warning("refresh %s failed: %s", method_name, exc)
+            errors.append(f"{method_name}: {exc}")
+        except Exception as exc:
+            if method_name == "playwright" and _is_transient_playwright_error(exc):
+                logger.warning("refresh playwright transient: %s", exc)
+                errors.append(f"{method_name}: {exc}")
+                continue
+            raise
+    raise RuntimeError("\n".join(errors))
+
 
 async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | None:
     """Re-login with stored email/password and persist new cookies."""
@@ -29,18 +62,26 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
 
     password = _secrets.decrypt(pwd_enc)
     try:
-        result = await authenticate(email=email, password=password)
+        cookies = await _login_for_refresh(email, password)
+        result = {"cookies": cookies, "method": "refresh"}
     except Exception as exc:
         logger.warning(
             "Session refresh failed account=%s: %s",
             account.get("id"),
             exc,
         )
-        await db.upsert_account(
-            int(account["tg_user_id"]),
-            session_ok=0,
-            last_error=f"Session refresh failed: {exc}",
-        )
+        # Keep session_ok if only Playwright crashed — user can re-login from Telegram.
+        if not _is_transient_playwright_error(exc):
+            await db.upsert_account(
+                int(account["tg_user_id"]),
+                session_ok=0,
+                last_error=f"Session refresh failed: {exc}"[:500],
+            )
+        else:
+            await db.upsert_account(
+                int(account["tg_user_id"]),
+                last_error=f"Session refresh (browser busy): {exc}"[:500],
+            )
         return None
 
     cookies = dict(result["cookies"])
