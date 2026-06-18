@@ -23,10 +23,12 @@ from config import (
 from services.ai_intent import (
     Intent,
     classify,
-    is_funnel_positive_reaction,
     is_commitment_reply,
     is_deposit_confirmation,
+    is_deposit_question,
     is_deferral_reply,
+    is_funnel_positive_reaction,
+    is_messenger_reaction_attachment,
     is_ready_for_registration,
     is_registration_complete,
     is_registration_pending,
@@ -237,7 +239,7 @@ class _CycleSendBuffer:
         *,
         account_id: int,
         uid: str,
-        rest_parallel: int = 10,
+        rest_parallel: int = 12,
     ) -> tuple[set[str], list[tuple]]:
         """Send funnel scripts via REST (local .txt) — faster than Playwright."""
         geo = str(self.account.get("geo") or "zm")
@@ -276,7 +278,7 @@ class _CycleSendBuffer:
                         return None
                     for i, key in enumerate(keys):
                         if i:
-                            await asyncio.sleep(0.35)
+                            await asyncio.sleep(0.2)
                         body = load_script(geo, key)
                         result = await self.client.send_message_spa(
                             cid,
@@ -809,10 +811,22 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
+    is_reaction_only = (
+        is_messenger_reaction_attachment(attachments)
+        or is_funnel_positive_reaction(
+            text, attachments, funnel_step=effective_step
+        )
+    )
+    has_real_image = has_image and not is_messenger_reaction_attachment(attachments)
+
     deposit_signal = (
-        intent == Intent.DEPOSIT_DONE
-        or is_deposit_confirmation(text)
-        or (has_image and effective_step >= 4)
+        not is_reaction_only
+        and not is_deposit_question(text)
+        and (
+            intent == Intent.DEPOSIT_DONE
+            or is_deposit_confirmation(text)
+            or (has_real_image and effective_step >= 6)
+        )
     )
 
     post_intro_followup = bool(
@@ -924,6 +938,23 @@ async def _handle_conversation(
             conv_id, [text], client_name=client_name, channel_id=channel_id
         )
 
+    # Thumbs-up / FB like after link — not a deposit.
+    if (
+        is_reaction_only
+        and needs_reply
+        and effective_step >= 4
+        and effective_step < 7
+    ):
+        logger.info(
+            "conv=%s reaction-only at step=%s — skip deposit escalation",
+            conv_id[:8],
+            effective_step,
+        )
+        await db.save_conversation_state(
+            account_id, conv_id, last_processed_msg_id=msg_id
+        )
+        return "done"
+
     # --- Deposit done / deposit screenshot (never resend 04+05) ---
     if deposit_signal and needs_reply and effective_step >= 4:
         op_outgoing = [
@@ -932,7 +963,7 @@ async def _handle_conversation(
             if _valid_outgoing_reply(m)
         ]
         gid = extract_id_from_text(text, geo=geo)
-        if not gid and has_image:
+        if not gid and has_real_image:
             img_url = ""
             for att in attachments:
                 if att.get("type") == "image":
@@ -943,7 +974,7 @@ async def _handle_conversation(
                     img_url, _settings.openai_api_key, geo=geo
                 )
 
-        if has_image:
+        if has_real_image:
             deposit_reason = "Клиент прислал скрин — проверьте депозит"
         elif is_deposit_confirmation(text):
             deposit_reason = (
@@ -1572,7 +1603,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
         n_enabled = len(enabled)
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "24")))
+        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "32")))
         batch_env = (os.getenv("PAGER_BROWSER_BATCH_SIZE") or "").strip()
         try:
             batch_env_n = int(batch_env) if batch_env else 0
@@ -1591,8 +1622,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         if n_enabled <= 1:
             max_plans = min(24, base_plans)
         elif no_status_n > 15:
-            max_plans = min(20, base_plans)
-            batch_chunk = max(batch_chunk, 10)
+            max_plans = min(28, base_plans)
+            batch_chunk = max(batch_chunk, 12)
             browser_parallel = min(max(browser_parallel, 4), 6)
         elif no_status_n > 8:
             max_plans = min(12, base_plans)
@@ -1602,7 +1633,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             account, cookies, org_slug=org_slug
         )
         funnel_cap = max(8, (max_plans * 2 + 1) // 3)
-        max_handle = max(24, int(os.getenv("PAGER_MAX_HANDLE", "56") or "56"))
+        max_handle = max(32, int(os.getenv("PAGER_MAX_HANDLE", "72") or "72"))
         logger.info(
             "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s "
             "max_handle=%s (no_status=%s)",

@@ -165,7 +165,13 @@ _AR_DEFERRAL = re.compile(
     r"بكرة|كمان شويه|مش دلوقتي|بعدين|مش جاهز|مش دلوقت|بعدين"
 )
 _AR_DEPOSIT = re.compile(
-    r"إيداع|ايداع|عملت إيداع|عملت ايداع|حطيت|ودعت|عملت ديبوزيت"
+    r"عملت إيداع|عملت ايداع|حطيت|ودعت|عملت ديبوزيت|"
+    r"خلصت.*إيداع|خلصت.*ايداع|عملت.*إيداع|عملت.*ايداع"
+)
+_AR_DEPOSIT_QUESTION = re.compile(
+    r"في ايه|فى ايه|فيم|بكم|كام|ازاي|إزاي|كيف|وين|فين|ايه|إيه|؟|\?|بالظبط|"
+    r"how much|what.*deposit|where.*deposit|which.*deposit",
+    re.I,
 )
 _AR_COMPLAINT = re.compile(r"نصب|كذب|خسارة|سرق|احتيال|غش")
 _AR_APP = re.compile(
@@ -369,10 +375,28 @@ def is_ready_for_registration(text: str) -> bool:
     return False
 
 
+def is_deposit_question(text: str) -> bool:
+    """«اعمل ايداع في ايه» — asking about deposit, not confirming."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_DEPOSIT_QUESTION.search(t) and re.search(
+        r"إيداع|ايداع|deposit", t, re.I
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(how much|what (amount|to deposit)|where (do i|to) deposit)\b",
+            t,
+            re.I,
+        )
+    )
+
+
 def is_deposit_confirmation(text: str) -> bool:
     """Client says they deposited — never resend registration scripts."""
     t = (text or "").strip()
-    if not t:
+    if not t or is_deposit_question(t):
         return False
     if _AR_DEPOSIT.search(t):
         return True
@@ -426,6 +450,8 @@ def _classify_arabic(t: str) -> Intent | None:
         return Intent.GAME_ID_TEXT
     if _AR_COMPLAINT.search(t):
         return Intent.COMPLAINT
+    if is_deposit_question(t):
+        return Intent.QUESTION
     if _AR_DEPOSIT.search(t):
         return Intent.DEPOSIT_DONE
     if is_registration_confirmed(t):
