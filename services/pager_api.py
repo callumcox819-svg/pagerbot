@@ -49,7 +49,14 @@ def message_delivered(result: Any) -> bool:
     if result.get("isDelivered") is True:
         return True
     fb_id = str(result.get("facebookMessageId") or "").strip()
-    return bool(fb_id)
+    if fb_id:
+        return True
+    # SPA optimistic POST — accepted before FB assigns id
+    if result.get("optimistic") is True:
+        mid = str(result.get("id") or result.get("messageId") or "").strip()
+        if mid or str(result.get("authorId") or "").strip():
+            return True
+    return False
 
 
 def message_accepted(result: Any, operator_id: str = "") -> bool:
@@ -928,6 +935,14 @@ class PagerClient:
         )
         if not isinstance(result, dict):
             raise PagerAPIError(502, '{"error":"empty message response"}')
+        logger.info(
+            "SPA send conv=%s user=%s chars=%s fb=%s delivered=%s",
+            conv_id[:8],
+            (uid or "")[:16],
+            len(text),
+            str(result.get("facebookMessageId") or "")[:12],
+            result.get("isDelivered"),
+        )
         return result
 
     async def take_conversation(self, conv_id: str, user_id: str) -> bool:

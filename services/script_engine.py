@@ -383,7 +383,11 @@ def resolve_funnel_scripts(
                 or is_funnel_positive_reaction(
                     t, attachments, funnel_step=effective_step
                 )
-                or re.search(r"استثمر|أريد أن|اريد ان|أنا مهتم", t, re.I)
+                or re.search(
+                    r"استثمر|أريد أن|اريد ان|أنا مهتم|موضوع|شغل|ازاي|إزاي",
+                    t,
+                    re.I,
+                )
             ):
                 return ["02_how_it_works"]
             return []

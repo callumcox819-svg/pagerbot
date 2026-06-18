@@ -255,11 +255,13 @@ class _CycleSendBuffer:
             return set(), jobs
 
         sem = asyncio.Semaphore(max(1, rest_parallel))
+        job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "45"))
 
         async def _one(job: tuple) -> str | None:
             cid, _texts, _client, channel_hint, keys, _patches = job
             keys = filter_auto_script_keys(list(keys or []))
-            async with sem:
+
+            async def _run() -> str | None:
                 try:
                     conv = await self.client.open_conversation(cid)
                     ch = (channel_hint or "").strip()
@@ -284,8 +286,20 @@ class _CycleSendBuffer:
                             conv=conv,
                         )
                         if not message_accepted(result, uid):
+                            logger.warning(
+                                "REST script not accepted conv=%s key=%s author=%s fb=%s",
+                                cid[:8],
+                                key,
+                                str(result.get("authorId") or "")[:16],
+                                str(result.get("facebookMessageId") or "")[:12],
+                            )
                             return None
                     await self.client.mark_conversation_read(cid, user_id=uid)
+                    logger.info(
+                        "REST script ok conv=%s keys=%s",
+                        cid[:8],
+                        keys,
+                    )
                     return cid
                 except Exception as exc:
                     logger.warning(
@@ -293,6 +307,17 @@ class _CycleSendBuffer:
                         cid[:8],
                         keys,
                         exc,
+                    )
+                    return None
+
+            async with sem:
+                try:
+                    return await asyncio.wait_for(_run(), timeout=job_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "REST script timeout conv=%s keys=%s",
+                        cid[:8],
+                        keys,
                     )
                     return None
 
@@ -790,7 +815,7 @@ async def _handle_conversation(
         or (has_image and effective_step >= 4)
     )
 
-    post_intro_followup = (
+    post_intro_followup = bool(
         needs_reply
         and effective_step >= 1
         and effective_step < 4
@@ -802,12 +827,13 @@ async def _handle_conversation(
             or is_funnel_positive_reaction(
                 text, attachments, funnel_step=effective_step
             )
-            or intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.QUESTION)
+            or intent
+            in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.QUESTION)
             or (
                 intent == Intent.UNKNOWN
                 and geo == "eg"
                 and re.search(
-                    r"استثمر|أريد|اريد|ايو|نجرب|مهتم|تمام|نعم",
+                    r"استثمر|أريد|اريد|ايو|نجرب|مهتم|تمام|نعم|موضوع|شغل|ازاي|إزاي",
                     text or "",
                     re.I,
                 )
