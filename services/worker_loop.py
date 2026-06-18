@@ -521,9 +521,22 @@ async def _escalate_once(
 ) -> bool:
     """Notify operator once per inbound message; return True if sent."""
     fresh = await db.get_conversation_state(account_id, conv_id)
-    if msg_id and msg_id == str(fresh.get("last_escalation_msg_id") or ""):
+    esc_msg = str(fresh.get("last_escalation_msg_id") or "")
+    if msg_id and esc_msg and msg_id == esc_msg:
         logger.info(
             "conv=%s skip duplicate escalation msg=%s",
+            conv_id[:8],
+            msg_id[:8],
+        )
+        return False
+    if (
+        msg_id
+        and fresh.get("pause_scripts")
+        and msg_id == str(fresh.get("last_processed_msg_id") or "")
+        and esc_msg
+    ):
+        logger.info(
+            "conv=%s skip duplicate escalation (paused) msg=%s",
             conv_id[:8],
             msg_id[:8],
         )
@@ -735,11 +748,6 @@ async def _handle_conversation(
                     attachments,
                     funnel_step=max(effective_step_early, 1),
                 )
-                or (
-                    geo == "eg"
-                    and is_no_status(conv)
-                    and pre_intent in (Intent.UNKNOWN, Intent.QUESTION)
-                )
             )
         )
         if state.get("pause_scripts") and not deposit_funnel_early and not funnel_retry:
@@ -759,24 +767,19 @@ async def _handle_conversation(
                 conv_id[:8],
             )
             return "paused"
-        if funnel_retry and (
-            state.get("pause_scripts")
-            or msg_id == str(state.get("last_escalation_msg_id") or "")
-        ) and pre_intent != Intent.COMPLAINT:
+        if funnel_retry and state.get("pause_scripts") and pre_intent != Intent.COMPLAINT:
             logger.info(
-                "conv=%s funnel retry — clearing escalation pause",
+                "conv=%s funnel retry — unpausing scripts (keep escalation dedupe)",
                 conv_id[:8],
             )
             await db.save_conversation_state(
                 account_id,
                 conv_id,
                 pause_scripts=0,
-                last_escalation_msg_id="",
             )
             state = {
                 **state,
                 "pause_scripts": 0,
-                "last_escalation_msg_id": "",
             }
         logger.info(
             "conv=%s retry: was marked processed but no reply sent",
