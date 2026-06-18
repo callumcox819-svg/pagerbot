@@ -538,6 +538,7 @@ class PagerClient:
         """Chats for enabled channels (legacy geo rules or per-channel folder pick)."""
         from services.status_ids import (
             ACTIVE_FUNNEL_STATUS_IDS,
+            ALL_INBOX_FOLDER_ID,
             NO_STATUS_FOLDER_ID,
             is_no_status,
             process_funnel_folders,
@@ -596,7 +597,19 @@ class PagerClient:
             return str(conv.get("statusId") or "") in allowed
 
         async def _collect_by_folders(channel_id: str, allowed: set[str]) -> None:
-            # Pager «Всі» = one inbox per channel; filter by enabled folder ids.
+            # Pager tab «Всі» — full channel inbox (all status folders).
+            if ALL_INBOX_FOLDER_ID in allowed:
+                for page in range(1, max(max_pages, 20) + 1):
+                    convs = await self.list_conversations(
+                        page=page,
+                        page_size=100,
+                        channel_id=channel_id,
+                    )
+                    if not convs:
+                        break
+                    _add(convs)
+                return
+            # Several status folders — one inbox scan, filter by enabled ids.
             if len(allowed) > 1:
                 pages = max(max_pages, 15)
                 for page in range(1, pages + 1):

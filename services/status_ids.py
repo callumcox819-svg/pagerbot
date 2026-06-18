@@ -22,6 +22,9 @@ ACTIVE_FUNNEL_STATUS_IDS: frozenset[str] = frozenset(
 
 NO_STATUS_FOLDER_ID = ""
 
+# Virtual folder — Pager inbox tab «Всі» / «Все» (all statuses, one channel scan).
+ALL_INBOX_FOLDER_ID = "*"
+
 EXCELLENT = "Excellent 👍"
 
 # Terminal folders — do not auto-reply; patch_status INTO them is still allowed.

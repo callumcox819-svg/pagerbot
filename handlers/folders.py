@@ -13,6 +13,7 @@ from config import load_settings
 from handlers.pager_account import _pager_client, _secrets
 from keyboards.main_menu import folders_kb
 from services.pager_api import PagerAPIError
+from services.status_ids import ALL_INBOX_FOLDER_ID
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -51,27 +52,29 @@ def _folders_text(folder_rows: list[dict], *, synced: int = 0) -> str:
     enabled = sum(1 for r in folder_rows if r.get("enabled"))
     total = len(folder_rows)
     all_on = total > 0 and enabled == total
-    only_no_status = (
-        enabled == 1
-        and folder_rows
-        and folder_rows[0].get("enabled")
-        and not folder_rows[0].get("status_id")
-    )
+    enabled_ids = {
+        str(r.get("status_id", ""))
+        for r in folder_rows
+        if r.get("enabled")
+    }
     head = f"Папок в Pager: {synced}\n\n" if synced else ""
     hint = ""
-    if only_no_status:
+    if ALL_INBOX_FOLDER_ID in enabled_ids:
         hint = (
-            "\n\n⚠️ Сейчас бот смотрит <b>только «Без статусу»</b>.\n"
-            "Вкладка «Всі» в Pager — это <b>все папки сразу</b>.\n"
-            "Нажмите <b>📂 Включить все</b> или отметьте «В процесі», «рега» и др."
+            "\n\n✅ <b>«Всі»</b> включена — бот берёт чаты как во вкладке "
+            "Pager «Всі» (все статусы)."
+        )
+    elif enabled_ids == {""}:
+        hint = (
+            "\n\n⚠️ Только «Без статусу». Включите <b>«Всі (все чаты)»</b> "
+            "или нажмите <b>📂 Включить все</b>."
         )
     elif all_on:
-        hint = "\n\n✅ Все папки включены — бот видит чаты как во вкладке «Всі»."
+        hint = "\n\n✅ Все папки включены."
     return (
         f"{head}"
-        "Отметьте <b>папки статусов</b> — откуда бот берёт чаты.\n"
-        f"Включено: <b>{enabled}</b> из <b>{total}</b>\n\n"
-        "Кнопка «Включить все» ≠ вкладка Pager «Всі» — это список папок ниже."
+        "Отметьте папки — откуда бот берёт чаты.\n"
+        f"Включено: <b>{enabled}</b> из <b>{total}</b>"
         f"{hint}\n\n"
         "Каналы (страницы FB) — в 📡 Каналы."
     )

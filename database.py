@@ -9,6 +9,7 @@ from typing import Any
 import aiosqlite
 
 from config import load_settings
+from services.status_ids import ALL_INBOX_FOLDER_ID
 
 _settings = load_settings()
 DB_PATH = _settings.db_path
@@ -434,7 +435,7 @@ async def has_folder_config(account_id: int) -> bool:
 
 
 async def ensure_channel_folder_defaults(account_id: int, channel_id: str) -> None:
-    """First open: only «Без статусу» enabled."""
+    """First open: enable Pager «Всі» inbox tab by default."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
@@ -445,13 +446,29 @@ async def ensure_channel_folder_defaults(account_id: int, channel_id: str) -> No
         )
         row = await cur.fetchone()
         if row and int(row[0] or 0) > 0:
+            cur2 = await db.execute(
+                """
+                SELECT 1 FROM pager_channel_folders
+                WHERE account_id = ? AND channel_id = ? AND status_id = ?
+                """,
+                (account_id, channel_id, ALL_INBOX_FOLDER_ID),
+            )
+            if not await cur2.fetchone():
+                await db.execute(
+                    """
+                    INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
+                    VALUES (?, ?, ?, 1)
+                    """,
+                    (account_id, channel_id, ALL_INBOX_FOLDER_ID),
+                )
+                await db.commit()
             return
         await db.execute(
             """
             INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
             VALUES (?, ?, ?, 1)
             """,
-            (account_id, channel_id, ""),
+            (account_id, channel_id, ALL_INBOX_FOLDER_ID),
         )
         await db.commit()
 
@@ -477,10 +494,15 @@ async def list_channel_folder_rows(
         }
     rows: list[dict[str, Any]] = [
         {
+            "status_id": ALL_INBOX_FOLDER_ID,
+            "name": "Всі (все чаты)",
+            "enabled": enabled_map.get(ALL_INBOX_FOLDER_ID, 0),
+        },
+        {
             "status_id": "",
             "name": "Без статусу",
             "enabled": enabled_map.get("", 0),
-        }
+        },
     ]
     for st in statuses:
         sid = str(st["status_id"])
