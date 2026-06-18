@@ -13,7 +13,13 @@ from typing import Any
 from aiogram import Bot
 
 import database as db
-from config import load_settings, resolve_account_operator_id, resolve_pager_org_id, resolve_operator_user_id
+from config import (
+    SCRIPTS_DIR,
+    load_settings,
+    resolve_account_operator_id,
+    resolve_pager_org_id,
+    resolve_operator_user_id,
+)
 from services.ai_intent import (
     Intent,
     classify,
@@ -216,7 +222,16 @@ class _CycleSendBuffer:
                 patch["pause_scripts"] = 1
             await db.save_conversation_state(account_id, conv_id, **patch)
 
-    async def _flush_rest_intros(
+    def _rest_script_keys_ok(self, keys: list[str], geo: str) -> bool:
+        keys = filter_auto_script_keys(list(keys or []))
+        if not keys:
+            return False
+        for key in keys:
+            if not (SCRIPTS_DIR / geo / f"{key}.txt").is_file():
+                return False
+        return True
+
+    async def _flush_rest_scripts(
         self,
         jobs: list[tuple],
         *,
@@ -224,15 +239,14 @@ class _CycleSendBuffer:
         uid: str,
         rest_parallel: int = 10,
     ) -> tuple[set[str], list[tuple]]:
-        """Send 01_intro via REST API — much faster than Playwright per chat."""
+        """Send funnel scripts via REST (local .txt) — faster than Playwright."""
         geo = str(self.account.get("geo") or "zm")
-        intro_text = load_script(geo, "01_intro")
         eligible: list[tuple] = []
         browser_jobs: list[tuple] = []
         for job in jobs:
-            cid, texts, _client, channel_hint, keys, _patches = job
+            cid, texts, _client, _channel_hint, keys, _patches = job
             keys = filter_auto_script_keys(list(keys or []))
-            if not texts and keys == ["01_intro"]:
+            if not texts and keys and self._rest_script_keys_ok(keys, geo):
                 eligible.append(job)
             else:
                 browser_jobs.append(job)
@@ -241,15 +255,15 @@ class _CycleSendBuffer:
             return set(), jobs
 
         sem = asyncio.Semaphore(max(1, rest_parallel))
-        ok: set[str] = set()
 
         async def _one(job: tuple) -> str | None:
-            cid, _texts, _client, channel_hint, _keys, _patches = job
+            cid, _texts, _client, channel_hint, keys, _patches = job
+            keys = filter_auto_script_keys(list(keys or []))
             async with sem:
                 try:
+                    conv = await self.client.open_conversation(cid)
                     ch = (channel_hint or "").strip()
-                    if not ch:
-                        conv = await self.client.open_conversation(cid)
+                    if not ch and conv:
                         ch = str(conv.get("channelId") or "").strip()
                         nested = conv.get("channel")
                         if not ch and isinstance(nested, dict):
@@ -258,25 +272,35 @@ class _CycleSendBuffer:
                         return None
                     if not await self.client.take_conversation(cid, uid):
                         return None
-                    result = await self.client.send_message(
-                        cid,
-                        intro_text,
-                        channel_id=ch,
-                        author_id=uid,
-                    )
-                    if not message_accepted(result, uid):
-                        return None
+                    for i, key in enumerate(keys):
+                        if i:
+                            await asyncio.sleep(0.35)
+                        body = load_script(geo, key)
+                        result = await self.client.send_message_spa(
+                            cid,
+                            body,
+                            user_id=uid,
+                            channel_id=ch,
+                            conv=conv,
+                        )
+                        if not message_accepted(result, uid):
+                            return None
                     await self.client.mark_conversation_read(cid, user_id=uid)
                     return cid
                 except Exception as exc:
-                    logger.warning("REST intro failed conv=%s: %s", cid[:8], exc)
+                    logger.warning(
+                        "REST script failed conv=%s keys=%s: %s",
+                        cid[:8],
+                        keys,
+                        exc,
+                    )
                     return None
 
         results = await asyncio.gather(*(_one(job) for job in eligible))
         ok = {cid for cid in results if cid}
         if ok:
             logger.info(
-                "REST intro delivered=%s/%s (browser skipped)",
+                "REST scripts delivered=%s/%s (browser skipped)",
                 len(ok),
                 len(eligible),
             )
@@ -317,7 +341,7 @@ class _CycleSendBuffer:
         account_id = int(self.account["id"])
         uid = self.pager_user_id
 
-        rest_ok, jobs = await self._flush_rest_intros(
+        rest_ok, jobs = await self._flush_rest_scripts(
             jobs, account_id=account_id, uid=uid
         )
         ok_total.update(rest_ok)
@@ -779,6 +803,15 @@ async def _handle_conversation(
                 text, attachments, funnel_step=effective_step
             )
             or intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.QUESTION)
+            or (
+                intent == Intent.UNKNOWN
+                and geo == "eg"
+                and re.search(
+                    r"استثمر|أريد|اريد|ايو|نجرب|مهتم|تمام|نعم",
+                    text or "",
+                    re.I,
+                )
+            )
         )
     )
 

@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -819,6 +821,114 @@ class PagerClient:
                 return True
             await asyncio.sleep(0.5)
         return False
+
+    async def _operator_image_url(
+        self, user_id: str, conv: dict[str, Any] | None = None
+    ) -> str:
+        uid = (user_id or "").strip()
+        if conv:
+            resp_user = conv.get("responsibleUser") or conv.get("responsibleuser") or {}
+            if isinstance(resp_user, dict):
+                url = str(resp_user.get("imageUrl") or "").strip()
+                if url:
+                    return url
+        if not uid:
+            return ""
+        try:
+            org_id = await self._ensure_org_id()
+            data = await self._request(
+                "GET",
+                "/api/organizationMember",
+                params={"orgId": org_id},
+            )
+            members = data if isinstance(data, list) else []
+            for member in members:
+                if not isinstance(member, dict):
+                    continue
+                user = member.get("user") if isinstance(member.get("user"), dict) else {}
+                mid = str(
+                    member.get("userId")
+                    or member.get("pagerUserId")
+                    or user.get("id")
+                    or member.get("id")
+                    or ""
+                ).strip()
+                if mid == uid:
+                    return str(
+                        member.get("imageUrl") or user.get("imageUrl") or ""
+                    ).strip()
+        except PagerAPIError:
+            pass
+        return ""
+
+    async def send_message_spa(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        user_id: str = "",
+        channel_id: str = "",
+        conv: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/message with SPA payload (author.imageUrl required)."""
+        uid = self.operator_user_id(user_id)
+        org_id = await self._ensure_org_id()
+        referer = self._chat_referer(conv_id)
+        conv_data: dict[str, Any] = dict(conv or {})
+        if not conv_data:
+            opened = await self.open_conversation(conv_id)
+            if opened:
+                conv_data = opened
+
+        ch = (channel_id or str(conv_data.get("channelId") or "")).strip()
+        nested = conv_data.get("channel")
+        if not ch and isinstance(nested, dict):
+            ch = str(nested.get("id") or "").strip()
+        if not ch:
+            raise PagerAPIError(
+                400,
+                json.dumps({"error": "channelId missing", "conv": conv_id[:8]}),
+            )
+
+        recipient = str(
+            conv_data.get("clientPSID")
+            or conv_data.get("clientPsid")
+            or conv_data.get("recipient")
+            or (conv_data.get("client") or {}).get("psid")
+            or (conv_data.get("client") or {}).get("PSID")
+            or ""
+        ).strip()
+        image_url = await self._operator_image_url(uid, conv_data)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        payload: dict[str, Any] = {
+            "id": str(uuid.uuid4()),
+            "channelId": ch,
+            "text": text,
+            "conversationId": conv_id,
+            "messageDirection": "outgoing",
+            "authorId": uid,
+            "author": {"id": uid, "imageUrl": image_url or ""},
+            "recipient": recipient,
+            "createdAt": now,
+            "updatedAt": now,
+            "lastMessageAt": now,
+            "optimistic": True,
+            "isDelivered": None,
+            "replyToMessageId": None,
+        }
+        params: dict[str, Any] = {"orgId": org_id}
+        if uid:
+            params["userId"] = uid
+        result = await self._request(
+            "POST",
+            "/api/message",
+            params=params,
+            json_body=payload,
+            referer=referer,
+        )
+        if not isinstance(result, dict):
+            raise PagerAPIError(502, '{"error":"empty message response"}')
+        return result
 
     async def take_conversation(self, conv_id: str, user_id: str) -> bool:
         """Assign + take chat for operator (UI «Тех Саппорт взяв(-ла) чат»)."""

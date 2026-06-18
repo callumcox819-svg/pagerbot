@@ -371,7 +371,8 @@ def resolve_funnel_scripts(
                     or is_funnel_positive_reaction(
                         t, attachments, funnel_step=effective_step
                     )
-                    or intent in ("ready", "positive", "question")
+                    or intent in ("ready", "positive", "question", "interested")
+                    or re.search(r"استثمر|أريد|اريد|ايو|نجرب|مهتم|تمام", t, re.I)
                 ):
                     return _eg_reg_scripts()
                 return []
@@ -382,6 +383,7 @@ def resolve_funnel_scripts(
                 or is_funnel_positive_reaction(
                     t, attachments, funnel_step=effective_step
                 )
+                or re.search(r"استثمر|أريد أن|اريد ان|أنا مهتم", t, re.I)
             ):
                 return ["02_how_it_works"]
             return []

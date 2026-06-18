@@ -54,7 +54,9 @@ _GAME_ID_EG = re.compile(r"\b17\d{6,}\b")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _AR_INTERESTED = re.compile(
     r"مهتم|اهتم|عايز|عاوز|حابب|حابة|ابي|أبي|عاوزه|عايزه|محتاج|مساعد|ساعد|ممكن|"
-    r"ارغب|أرغب|انضم|أنضم|انضمام|أنضمام|حابب اعرف|عايز اعرف"
+    r"ارغب|أرغب|انضم|أنضم|انضمام|أنضمام|حابب اعرف|عاوز اعرف|"
+    r"استثمر|أستثمر|استثمار|أريد أن|اريد ان|أريد الاستثمار|اريد الاستثمار|"
+    r"أنا مهتم|انا مهتم"
 )
 _AR_JOIN_DETAILS = re.compile(
     r"اعمل\s*ايه|أعمل\s*ايه|اعمل\s*إيه|أعمل\s*إيه|"
@@ -144,8 +146,8 @@ def is_funnel_positive_reaction(
 
 
 _AR_POSITIVE = re.compile(
-    r"تمام|أيوه|ايوه|آه|اه|اوك|نعم|يلا|بينا|ماشي|حاضر|طيب|كويس|"
-    r"ياريت|اكيد|أكيد|طبعا|حلو|جميل"
+    r"تمام|أيوه|ايوه|ايو|آه|اه|اوك|نعم|يلا|بينا|ماشي|حاضر|طيب|كويس|"
+    r"ياريت|اكيد|أكيد|طبعا|حلو|جميل|نجرب|موافق|معاك"
 )
 _AR_DETAILS = re.compile(
     r"قولي|قول|تفاصيل|فهمني|اشرح|علمني|ازاي|إزاي|وضح|فهمني"
@@ -434,7 +436,19 @@ def _classify_arabic(t: str) -> Intent | None:
         return Intent.INTERESTED
     if _AR_INTERESTED.search(t) or _AR_DETAILS.search(t):
         return Intent.INTERESTED
-    if re.fullmatch(r"تم\.?", t.strip()) or t.strip() in ("تم", "تمام", "ماشي", "معك", "موافق"):
+    if re.fullmatch(r"تم\.?", t.strip()) or t.strip() in (
+        "تم",
+        "تمام",
+        "ماشي",
+        "معك",
+        "موافق",
+        "ايو",
+        "ايوه",
+        "آه",
+        "اه",
+        "نعم",
+        "نجرب",
+    ):
         return Intent.POSITIVE
     if "من مصر" in t or "مصري" in t:
         return Intent.INTERESTED
