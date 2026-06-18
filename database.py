@@ -565,6 +565,7 @@ async def build_channel_folders_map(
     account_id: int, enabled_channel_ids: set[str]
 ) -> dict[str, set[str] | None] | None:
     """Enabled status folders applied to all enabled channels."""
+    await ensure_account_folder_defaults(account_id)
     account_folders = await get_account_enabled_folders(account_id)
     if account_folders is not None:
         return {cid: account_folders for cid in enabled_channel_ids}

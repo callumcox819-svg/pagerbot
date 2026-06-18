@@ -484,6 +484,8 @@ class PagerClient:
             "pageSize": page_size,
             "page": page,
         }
+        if channel_id:
+            params["channelId"] = channel_id
         if status_id is not None:
             params["statusId"] = status_id
         try:
@@ -591,59 +593,58 @@ class PagerClient:
                             break
                         _add(convs)
 
-        def _folder_allowed(conv: dict, allowed: set[str]) -> bool:
-            if is_no_status(conv):
-                return NO_STATUS_FOLDER_ID in allowed
-            return str(conv.get("statusId") or "") in allowed
+        async def _resolve_allowed(allowed: set[str]) -> set[str]:
+            if ALL_INBOX_FOLDER_ID not in allowed:
+                return allowed
+            statuses = await self.list_statuses_api()
+            return {NO_STATUS_FOLDER_ID} | {
+                s["status_id"] for s in statuses if s.get("status_id")
+            }
+
+        async def _collect_no_status(channel_id: str) -> None:
+            for page in range(1, max(max_pages, 15) + 1):
+                convs = await self.list_conversations(
+                    page=page,
+                    page_size=100,
+                    channel_id=channel_id,
+                )
+                if not convs:
+                    break
+                batch = [c for c in convs if is_no_status(c)]
+                _add(batch)
+                if not batch:
+                    break
+
+        async def _collect_status(
+            channel_id: str, status_id: str, *, pages: int
+        ) -> None:
+            for page in range(1, pages + 1):
+                convs = await self.list_conversations(
+                    page=page,
+                    page_size=100,
+                    channel_id=channel_id,
+                    status_id=status_id,
+                )
+                if not convs:
+                    break
+                _add(convs)
 
         async def _collect_by_folders(channel_id: str, allowed: set[str]) -> None:
-            # Pager tab «Всі» — full channel inbox (all status folders).
+            allowed_eff = await _resolve_allowed(allowed)
             if ALL_INBOX_FOLDER_ID in allowed:
-                for page in range(1, max(max_pages, 20) + 1):
-                    convs = await self.list_conversations(
-                        page=page,
-                        page_size=100,
-                        channel_id=channel_id,
-                    )
-                    if not convs:
-                        break
-                    _add(convs)
-                return
-            # Several status folders — one inbox scan, filter by enabled ids.
-            if len(allowed) > 1:
-                pages = max(max_pages, 15)
-                for page in range(1, pages + 1):
-                    convs = await self.list_conversations(
-                        page=page,
-                        page_size=100,
-                        channel_id=channel_id,
-                    )
-                    if not convs:
-                        break
-                    _add([c for c in convs if _folder_allowed(c, allowed)])
-                return
-            for status_id in allowed:
+                logger.info(
+                    "collect «Всі» channel=%s status_folders=%s",
+                    channel_id[:8],
+                    len(allowed_eff) - (1 if NO_STATUS_FOLDER_ID in allowed_eff else 0),
+                )
+            status_pages = max(max_pages, 15 if ALL_INBOX_FOLDER_ID in allowed else 8)
+            for status_id in allowed_eff:
                 if status_id == NO_STATUS_FOLDER_ID:
-                    for page in range(1, max(max_pages, 12) + 1):
-                        convs = await self.list_conversations(
-                            page=page,
-                            page_size=100,
-                            channel_id=channel_id,
-                        )
-                        if not convs:
-                            break
-                        _add([c for c in convs if is_no_status(c)])
+                    await _collect_no_status(channel_id)
                 else:
-                    for page in range(1, max_pages + 1):
-                        convs = await self.list_conversations(
-                            page=page,
-                            page_size=50,
-                            channel_id=channel_id,
-                            status_id=status_id,
-                        )
-                        if not convs:
-                            break
-                        _add(convs)
+                    await _collect_status(
+                        channel_id, status_id, pages=status_pages
+                    )
 
         if not channel_folders:
             await _legacy_global()

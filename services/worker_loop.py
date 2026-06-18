@@ -1507,6 +1507,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 client.session_user_id = _settings.pager_user_id
 
         channel_folders = await db.build_channel_folders_map(account_id, enabled)
+        if channel_folders:
+            sample = next(iter(channel_folders.values()), set()) or set()
+            logger.info(
+                "Worker account=%s: enabled folders=%s",
+                account.get("id"),
+                sorted(sample)[:8],
+            )
 
         try:
             convs = await client.collect_conversations(
@@ -1721,6 +1728,17 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                         funnel_planned += 1
                     else:
                         planned += 1
+                if (
+                    result
+                    and pager_user_id
+                    and not is_no_status(conv)
+                ):
+                    try:
+                        await client.mark_conversation_read(
+                            conv_id, user_id=pager_user_id
+                        )
+                    except Exception:
+                        pass
             except PagerAPIError as exc:
                 logger.warning(
                     "conv API error account=%s conv=%s: %s",
