@@ -702,24 +702,6 @@ async def _handle_conversation(
             "last_escalation_msg_id": "",
         }
 
-    if (
-        geo == "eg"
-        and is_no_status(conv)
-        and effective_step_early < 4
-        and (state.get("pause_scripts") or state.get("last_escalation_msg_id"))
-    ):
-        await db.save_conversation_state(
-            account_id,
-            conv_id,
-            pause_scripts=0,
-            last_escalation_msg_id="",
-        )
-        state = {
-            **state,
-            "pause_scripts": 0,
-            "last_escalation_msg_id": "",
-        }
-
     if _has_failed_ghost_after(last_in_ts):
         logger.warning(
             "conv=%s skip — undelivered ghost in thread (no resend)",
@@ -780,7 +762,7 @@ async def _handle_conversation(
         if funnel_retry and (
             state.get("pause_scripts")
             or msg_id == str(state.get("last_escalation_msg_id") or "")
-        ):
+        ) and pre_intent != Intent.COMPLAINT:
             logger.info(
                 "conv=%s funnel retry — clearing escalation pause",
                 conv_id[:8],
@@ -917,11 +899,6 @@ async def _handle_conversation(
         and msg_id
         and msg_id == str(state.get("last_escalation_msg_id") or "")
         and not reg_confirmed_funnel
-        and not (
-            geo == "eg"
-            and is_no_status(conv)
-            and effective_step_early < 4
-        )
     ):
         logger.info(
             "conv=%s skip — already escalated for this message",
@@ -1103,6 +1080,11 @@ async def _handle_conversation(
             reason=f"Intent: {intent.value}, step {step}",
             last_message=text or "(photo)",
         )
+        if escalated and pager_user_id:
+            try:
+                await client.mark_conversation_read(conv_id, user_id=pager_user_id)
+            except Exception:
+                pass
         return True if escalated else "paused"
 
     actions_sent = False
