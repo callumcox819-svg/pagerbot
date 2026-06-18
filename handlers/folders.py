@@ -49,13 +49,31 @@ async def _sync_statuses(acc: dict) -> int:
 
 def _folders_text(folder_rows: list[dict], *, synced: int = 0) -> str:
     enabled = sum(1 for r in folder_rows if r.get("enabled"))
+    total = len(folder_rows)
+    all_on = total > 0 and enabled == total
+    only_no_status = (
+        enabled == 1
+        and folder_rows
+        and folder_rows[0].get("enabled")
+        and not folder_rows[0].get("status_id")
+    )
     head = f"Папок в Pager: {synced}\n\n" if synced else ""
+    hint = ""
+    if only_no_status:
+        hint = (
+            "\n\n⚠️ Сейчас бот смотрит <b>только «Без статусу»</b>.\n"
+            "Вкладка «Всі» в Pager — это <b>все папки сразу</b>.\n"
+            "Нажмите <b>📂 Включить все</b> или отметьте «В процесі», «рега» и др."
+        )
+    elif all_on:
+        hint = "\n\n✅ Все папки включены — бот видит чаты как во вкладке «Всі»."
     return (
         f"{head}"
         "Отметьте <b>папки статусов</b> — откуда бот берёт чаты.\n"
-        f"Включено: <b>{enabled}</b>\n\n"
-        "Каналы (страницы FB) — в 📡 Каналы.\n"
-        "По умолчанию только «Без статусу»."
+        f"Включено: <b>{enabled}</b> из <b>{total}</b>\n\n"
+        "Кнопка «Включить все» ≠ вкладка Pager «Всі» — это список папок ниже."
+        f"{hint}\n\n"
+        "Каналы (страницы FB) — в 📡 Каналы."
     )
 
 

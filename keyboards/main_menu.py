@@ -56,9 +56,13 @@ def folders_kb(folder_rows: list[dict]) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    all_on = bool(folder_rows) and all(folder.get("enabled") for folder in folder_rows)
     rows.append(
         [
-            InlineKeyboardButton(text="✅ Все", callback_data="fld:on"),
+            InlineKeyboardButton(
+                text="✅ Все папки вкл." if all_on else "📂 Включить все",
+                callback_data="fld:on",
+            ),
             InlineKeyboardButton(text="⬜ Снять все", callback_data="fld:off"),
         ]
     )

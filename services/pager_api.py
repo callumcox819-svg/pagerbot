@@ -590,7 +590,25 @@ class PagerClient:
                             break
                         _add(convs)
 
+        def _folder_allowed(conv: dict, allowed: set[str]) -> bool:
+            if is_no_status(conv):
+                return NO_STATUS_FOLDER_ID in allowed
+            return str(conv.get("statusId") or "") in allowed
+
         async def _collect_by_folders(channel_id: str, allowed: set[str]) -> None:
+            # Pager «Всі» = one inbox per channel; filter by enabled folder ids.
+            if len(allowed) > 1:
+                pages = max(max_pages, 15)
+                for page in range(1, pages + 1):
+                    convs = await self.list_conversations(
+                        page=page,
+                        page_size=100,
+                        channel_id=channel_id,
+                    )
+                    if not convs:
+                        break
+                    _add([c for c in convs if _folder_allowed(c, allowed)])
+                return
             for status_id in allowed:
                 if status_id == NO_STATUS_FOLDER_ID:
                     for page in range(1, max(max_pages, 12) + 1):
