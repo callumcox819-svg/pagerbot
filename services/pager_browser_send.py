@@ -1423,7 +1423,7 @@ async def _batch_send_one_conv(
         org_id=oid,
     )
     if not await _ensure_chat_api_ready(
-        page, conv_id=conv_id, org_id=oid, timeout_ms=30000
+        page, conv_id=conv_id, org_id=oid, timeout_ms=15000
     ):
         await _open_conversation_direct(
             page,
@@ -1434,7 +1434,7 @@ async def _batch_send_one_conv(
             org_id=oid,
         )
         if not await _ensure_chat_api_ready(
-            page, conv_id=conv_id, org_id=oid, timeout_ms=20000
+            page, conv_id=conv_id, org_id=oid, timeout_ms=12000
         ):
             raise RuntimeError(
                 f"Chat API not ready conv={conv_id[:8]} — cannot send"

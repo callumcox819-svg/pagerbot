@@ -123,7 +123,7 @@ def load_settings() -> Settings:
         raise RuntimeError("BOT_TOKEN is required in .env")
 
     db = os.getenv("DATABASE_PATH", "data/bot.db").strip()
-    poll = float(os.getenv("PAGER_POLL_SEC", "45"))
+    poll = float(os.getenv("PAGER_POLL_SEC", "25"))
 
     pager_org_slug = (os.getenv("PAGER_ORG_SLUG") or "").strip()
     pager_org_id = (os.getenv("PAGER_ORG_ID") or "").strip()

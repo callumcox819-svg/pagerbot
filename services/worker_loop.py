@@ -35,6 +35,7 @@ from services.pager_api import (
     PagerClient,
     is_org_id_error,
     is_session_error,
+    message_accepted,
 )
 from services.pager_browser_send import send_batch_via_browser
 from services.session_refresh import refresh_pager_session
@@ -159,6 +160,130 @@ class _CycleSendBuffer:
         if sid:
             self._status_patches.setdefault(conv_id, []).append(sid)
 
+    async def _apply_fresh_cookies(
+        self, fresh_cookies: dict[str, str], account_id: int
+    ) -> None:
+        if not fresh_cookies:
+            return
+        merged = dict(self.client.cookies)
+        merged.update(fresh_cookies)
+        if self.org_id:
+            merged["_pager_org_id"] = self.org_id
+        if self.pager_user_id:
+            merged["_pager_user_id"] = self.pager_user_id
+        self.client.cookies = merged
+        _session_cache[account_id] = (time.time(), dict(merged))
+        try:
+            await db.upsert_account(
+                int(self.account["tg_user_id"]),
+                session_enc=_secrets.encrypt(json.dumps(merged)),
+                session_ok=1,
+            )
+        except Exception:
+            pass
+
+    async def _commit_delivered_async(
+        self,
+        account_id: int,
+        ok_ids: set[str],
+        *,
+        uid: str,
+    ) -> None:
+        for conv_id, fields in self._commits:
+            if conv_id not in ok_ids:
+                continue
+            try:
+                await self.client.mark_conversation_read(conv_id, user_id=uid)
+            except Exception:
+                pass
+            await db.save_conversation_state(
+                account_id, conv_id, send_failures=0, **fields
+            )
+
+    async def _fail_undelivered_async(
+        self,
+        account_id: int,
+        chunk_cids: set[str],
+        ok_ids: set[str],
+    ) -> None:
+        for conv_id, _fields in self._commits:
+            if conv_id not in chunk_cids or conv_id in ok_ids:
+                continue
+            st = await db.get_conversation_state(account_id, conv_id)
+            fails = int(st.get("send_failures") or 0) + 1
+            patch: dict[str, Any] = {"send_failures": fails}
+            if fails >= 5:
+                patch["pause_scripts"] = 1
+            await db.save_conversation_state(account_id, conv_id, **patch)
+
+    async def _flush_rest_intros(
+        self,
+        jobs: list[tuple],
+        *,
+        account_id: int,
+        uid: str,
+        rest_parallel: int = 10,
+    ) -> tuple[set[str], list[tuple]]:
+        """Send 01_intro via REST API — much faster than Playwright per chat."""
+        geo = str(self.account.get("geo") or "zm")
+        intro_text = load_script(geo, "01_intro")
+        eligible: list[tuple] = []
+        browser_jobs: list[tuple] = []
+        for job in jobs:
+            cid, texts, _client, channel_hint, keys, _patches = job
+            keys = filter_auto_script_keys(list(keys or []))
+            if not texts and keys == ["01_intro"]:
+                eligible.append(job)
+            else:
+                browser_jobs.append(job)
+
+        if not eligible:
+            return set(), jobs
+
+        sem = asyncio.Semaphore(max(1, rest_parallel))
+        ok: set[str] = set()
+
+        async def _one(job: tuple) -> str | None:
+            cid, _texts, _client, channel_hint, _keys, _patches = job
+            async with sem:
+                try:
+                    ch = (channel_hint or "").strip()
+                    if not ch:
+                        conv = await self.client.open_conversation(cid)
+                        ch = str(conv.get("channelId") or "").strip()
+                        nested = conv.get("channel")
+                        if not ch and isinstance(nested, dict):
+                            ch = str(nested.get("id") or "").strip()
+                    if not ch:
+                        return None
+                    if not await self.client.take_conversation(cid, uid):
+                        return None
+                    result = await self.client.send_message(
+                        cid,
+                        intro_text,
+                        channel_id=ch,
+                        author_id=uid,
+                    )
+                    if not message_accepted(result, uid):
+                        return None
+                    await self.client.mark_conversation_read(cid, user_id=uid)
+                    return cid
+                except Exception as exc:
+                    logger.warning("REST intro failed conv=%s: %s", cid[:8], exc)
+                    return None
+
+        results = await asyncio.gather(*(_one(job) for job in eligible))
+        ok = {cid for cid in results if cid}
+        if ok:
+            logger.info(
+                "REST intro delivered=%s/%s (browser skipped)",
+                len(ok),
+                len(eligible),
+            )
+            await self._commit_delivered_async(account_id, ok, uid=uid)
+        retry = [job for job in eligible if job[0] not in ok]
+        return ok, browser_jobs + retry
+
     async def flush(self) -> set[str]:
         conv_ids_set = set(self._jobs) | set(self._script_keys)
         if not conv_ids_set:
@@ -188,7 +313,27 @@ class _CycleSendBuffer:
             )
             for cid in conv_ids
         ]
-        chunk_size = self.batch_chunk_size
+        ok_total: set[str] = set()
+        account_id = int(self.account["id"])
+        uid = self.pager_user_id
+
+        rest_ok, jobs = await self._flush_rest_intros(
+            jobs, account_id=account_id, uid=uid
+        )
+        ok_total.update(rest_ok)
+
+        if not jobs:
+            self._jobs.clear()
+            self._script_keys.clear()
+            self._clients.clear()
+            self._channels.clear()
+            self._commits.clear()
+            self._status_patches.clear()
+            self._order.clear()
+            return ok_total
+
+        # One Playwright login per flush — chunking re-authenticates each slice.
+        chunk_size = min(len(jobs), max(self.batch_chunk_size, 48))
         n_chunks = (len(jobs) + chunk_size - 1) // chunk_size
         n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
@@ -200,15 +345,11 @@ class _CycleSendBuffer:
             n_keys,
         )
 
-        ok_total: set[str] = set()
-        account_id = int(self.account["id"])
-        uid = self.pager_user_id
-
         for start in range(0, len(jobs), chunk_size):
             chunk = jobs[start : start + chunk_size]
             chunk_no = start // chunk_size + 1
             waves = (len(chunk) + self.parallel - 1) // self.parallel
-            timeout = min(1200.0, 90.0 + 75.0 * waves)
+            timeout = min(1200.0, 120.0 + 55.0 * waves)
             try:
                 ok, fresh_cookies = await asyncio.wait_for(
                     send_batch_via_browser(
@@ -243,48 +384,12 @@ class _CycleSendBuffer:
                 ok = set()
                 fresh_cookies = {}
 
-            if fresh_cookies:
-                merged = dict(self.client.cookies)
-                merged.update(fresh_cookies)
-                if self.org_id:
-                    merged["_pager_org_id"] = self.org_id
-                if self.pager_user_id:
-                    merged["_pager_user_id"] = self.pager_user_id
-                self.client.cookies = merged
-                _session_cache[account_id] = (time.time(), dict(merged))
-                try:
-                    await db.upsert_account(
-                        int(self.account["tg_user_id"]),
-                        session_enc=_secrets.encrypt(json.dumps(merged)),
-                        session_ok=1,
-                    )
-                except Exception:
-                    pass
+            await self._apply_fresh_cookies(fresh_cookies, account_id)
 
             ok_total.update(ok)
             chunk_cids = {job[0] for job in chunk}
-            for conv_id, fields in self._commits:
-                if conv_id not in chunk_cids:
-                    continue
-                if conv_id in ok:
-                    try:
-                        await self.client.mark_conversation_read(
-                            conv_id, user_id=uid
-                        )
-                    except Exception:
-                        pass
-                    await db.save_conversation_state(
-                        account_id, conv_id, send_failures=0, **fields
-                    )
-                else:
-                    st = await db.get_conversation_state(account_id, conv_id)
-                    fails = int(st.get("send_failures") or 0) + 1
-                    patch: dict[str, Any] = {"send_failures": fails}
-                    if fails >= 5:
-                        patch["pause_scripts"] = 1
-                    await db.save_conversation_state(
-                        account_id, conv_id, **patch
-                    )
+            await self._commit_delivered_async(account_id, ok, uid=uid)
+            await self._fail_undelivered_async(account_id, chunk_cids, ok)
 
             logger.info(
                 "browser batch chunk=%s/%s delivered=%s/%s",
@@ -1423,13 +1528,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             par_env_n = int(par_env) if par_env else 0
         except ValueError:
             par_env_n = 0
-        browser_parallel = par_env_n if par_env_n >= 1 else 2
+        browser_parallel = par_env_n if par_env_n >= 1 else 3
         if n_enabled <= 1:
             max_plans = min(24, base_plans)
         elif no_status_n > 15:
             max_plans = min(20, base_plans)
             batch_chunk = max(batch_chunk, 10)
-            browser_parallel = min(max(browser_parallel, 3), 4)
+            browser_parallel = min(max(browser_parallel, 4), 6)
         elif no_status_n > 8:
             max_plans = min(12, base_plans)
         else:
