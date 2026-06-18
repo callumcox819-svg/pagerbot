@@ -33,6 +33,7 @@ from services.ai_intent import (
     is_registration_complete,
     is_registration_pending,
     needs_human_for_text,
+    wants_details_after_intro,
     wants_registration_followup,
     wants_registration_link,
 )
@@ -53,6 +54,7 @@ from services.script_engine import (
     load_script,
     scripts_for_positive_reply,
     resolve_funnel_scripts,
+    resolve_eg_backlog_fallback,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -700,6 +702,24 @@ async def _handle_conversation(
             "last_escalation_msg_id": "",
         }
 
+    if (
+        geo == "eg"
+        and is_no_status(conv)
+        and effective_step_early < 4
+        and (state.get("pause_scripts") or state.get("last_escalation_msg_id"))
+    ):
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            pause_scripts=0,
+            last_escalation_msg_id="",
+        )
+        state = {
+            **state,
+            "pause_scripts": 0,
+            "last_escalation_msg_id": "",
+        }
+
     if _has_failed_ghost_after(last_in_ts):
         logger.warning(
             "conv=%s skip — undelivered ghost in thread (no resend)",
@@ -732,6 +752,11 @@ async def _handle_conversation(
                     text,
                     attachments,
                     funnel_step=max(effective_step_early, 1),
+                )
+                or (
+                    geo == "eg"
+                    and is_no_status(conv)
+                    and pre_intent in (Intent.UNKNOWN, Intent.QUESTION)
                 )
             )
         )
@@ -841,6 +866,7 @@ async def _handle_conversation(
             or is_funnel_positive_reaction(
                 text, attachments, funnel_step=effective_step
             )
+            or wants_details_after_intro(text)
             or intent
             in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.QUESTION)
             or (
@@ -891,6 +917,11 @@ async def _handle_conversation(
         and msg_id
         and msg_id == str(state.get("last_escalation_msg_id") or "")
         and not reg_confirmed_funnel
+        and not (
+            geo == "eg"
+            and is_no_status(conv)
+            and effective_step_early < 4
+        )
     ):
         logger.info(
             "conv=%s skip — already escalated for this message",
@@ -1215,11 +1246,24 @@ async def _handle_conversation(
                 keys,
                 (folder[:20] if folder else ""),
             )
-    elif needs_reply and not deposit_signal and not keys:
+    if not keys and geo == "eg" and is_no_status(conv):
+        keys = resolve_eg_backlog_fallback(
+            effective_step, op_outgoing, intent.value
+        )
+        if keys:
+            logger.info(
+                "conv=%s EG backlog fallback eff_step=%s keys=%s",
+                conv_id[:8],
+                effective_step,
+                keys,
+            )
+
+    if needs_reply and not deposit_signal and not keys:
         if (
             intent in (Intent.QUESTION, Intent.UNKNOWN)
             and step >= 4
             and not auto_funnel
+            and not (geo == "eg" and is_no_status(conv))
         ):
             escalated = await _escalate_once(
                 bot,
@@ -1248,10 +1292,15 @@ async def _handle_conversation(
         return "no_script"
 
     if not needs_reply and not keys:
-        await db.save_conversation_state(
-            account_id, conv_id, last_processed_msg_id=msg_id
-        )
-        return "done"
+        if geo == "eg" and is_no_status(conv):
+            keys = resolve_eg_backlog_fallback(
+                effective_step, op_outgoing, intent.value
+            )
+        if not keys:
+            await db.save_conversation_state(
+                account_id, conv_id, last_processed_msg_id=msg_id
+            )
+            return "done"
 
     keys = filter_auto_script_keys(keys)
 

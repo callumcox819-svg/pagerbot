@@ -459,6 +459,37 @@ def resolve_funnel_scripts(
     return []
 
 
+def resolve_eg_backlog_fallback(
+    effective_step: int,
+    outgoing_texts: list[str],
+    intent: str = "unknown",
+) -> list[str]:
+    """EG «Без статусу» backlog — advance funnel from history gaps when intent is unknown."""
+    out = outgoing_texts or []
+    intro_sn = script_ui_snippet("01_intro", "eg")
+    how_sn = script_ui_snippet("02_how_it_works", "eg")
+    link_sn = script_ui_snippet("05_link", "eg")
+    intro_sent = script_sent_in_history(out, intro_sn)
+    how_sent = script_sent_in_history(out, how_sn)
+    link_sent = script_sent_in_history(out, link_sn)
+
+    if not intro_sent:
+        return ["01_intro"]
+    if not how_sent and effective_step < 4:
+        return ["02_how_it_works"]
+    if not link_sent and effective_step < 6:
+        return ["04_registration", "05_link"]
+    dep_sn = script_ui_snippet("06_deposit", "eg")
+    if (
+        link_sent
+        and effective_step < 8
+        and not script_sent_in_history(out, dep_sn)
+        and intent in ("joined", "positive", "ready", "deposit_done")
+    ):
+        return ["06_deposit"]
+    return []
+
+
 def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> list[str]:
     """Return script keys to POST in order."""
     if intent == "interested" and step < 1:
