@@ -55,6 +55,7 @@ from services.script_engine import (
     scripts_for_positive_reply,
     resolve_funnel_scripts,
     resolve_eg_backlog_fallback,
+    resolve_zm_backlog_fallback,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -1242,6 +1243,17 @@ async def _handle_conversation(
                 effective_step,
                 keys,
             )
+    if not keys and geo == "zm" and is_no_status(conv):
+        keys = resolve_zm_backlog_fallback(
+            effective_step, op_outgoing, intent.value
+        )
+        if keys:
+            logger.info(
+                "conv=%s ZM backlog fallback eff_step=%s keys=%s",
+                conv_id[:8],
+                effective_step,
+                keys,
+            )
 
     if needs_reply and not deposit_signal and not keys:
         if (
@@ -1279,6 +1291,10 @@ async def _handle_conversation(
     if not needs_reply and not keys:
         if geo == "eg" and is_no_status(conv):
             keys = resolve_eg_backlog_fallback(
+                effective_step, op_outgoing, intent.value
+            )
+        elif geo == "zm" and is_no_status(conv):
+            keys = resolve_zm_backlog_fallback(
                 effective_step, op_outgoing, intent.value
             )
         if not keys:
@@ -1731,7 +1747,6 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 if (
                     result
                     and pager_user_id
-                    and not is_no_status(conv)
                 ):
                     try:
                         await client.mark_conversation_read(

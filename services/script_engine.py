@@ -430,12 +430,20 @@ def resolve_funnel_scripts(
         return []
 
     if effective_step < 3:
-        if intent in ("interested", "ready") or is_ready_for_registration(t):
+        if intent in ("interested", "positive", "ready", "question") or (
+            wants_details_after_intro(t)
+            or is_funnel_positive_reaction(t, attachments, funnel_step=effective_step)
+            or is_ready_for_registration(t)
+        ):
             return ["02_how_it_works", "03_zmw_table"]
         return []
 
     if effective_step < 4:
-        if is_ready_for_registration(t) or intent == "ready":
+        if (
+            is_ready_for_registration(t)
+            or wants_registration_link(t)
+            or intent in ("ready", "interested", "positive", "question")
+        ):
             return ["04_registration", "05_link"]
         return []
 
@@ -456,6 +464,37 @@ def resolve_funnel_scripts(
     if effective_step < 8 and intent == "game_id_text":
         return ["07_game_id"]
 
+    return []
+
+
+def resolve_zm_backlog_fallback(
+    effective_step: int,
+    outgoing_texts: list[str],
+    intent: str = "unknown",
+) -> list[str]:
+    """ZM «Без статусу» — advance funnel when intent did not match templates."""
+    out = outgoing_texts or []
+    intro_sn = script_ui_snippet("01_intro", "zm")
+    how_sn = script_ui_snippet("02_how_it_works", "zm")
+    link_sn = script_ui_snippet("05_link", "zm")
+    intro_sent = script_sent_in_history(out, intro_sn)
+    how_sent = script_sent_in_history(out, how_sn)
+    link_sent = script_sent_in_history(out, link_sn)
+
+    if not intro_sent:
+        return ["01_intro"]
+    if not how_sent and effective_step < 4:
+        return ["02_how_it_works", "03_zmw_table"]
+    if not link_sent and effective_step < 6:
+        return ["04_registration", "05_link"]
+    dep_sn = script_ui_snippet("06_deposit", "zm")
+    if (
+        link_sent
+        and effective_step < 8
+        and not script_sent_in_history(out, dep_sn)
+        and intent in ("joined", "positive", "ready", "deposit_done")
+    ):
+        return ["06_deposit"]
     return []
 
 
