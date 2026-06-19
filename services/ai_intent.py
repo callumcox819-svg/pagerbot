@@ -194,6 +194,13 @@ _REGISTRATION_FOLLOWUP = re.compile(
     r"what is next|what's next|next step|get started|start now)\b",
     re.I,
 )
+_POST_LINK_QUESTION = re.compile(
+    r"\b(what.*(next|come|after|happens|do i)|once.*(click|open|tap).*link|"
+    r"after.*(link|click|register)|next step|what.*(deposit|register)|"
+    r"how.*(deposit|register)|don't have.*\d+|what if you don't|"
+    r"click the link)\b",
+    re.I,
+)
 _DEFERRAL = re.compile(
     r"\b(let you know|when i'?m ready|not ready|maybe later|tomorrow|"
     r"next day|another day|only today|hand cash|unfortunately|"
@@ -238,7 +245,17 @@ def wants_registration_followup(text: str) -> bool:
         return True
     if re.fullmatch(r"explain\??", t, re.I):
         return True
+    if is_post_link_registration_question(t):
+        return True
     return bool(_REGISTRATION_FOLLOWUP.search(t))
+
+
+def is_post_link_registration_question(text: str) -> bool:
+    """After reg link — client asks what to do next (send deposit script, not operator)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_POST_LINK_QUESTION.search(t))
 
 
 def wants_registration_link(text: str) -> bool:
@@ -579,6 +596,15 @@ def needs_human_for_text(
     intent: Intent, step: int, text: str, *, no_status: bool = False, geo: str = "zm"
 ) -> bool:
     if geo == "eg" and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+        return False
+    if (
+        geo == "zm"
+        and no_status
+        and step < 6
+        and intent in (Intent.UNKNOWN, Intent.QUESTION)
+    ):
+        return False
+    if is_post_link_registration_question(text) and step < 7:
         return False
     if is_deferral_reply(text) and step < 6:
         return False

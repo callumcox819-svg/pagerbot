@@ -311,6 +311,7 @@ def resolve_funnel_scripts(
         is_registration_pending,
         wants_details_after_intro,
         wants_registration_link,
+        is_post_link_registration_question,
     )
 
     out = outgoing_texts or []
@@ -454,6 +455,15 @@ def resolve_funnel_scripts(
     if effective_step < 7:
         if intent == "game_id_text":
             return []
+        link_sn = script_ui_snippet("05_link", "zm")
+        link_sent = script_sent_in_history(out, link_sn)
+        if link_sent and effective_step >= 4:
+            dep_sn = script_ui_snippet("06_deposit", "zm")
+            if not script_sent_in_history(out, dep_sn) and (
+                is_post_link_registration_question(t)
+                or intent in ("question", "positive", "interested", "ready")
+            ):
+                return ["06_deposit"]
         if is_registration_confirmed(t) or intent == "joined":
             if should_send_deposit_script(
                 t, effective_step, out, folder_step=0
@@ -492,7 +502,8 @@ def resolve_zm_backlog_fallback(
         link_sent
         and effective_step < 8
         and not script_sent_in_history(out, dep_sn)
-        and intent in ("joined", "positive", "ready", "deposit_done")
+        and intent
+        in ("joined", "positive", "ready", "deposit_done", "question")
     ):
         return ["06_deposit"]
     return []

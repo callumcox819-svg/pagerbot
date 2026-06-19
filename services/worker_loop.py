@@ -29,6 +29,7 @@ from services.ai_intent import (
     is_deferral_reply,
     is_funnel_positive_reaction,
     is_messenger_reaction_attachment,
+    is_post_link_registration_question,
     is_ready_for_registration,
     is_registration_complete,
     is_registration_pending,
@@ -67,6 +68,8 @@ from services.script_engine import (
 from services.status_ids import (
     EXCELLENT,
     ZM_STATUSES,
+    ALL_INBOX_FOLDER_ID,
+    NO_STATUS_FOLDER_ID,
     infer_step_from_status,
     is_no_status,
     process_funnel_folders,
@@ -594,6 +597,21 @@ async def _handle_conversation(
     if not should_process_conversation(conv, geo=geo):
         return False
 
+    allowed_folders = await db.get_account_enabled_folders(account_id)
+    if allowed_folders is not None and ALL_INBOX_FOLDER_ID not in allowed_folders:
+        folder_key = (
+            NO_STATUS_FOLDER_ID
+            if is_no_status(conv)
+            else str(conv.get("statusId") or "")
+        )
+        if folder_key not in allowed_folders:
+            logger.info(
+                "conv=%s skip — folder not enabled (status=%s)",
+                conv_id[:8],
+                (folder_key[:8] if folder_key else "no_status"),
+            )
+            return False
+
     state = await db.get_conversation_state(account_id, conv_id)
     if geo == "zm" and not process_funnel_folders():
         st_step = int(state.get("step") or 0)
@@ -853,6 +871,7 @@ async def _handle_conversation(
                 text, attachments, funnel_step=effective_step
             )
             or wants_details_after_intro(text)
+            or is_post_link_registration_question(text)
             or intent
             in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.QUESTION)
             or (
@@ -1261,6 +1280,7 @@ async def _handle_conversation(
             and step >= 4
             and not auto_funnel
             and not (geo == "eg" and is_no_status(conv))
+            and not (geo == "zm" and is_no_status(conv))
         ):
             escalated = await _escalate_once(
                 bot,
