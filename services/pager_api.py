@@ -536,17 +536,22 @@ class PagerClient:
         max_pages: int = 5,
         geo: str = "zm",
         channel_folders: dict[str, set[str] | None] | None = None,
+        funnel_statuses: dict[str, str] | None = None,
     ) -> list[dict]:
         """Chats for enabled channels (legacy geo rules or per-channel folder pick)."""
         from services.status_ids import (
-            ACTIVE_FUNNEL_STATUS_IDS,
             ALL_INBOX_FOLDER_ID,
+            FUNNEL_GEOS,
             NO_STATUS_FOLDER_ID,
+            funnel_status_ids as _funnel_ids,
             is_no_status,
             process_funnel_folders,
+            resolve_funnel_statuses,
             should_process_conversation,
         )
 
+        fs = funnel_statuses or resolve_funnel_statuses()
+        funnel_ids = _funnel_ids(fs)
         seen: dict[str, dict] = {}
 
         def _add(convs: list[dict]) -> None:
@@ -554,7 +559,7 @@ class PagerClient:
                 ch = str(conv.get("channelId") or "")
                 if ch not in enabled_channel_ids:
                     continue
-                if not should_process_conversation(conv, geo=geo):
+                if not should_process_conversation(conv, geo=geo, funnel_statuses=fs):
                     continue
                 cid = str(conv.get("id") or "")
                 if cid:
@@ -581,8 +586,8 @@ class PagerClient:
                     break
                 _add([c for c in convs if is_no_status(c)])
 
-            if process_funnel_folders():
-                for status_id in ACTIVE_FUNNEL_STATUS_IDS:
+            if process_funnel_folders() or geo in FUNNEL_GEOS:
+                for status_id in funnel_ids:
                     for page in range(1, 3):
                         convs = await self.list_conversations(
                             page=page,
@@ -592,6 +597,21 @@ class PagerClient:
                         if not convs:
                             break
                         _add(convs)
+
+        async def _collect_funnel_continuation(
+            channel_id: str, allowed: set[str] | None
+        ) -> None:
+            """ZM/EG: keep processing chats bot moved into funnel folders."""
+            if geo not in FUNNEL_GEOS:
+                return
+            allowed_eff: set[str] = set()
+            if allowed is not None:
+                allowed_eff = await _resolve_allowed(allowed)
+            pages = max(max_pages, 8)
+            for status_id in funnel_ids:
+                if status_id in allowed_eff:
+                    continue
+                await _collect_status(channel_id, status_id, pages=pages)
 
         async def _resolve_allowed(allowed: set[str]) -> set[str]:
             if ALL_INBOX_FOLDER_ID not in allowed:
@@ -658,6 +678,7 @@ class PagerClient:
             if not allowed:
                 continue
             await _collect_by_folders(channel_id, allowed)
+            await _collect_funnel_continuation(channel_id, allowed)
 
         # «Без статусу» for legacy channels only (no explicit folder config).
         legacy_channels = [
@@ -678,8 +699,8 @@ class PagerClient:
                         and str(c.get("channelId") or "") in legacy_channels
                     ]
                 )
-            if process_funnel_folders():
-                for status_id in ACTIVE_FUNNEL_STATUS_IDS:
+            if process_funnel_folders() or geo in FUNNEL_GEOS:
+                for status_id in funnel_ids:
                     for page in range(1, 3):
                         convs = await self.list_conversations(
                             page=page,

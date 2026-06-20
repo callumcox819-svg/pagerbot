@@ -1,8 +1,9 @@
-"""Default Pager status UUIDs (Zambia org — override per account in DB later)."""
+"""Pager funnel status UUIDs — defaults for ZM org; resolved per account from DB names."""
 
 from __future__ import annotations
 
 import os
+from typing import Any
 
 ZM_STATUSES = {
     "in_progress": "8a100b5d-98b9-4d05-abce-de2572f0bf72",  # В процесі реєстрації
@@ -10,6 +11,15 @@ ZM_STATUSES = {
     "registration": "9742e6f1-1112-4c3e-b7a8-94aee9a57f8b",  # Реєстрація
     "deps_pending": "da62404d-c4f2-4281-bcfe-9ed5d2cbf593",  # Депи не дійшли
 }
+
+_STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
+    "in_progress": ("процесі", "процесс", "in progress", "реєстрації"),
+    "wait_id": ("чекаю id", "чекаю ід", "wait id", "wait_id"),
+    "registration": ("реєстрація", "регистрация", "registration"),
+    "deps_pending": ("депи не", "депы не", "deps pending", "deps"),
+}
+
+FUNNEL_GEOS = frozenset({"zm", "eg"})
 
 # Funnel folders where bot continues scripts (after «Без статусу»).
 ACTIVE_FUNNEL_STATUS_IDS: frozenset[str] = frozenset(
@@ -19,6 +29,32 @@ ACTIVE_FUNNEL_STATUS_IDS: frozenset[str] = frozenset(
         ZM_STATUSES["registration"],
     }
 )
+
+
+def resolve_funnel_statuses(
+    rows: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Map funnel keys to status UUIDs — DB name match, else ZM defaults."""
+    out = dict(ZM_STATUSES)
+    if not rows:
+        return out
+    for key, hints in _STATUS_NAME_HINTS.items():
+        for st in rows:
+            sid = str(st.get("status_id") or "").strip()
+            name = (st.get("name") or "").strip().lower()
+            if sid and name and any(h in name for h in hints):
+                out[key] = sid
+                break
+    return out
+
+
+def funnel_status_ids(funnel_statuses: dict[str, str] | None = None) -> frozenset[str]:
+    fs = funnel_statuses or ZM_STATUSES
+    return frozenset(
+        fs[k]
+        for k in ("in_progress", "wait_id", "registration")
+        if fs.get(k)
+    )
 
 NO_STATUS_FOLDER_ID = ""
 
@@ -78,27 +114,39 @@ def process_funnel_folders() -> bool:
     )
 
 
-def should_process_conversation(conv: dict, *, geo: str = "zm") -> bool:
-    """Process new leads in «Без статусу»; funnel folders only if enabled."""
+def should_process_conversation(
+    conv: dict,
+    *,
+    geo: str = "zm",
+    funnel_statuses: dict[str, str] | None = None,
+) -> bool:
+    """Process «Без статусу» + funnel folders (ZM/EG always continue the bot funnel)."""
     if should_skip_processing(conv):
         return False
-    if geo == "eg":
-        return True
+    active = funnel_status_ids(funnel_statuses)
+    status_id = str(conv.get("statusId") or "").strip()
     if is_no_status(conv):
+        return True
+    if geo in FUNNEL_GEOS and status_id in active:
+        return True
+    if geo == "eg":
         return True
     if not process_funnel_folders():
         return False
-    status_id = str(conv.get("statusId") or "").strip()
-    return status_id in ACTIVE_FUNNEL_STATUS_IDS
+    return status_id in active
 
 
-def infer_step_from_status(conv: dict) -> int:
+def infer_step_from_status(
+    conv: dict,
+    funnel_statuses: dict[str, str] | None = None,
+) -> int:
     """Minimum funnel step implied by Pager folder (link sent, waiting ID, etc.)."""
+    fs = funnel_statuses or ZM_STATUSES
     status_id = str(conv.get("statusId") or "").strip()
-    if status_id == ZM_STATUSES["in_progress"]:
+    if status_id == fs.get("in_progress"):
         return 4
-    if status_id == ZM_STATUSES["wait_id"]:
+    if status_id == fs.get("wait_id"):
         return 6
-    if status_id == ZM_STATUSES["registration"]:
+    if status_id == fs.get("registration"):
         return 7
     return 0

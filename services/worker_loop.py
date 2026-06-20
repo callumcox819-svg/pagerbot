@@ -69,10 +69,12 @@ from services.status_ids import (
     EXCELLENT,
     ZM_STATUSES,
     ALL_INBOX_FOLDER_ID,
+    FUNNEL_GEOS,
     NO_STATUS_FOLDER_ID,
+    funnel_status_ids,
     infer_step_from_status,
     is_no_status,
-    process_funnel_folders,
+    resolve_funnel_statuses,
     should_process_conversation,
 )
 from services.telegram_notify import notify_escalation
@@ -266,8 +268,9 @@ class _CycleSendBuffer:
         job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "45"))
 
         async def _one(job: tuple) -> str | None:
-            cid, _texts, _client, channel_hint, keys, _patches = job
+            cid, _texts, _client, channel_hint, keys, patches = job
             keys = filter_auto_script_keys(list(keys or []))
+            status_patches = list(patches or [])
 
             async def _run() -> str | None:
                 try:
@@ -302,6 +305,21 @@ class _CycleSendBuffer:
                                 str(result.get("facebookMessageId") or "")[:12],
                             )
                             return None
+                    if status_patches:
+                        sid = status_patches[-1]
+                        try:
+                            await self.client.patch_status(cid, sid, user_id=uid)
+                            logger.info(
+                                "REST status patch conv=%s status=%s",
+                                cid[:8],
+                                sid[:8],
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "REST status patch failed conv=%s: %s",
+                                cid[:8],
+                                exc,
+                            )
                     await self.client.mark_conversation_read(cid, user_id=uid)
                     logger.info(
                         "REST script ok conv=%s keys=%s",
@@ -581,6 +599,8 @@ async def _handle_conversation(
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
     geo = str(account.get("geo") or "zm").strip().lower() or "zm"
+    funnel_statuses = account.get("_funnel_statuses") or ZM_STATUSES
+    active_funnel = funnel_status_ids(funnel_statuses)
     if not conv_id:
         return False
 
@@ -594,7 +614,9 @@ async def _handle_conversation(
     if not enabled or channel_id not in enabled:
         return False
 
-    if not should_process_conversation(conv, geo=geo):
+    if not should_process_conversation(
+        conv, geo=geo, funnel_statuses=funnel_statuses
+    ):
         return False
 
     allowed_folders = await db.get_account_enabled_folders(account_id)
@@ -605,22 +627,16 @@ async def _handle_conversation(
             else str(conv.get("statusId") or "")
         )
         if folder_key not in allowed_folders:
-            logger.info(
-                "conv=%s skip — folder not enabled (status=%s)",
-                conv_id[:8],
-                (folder_key[:8] if folder_key else "no_status"),
-            )
-            return False
+            status_id = str(conv.get("statusId") or "").strip()
+            if not (geo in FUNNEL_GEOS and status_id in active_funnel):
+                logger.info(
+                    "conv=%s skip — folder not enabled (status=%s)",
+                    conv_id[:8],
+                    (folder_key[:8] if folder_key else "no_status"),
+                )
+                return False
 
     state = await db.get_conversation_state(account_id, conv_id)
-    if geo == "zm" and not process_funnel_folders():
-        st_step = int(state.get("step") or 0)
-        if state.get("human_takeover") or st_step >= 4:
-            logger.info(
-                "conv=%s skip — handed off after registration link",
-                conv_id[:8],
-            )
-            return "done"
     if int(state.get("send_failures") or 0) >= 5:
         logger.info(
             "conv=%s skipped send_failures=%s (use /reset_pauses)",
@@ -701,7 +717,7 @@ async def _handle_conversation(
         infer_step_from_history(msg_only, pager_user_id, geo=geo),
         infer_step_from_thread(msg_only, geo=geo),
     )
-    folder_step = infer_step_from_status(conv)
+    folder_step = infer_step_from_status(conv, funnel_statuses)
     stored_step = int(state.get("step") or 0)
     effective_step_early = max(hist_step, stored_step, folder_step)
 
@@ -945,8 +961,11 @@ async def _handle_conversation(
     )
 
     if state.get("human_takeover"):
-        logger.info("conv=%s skipped human_takeover", conv_id[:8])
-        return "paused"
+        sid = str(conv.get("statusId") or "").strip()
+        st_step = int(state.get("step") or 0)
+        if sid not in active_funnel and st_step < 4:
+            logger.info("conv=%s skipped human_takeover", conv_id[:8])
+            return "paused"
     if state.get("pause_scripts") and not auto_funnel:
         logger.info("conv=%s skipped pause_scripts", conv_id[:8])
         return "paused"
@@ -1130,7 +1149,7 @@ async def _handle_conversation(
                 await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
                 if pager_user_id:
                     send_buf.queue_status_patch(
-                        conv_id, ZM_STATUSES["registration"]
+                        conv_id, funnel_statuses["wait_id"]
                     )
                 send_buf.queue_commit(
                     conv_id,
@@ -1202,7 +1221,7 @@ async def _handle_conversation(
             )
             if pager_user_id and geo != "eg":
                 send_buf.queue_status_patch(
-                    conv_id, ZM_STATUSES["deps_pending"]
+                    conv_id, funnel_statuses["deps_pending"]
                 )
             send_buf.queue_commit(
                 conv_id, step=9, last_processed_msg_id=msg_id
@@ -1216,7 +1235,7 @@ async def _handle_conversation(
             await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
             if pager_user_id:
                 send_buf.queue_status_patch(
-                    conv_id, ZM_STATUSES["registration"]
+                    conv_id, funnel_statuses["wait_id"]
                 )
             send_buf.queue_commit(
                 conv_id,
@@ -1349,12 +1368,12 @@ async def _handle_conversation(
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     explain_keys = {"02_how_it_works", "03_zmw_table"}
-    reg_handoff = geo == "zm" and bool(reg_keys.intersection(keys))
+    reg_handoff = geo in FUNNEL_GEOS and bool(reg_keys.intersection(keys))
     if reg_handoff:
         new_step = 4
         if pager_user_id:
             send_buf.queue_status_patch(
-                conv_id, ZM_STATUSES["in_progress"]
+                conv_id, funnel_statuses["in_progress"]
             )
     elif explain_keys.intersection(keys):
         new_step = max(new_step, 2 if geo == "eg" else 3)
@@ -1364,12 +1383,14 @@ async def _handle_conversation(
         new_step = max(new_step, 7)
         if pager_user_id:
             send_buf.queue_status_patch(
-                conv_id, ZM_STATUSES["registration"]
+                conv_id, funnel_statuses["wait_id"]
             )
     elif "07_game_id" in keys:
         new_step = max(new_step, 6)
         if pager_user_id:
-            send_buf.queue_status_patch(conv_id, ZM_STATUSES["wait_id"])
+            send_buf.queue_status_patch(
+                conv_id, funnel_statuses["registration"]
+            )
 
     if actions_sent:
         commit: dict[str, Any] = {
@@ -1377,9 +1398,8 @@ async def _handle_conversation(
             "last_processed_msg_id": msg_id,
         }
         if reg_handoff:
-            # After reg+link — operator takes over; bot must not re-enter.
-            commit["human_takeover"] = 1
             commit["pause_scripts"] = 0
+            commit["human_takeover"] = 0
         send_buf.queue_commit(conv_id, **commit)
         return True
     if keys:
@@ -1543,6 +1563,21 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 client.session_user_id = _settings.pager_user_id
 
         channel_folders = await db.build_channel_folders_map(account_id, enabled)
+        status_rows = await db.list_statuses(account_id)
+        if not status_rows:
+            try:
+                api_st = await client.list_statuses_api()
+                if api_st:
+                    await db.sync_statuses(account_id, api_st)
+                    status_rows = await db.list_statuses(account_id)
+            except Exception as exc:
+                logger.debug(
+                    "Worker account=%s: status sync skipped: %s",
+                    account_id,
+                    exc,
+                )
+        funnel_statuses = resolve_funnel_statuses(status_rows)
+        account["_funnel_statuses"] = funnel_statuses
         if channel_folders:
             sample = next(iter(channel_folders.values()), set()) or set()
             logger.info(
@@ -1557,6 +1592,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 max_pages=10 if len(enabled) <= 1 else 6,
                 geo=str(account.get("geo") or "zm"),
                 channel_folders=channel_folders,
+                funnel_statuses=funnel_statuses,
             )
         except PagerAPIError as exc:
             if not is_session_error(exc):
@@ -1579,6 +1615,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 max_pages=10 if len(enabled) <= 1 else 6,
                 geo=str(account.get("geo") or "zm"),
                 channel_folders=channel_folders,
+                funnel_statuses=funnel_statuses,
             )
         inbound_convs = [
             c
@@ -1636,7 +1673,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             status_id = str(conv.get("statusId") or "").strip()
             if is_no_status(conv) and st_step < 1:
                 return (-3, ts + fails * 1e12)
-            if status_id == ZM_STATUSES["in_progress"] and (
+            if status_id == funnel_statuses.get("in_progress") and (
                 st.get("pause_scripts") or st.get("last_escalation_msg_id")
             ):
                 return (-2, ts)
