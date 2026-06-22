@@ -267,6 +267,7 @@ def is_what_required_question(text: str) -> bool:
     return is_post_link_registration_question(t)
 
 
+def is_commitment_reply(text: str) -> bool:
     """Short affirmations after intro / ZMW table (e.g. Yes, I'm serious)."""
     t = (text or "").strip()
     if not t:
