@@ -16,9 +16,34 @@ class Intent(str, Enum):
     QUESTION = "question"
     IMAGE_ONLY = "image_only"
     GAME_ID_TEXT = "game_id_text"
+    MONEY_REQUEST = "money_request"
     UNKNOWN = "unknown"
 
 
+MONEY_REFUSAL_AR = (
+    "نحن لا نُعطي أموالاً، بل نساعدك فقط على الكسب بالتكتيكات."
+)
+MONEY_REFUSAL_EN = (
+    "We don't give money — we only help you earn with our tactics."
+)
+
+_MONEY_REQUEST = re.compile(
+    r"\b(send(ing)?\s+me\s+(money|cash|funds)|give\s+me\s+(money|cash|funds)|"
+    r"lend\s+me|loan\s+me|need\s+money|want\s+money|"
+    r"skick.*(money|cash)|"
+    r"\bk\s?\d{1,4}\b|ka\s*\d{1,4})\b",
+    re.I,
+)
+_AR_MONEY_REQUEST = re.compile(
+    r"فلوس|فلوسي|فلوسك|"
+    r"ارسل(ي|ني|ولي)|ابعت(لي|ولي)|حول(ي|لي)|"
+    r"محتاج\s*فلوس|عايز\s*فلوس|عاوز\s*فلوس|"
+    r"ساعدني\s*بفلوس|اديني\s*فلوس|اعطني\s*فلوس"
+)
+_AR_WHAT_REQUIRED = re.compile(
+    r"ايه\s*المطلوب|إيه\s*المطلوب|ماذا\s*المطلوب|وش\s*المطلوب|"
+    r"طب\s*ايه|ايه\s*اللي|إيه\s*اللي|ايه\s*المطلوب"
+)
 _INTERESTED = re.compile(
     r"\b(interested|interest|312|teach me|need help|need job|i am interested|"
     r"i'm interested|tell me more|am interested|kindly explain|explain it|"
@@ -217,7 +242,31 @@ _REG_COMPLETE = re.compile(
 _DEPOSIT_TIER = re.compile(r"^(30|50|100|200|300|500|1000|2000)$")
 
 
-def is_commitment_reply(text: str) -> bool:
+def is_money_request(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_MONEY_REQUEST.search(t):
+        return True
+    return bool(_MONEY_REQUEST.search(t))
+
+
+def money_refusal_reply(text: str, *, geo: str = "zm") -> str:
+    t = (text or "").strip()
+    if geo == "eg" or _ARABIC.search(t):
+        return MONEY_REFUSAL_AR
+    return MONEY_REFUSAL_EN
+
+
+def is_what_required_question(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_WHAT_REQUIRED.search(t):
+        return True
+    return is_post_link_registration_question(t)
+
+
     """Short affirmations after intro / ZMW table (e.g. Yes, I'm serious)."""
     t = (text or "").strip()
     if not t:
@@ -525,6 +574,8 @@ def classify(
     funnel_step: int = 0,
 ) -> Intent:
     t = (text or "").strip()
+    if is_money_request(t):
+        return Intent.MONEY_REQUEST
     if is_funnel_positive_reaction(
         t, attachments, funnel_step=funnel_step
     ):
@@ -595,6 +646,8 @@ def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
 def needs_human_for_text(
     intent: Intent, step: int, text: str, *, no_status: bool = False, geo: str = "zm"
 ) -> bool:
+    if intent == Intent.MONEY_REQUEST:
+        return False
     if geo == "eg" and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
     if (

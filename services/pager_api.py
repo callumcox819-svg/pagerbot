@@ -541,10 +541,10 @@ class PagerClient:
         """Chats for enabled channels (legacy geo rules or per-channel folder pick)."""
         from services.status_ids import (
             ALL_INBOX_FOLDER_ID,
-            FUNNEL_GEOS,
             NO_STATUS_FOLDER_ID,
             funnel_status_ids as _funnel_ids,
             is_no_status,
+            normalize_enabled_folders,
             process_funnel_folders,
             resolve_funnel_statuses,
             should_process_conversation,
@@ -586,7 +586,7 @@ class PagerClient:
                     break
                 _add([c for c in convs if is_no_status(c)])
 
-            if process_funnel_folders() or geo in FUNNEL_GEOS:
+            if process_funnel_folders():
                 for status_id in funnel_ids:
                     for page in range(1, 3):
                         convs = await self.list_conversations(
@@ -598,28 +598,16 @@ class PagerClient:
                             break
                         _add(convs)
 
-        async def _collect_funnel_continuation(
-            channel_id: str, allowed: set[str] | None
-        ) -> None:
-            """ZM/EG: keep processing chats bot moved into funnel folders."""
-            if geo not in FUNNEL_GEOS:
-                return
-            allowed_eff: set[str] = set()
-            if allowed is not None:
-                allowed_eff = await _resolve_allowed(allowed)
-            pages = max(max_pages, 8)
-            for status_id in funnel_ids:
-                if status_id in allowed_eff:
-                    continue
-                await _collect_status(channel_id, status_id, pages=pages)
-
         async def _resolve_allowed(allowed: set[str]) -> set[str]:
-            if ALL_INBOX_FOLDER_ID not in allowed:
-                return allowed
-            statuses = await self.list_statuses_api()
-            return {NO_STATUS_FOLDER_ID} | {
-                s["status_id"] for s in statuses if s.get("status_id")
-            }
+            from services.status_ids import normalize_enabled_folders
+
+            specific, all_inbox = normalize_enabled_folders(allowed)
+            if all_inbox:
+                statuses = await self.list_statuses_api()
+                return {NO_STATUS_FOLDER_ID} | {
+                    s["status_id"] for s in statuses if s.get("status_id")
+                }
+            return specific
 
         async def _collect_no_status(channel_id: str) -> None:
             for page in range(1, max(max_pages, 15) + 1):
@@ -651,11 +639,17 @@ class PagerClient:
 
         async def _collect_by_folders(channel_id: str, allowed: set[str]) -> None:
             allowed_eff = await _resolve_allowed(allowed)
-            if ALL_INBOX_FOLDER_ID in allowed:
+            specific, all_inbox = normalize_enabled_folders(allowed)
+            if all_inbox:
                 logger.info(
                     "collect «Всі» channel=%s status_folders=%s",
                     channel_id[:8],
                     len(allowed_eff) - (1 if NO_STATUS_FOLDER_ID in allowed_eff else 0),
+                )
+            elif specific == {NO_STATUS_FOLDER_ID}:
+                logger.info(
+                    "collect «Без статусу» only channel=%s",
+                    channel_id[:8],
                 )
             status_pages = max(max_pages, 15 if ALL_INBOX_FOLDER_ID in allowed else 8)
             for status_id in allowed_eff:
@@ -678,7 +672,6 @@ class PagerClient:
             if not allowed:
                 continue
             await _collect_by_folders(channel_id, allowed)
-            await _collect_funnel_continuation(channel_id, allowed)
 
         # «Без статусу» for legacy channels only (no explicit folder config).
         legacy_channels = [
@@ -699,7 +692,7 @@ class PagerClient:
                         and str(c.get("channelId") or "") in legacy_channels
                     ]
                 )
-            if process_funnel_folders() or geo in FUNNEL_GEOS:
+            if process_funnel_folders():
                 for status_id in funnel_ids:
                     for page in range(1, 3):
                         convs = await self.list_conversations(

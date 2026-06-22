@@ -33,6 +33,7 @@ from services.ai_intent import (
     is_ready_for_registration,
     is_registration_complete,
     is_registration_pending,
+    money_refusal_reply,
     needs_human_for_text,
     wants_details_after_intro,
     wants_registration_followup,
@@ -69,11 +70,13 @@ from services.status_ids import (
     EXCELLENT,
     ZM_STATUSES,
     ALL_INBOX_FOLDER_ID,
-    FUNNEL_GEOS,
     NO_STATUS_FOLDER_ID,
+    conv_allowed_in_folders,
+    conv_folder_key,
     funnel_status_ids,
     infer_step_from_status,
     is_no_status,
+    normalize_enabled_folders,
     resolve_funnel_statuses,
     should_process_conversation,
 )
@@ -620,21 +623,18 @@ async def _handle_conversation(
         return False
 
     allowed_folders = await db.get_account_enabled_folders(account_id)
-    if allowed_folders is not None and ALL_INBOX_FOLDER_ID not in allowed_folders:
-        folder_key = (
-            NO_STATUS_FOLDER_ID
-            if is_no_status(conv)
-            else str(conv.get("statusId") or "")
+    if allowed_folders is not None and not conv_allowed_in_folders(
+        conv, allowed_folders
+    ):
+        specific, all_inbox = normalize_enabled_folders(allowed_folders)
+        logger.info(
+            "conv=%s skip — folder not enabled (status=%s effective=%s all=%s)",
+            conv_id[:8],
+            conv_folder_key(conv)[:8] or "no_status",
+            sorted(specific)[:4],
+            all_inbox,
         )
-        if folder_key not in allowed_folders:
-            status_id = str(conv.get("statusId") or "").strip()
-            if not (geo in FUNNEL_GEOS and status_id in active_funnel):
-                logger.info(
-                    "conv=%s skip — folder not enabled (status=%s)",
-                    conv_id[:8],
-                    (folder_key[:8] if folder_key else "no_status"),
-                )
-                return False
+        return False
 
     state = await db.get_conversation_state(account_id, conv_id)
     if int(state.get("send_failures") or 0) >= 5:
@@ -773,16 +773,18 @@ async def _handle_conversation(
             attachments=attachments,
             funnel_step=max(effective_step_early, 1),
         )
-        funnel_retry = (
-            effective_step_early >= 1
-            and effective_step_early < 6
-            and (
-                pre_intent in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY)
-                or is_funnel_positive_reaction(
-                    text,
-                    attachments,
-                    funnel_step=max(effective_step_early, 1),
-                )
+        funnel_retry = needs_reply and effective_step_early < 8 and (
+            pre_intent
+            in (
+                Intent.POSITIVE,
+                Intent.INTERESTED,
+                Intent.READY,
+                Intent.MONEY_REQUEST,
+            )
+            or is_funnel_positive_reaction(
+                text,
+                attachments,
+                funnel_step=max(effective_step_early, 1),
             )
         )
         if state.get("pause_scripts") and not deposit_funnel_early and not funnel_retry:
@@ -920,6 +922,29 @@ async def _handle_conversation(
     auto_funnel = (
         post_intro_followup or registration_resend or reg_confirmed_funnel
     )
+    script_funnel = (
+        needs_reply
+        and effective_step < 8
+        and intent
+        in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.MONEY_REQUEST)
+    )
+    funnel_active = auto_funnel or script_funnel
+
+    if needs_reply and intent == Intent.MONEY_REQUEST:
+        body = money_refusal_reply(text, geo=geo)
+        send_buf.queue_send(
+            conv_id,
+            [body],
+            client_name=client_name,
+            channel_id=channel_id,
+        )
+        send_buf.queue_commit(
+            conv_id,
+            step=max(step, 1),
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        return True
 
     if is_deferral_reply(text) and needs_reply and effective_step < 6:
         logger.info(
@@ -933,7 +958,7 @@ async def _handle_conversation(
         return "done"
 
     if (
-        not auto_funnel
+        not funnel_active
         and needs_reply
         and msg_id
         and msg_id == str(state.get("last_escalation_msg_id") or "")
@@ -966,10 +991,10 @@ async def _handle_conversation(
         if sid not in active_funnel and st_step < 4:
             logger.info("conv=%s skipped human_takeover", conv_id[:8])
             return "paused"
-    if state.get("pause_scripts") and not auto_funnel:
+    if state.get("pause_scripts") and not funnel_active:
         logger.info("conv=%s skipped pause_scripts", conv_id[:8])
         return "paused"
-    if state.get("pause_scripts") and auto_funnel:
+    if state.get("pause_scripts") and funnel_active:
         await db.save_conversation_state(account_id, conv_id, pause_scripts=0)
 
     async def _outbound_send(
@@ -988,22 +1013,40 @@ async def _handle_conversation(
             conv_id, [text], client_name=client_name, channel_id=channel_id
         )
 
-    # Thumbs-up / FB like after link — not a deposit.
+    # Thumbs-up / FB like after link — send deposit script if link was already sent.
     if (
         is_reaction_only
         and needs_reply
         and effective_step >= 4
         and effective_step < 7
     ):
+        link_sn = script_ui_snippet("05_link", geo)
+        dep_sn = script_ui_snippet("06_deposit", geo)
+        if script_sent_in_history(
+            op_texts_early, link_sn
+        ) and not script_sent_in_history(op_texts_early, dep_sn):
+            send_buf.queue_script_send(
+                conv_id,
+                ["06_deposit"],
+                client_name=client_name,
+                channel_id=channel_id,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 7),
+                last_processed_msg_id=msg_id,
+            )
+            if pager_user_id:
+                send_buf.queue_status_patch(
+                    conv_id, funnel_statuses["wait_id"]
+                )
+            return True
         logger.info(
-            "conv=%s reaction-only at step=%s — skip deposit escalation",
+            "conv=%s reaction-only at step=%s — no deposit script",
             conv_id[:8],
             effective_step,
         )
-        await db.save_conversation_state(
-            account_id, conv_id, last_processed_msg_id=msg_id
-        )
-        return "done"
+        return "no_script"
 
     # --- Deposit done / deposit screenshot (never resend 04+05) ---
     if deposit_signal and needs_reply and effective_step >= 4:
@@ -1297,7 +1340,7 @@ async def _handle_conversation(
         if (
             intent in (Intent.QUESTION, Intent.UNKNOWN)
             and step >= 4
-            and not auto_funnel
+            and not funnel_active
             and not (geo == "eg" and is_no_status(conv))
             and not (geo == "zm" and is_no_status(conv))
         ):
@@ -1368,7 +1411,7 @@ async def _handle_conversation(
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     explain_keys = {"02_how_it_works", "03_zmw_table"}
-    reg_handoff = geo in FUNNEL_GEOS and bool(reg_keys.intersection(keys))
+    reg_handoff = geo in ("zm", "eg") and bool(reg_keys.intersection(keys))
     if reg_handoff:
         new_step = 4
         if pager_user_id:
@@ -1580,10 +1623,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         account["_funnel_statuses"] = funnel_statuses
         if channel_folders:
             sample = next(iter(channel_folders.values()), set()) or set()
+            specific, all_inbox = normalize_enabled_folders(sample)
             logger.info(
-                "Worker account=%s: enabled folders=%s",
+                "Worker account=%s: enabled folders raw=%s effective=%s all_inbox=%s",
                 account.get("id"),
                 sorted(sample)[:8],
+                sorted(specific)[:8],
+                all_inbox,
             )
 
         try:
@@ -1801,10 +1847,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                         funnel_planned += 1
                     else:
                         planned += 1
-                if (
-                    result
-                    and pager_user_id
-                ):
+                if result is True and pager_user_id:
                     try:
                         await client.mark_conversation_read(
                             conv_id, user_id=pager_user_id

@@ -9,7 +9,7 @@ from typing import Any
 import aiosqlite
 
 from config import load_settings
-from services.status_ids import ALL_INBOX_FOLDER_ID
+from services.status_ids import ALL_INBOX_FOLDER_ID, NO_STATUS_FOLDER_ID
 
 _settings = load_settings()
 DB_PATH = _settings.db_path
@@ -435,7 +435,7 @@ async def has_folder_config(account_id: int) -> bool:
 
 
 async def ensure_channel_folder_defaults(account_id: int, channel_id: str) -> None:
-    """First open: enable Pager «Всі» inbox tab by default."""
+    """First open: enable «Без статусу» only (not «Всі»)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
@@ -446,29 +446,13 @@ async def ensure_channel_folder_defaults(account_id: int, channel_id: str) -> No
         )
         row = await cur.fetchone()
         if row and int(row[0] or 0) > 0:
-            cur2 = await db.execute(
-                """
-                SELECT 1 FROM pager_channel_folders
-                WHERE account_id = ? AND channel_id = ? AND status_id = ?
-                """,
-                (account_id, channel_id, ALL_INBOX_FOLDER_ID),
-            )
-            if not await cur2.fetchone():
-                await db.execute(
-                    """
-                    INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
-                    VALUES (?, ?, ?, 1)
-                    """,
-                    (account_id, channel_id, ALL_INBOX_FOLDER_ID),
-                )
-                await db.commit()
             return
         await db.execute(
             """
             INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
             VALUES (?, ?, ?, 1)
             """,
-            (account_id, channel_id, ALL_INBOX_FOLDER_ID),
+            (account_id, channel_id, NO_STATUS_FOLDER_ID),
         )
         await db.commit()
 
@@ -530,17 +514,62 @@ async def toggle_channel_folder(
             """,
             (account_id, channel_id, sid, 1 if enabled else 0),
         )
+        if enabled:
+            if sid == ALL_INBOX_FOLDER_ID:
+                await db.execute(
+                    """
+                    UPDATE pager_channel_folders
+                    SET enabled = 0
+                    WHERE account_id = ? AND channel_id = ?
+                      AND status_id != ?
+                    """,
+                    (account_id, channel_id, ALL_INBOX_FOLDER_ID),
+                )
+            else:
+                await db.execute(
+                    """
+                    UPDATE pager_channel_folders
+                    SET enabled = 0
+                    WHERE account_id = ? AND channel_id = ?
+                      AND status_id = ?
+                    """,
+                    (account_id, channel_id, ALL_INBOX_FOLDER_ID),
+                )
         await db.commit()
 
 
 async def set_all_channel_folders(
     account_id: int, channel_id: str, enabled: bool
 ) -> None:
-    rows = await list_channel_folder_rows(account_id, channel_id)
-    for row in rows:
-        await toggle_channel_folder(
-            account_id, channel_id, str(row["status_id"]), enabled
-        )
+    async with aiosqlite.connect(DB_PATH) as db:
+        if enabled:
+            await db.execute(
+                """
+                UPDATE pager_channel_folders
+                SET enabled = 0
+                WHERE account_id = ? AND channel_id = ?
+                """,
+                (account_id, channel_id),
+            )
+            await db.execute(
+                """
+                INSERT INTO pager_channel_folders (account_id, channel_id, status_id, enabled)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(account_id, channel_id, status_id) DO UPDATE SET
+                    enabled = 1
+                """,
+                (account_id, channel_id, ALL_INBOX_FOLDER_ID),
+            )
+        else:
+            await db.execute(
+                """
+                UPDATE pager_channel_folders
+                SET enabled = 0
+                WHERE account_id = ? AND channel_id = ?
+                """,
+                (account_id, channel_id),
+            )
+        await db.commit()
 
 
 async def get_channel_enabled_folders(

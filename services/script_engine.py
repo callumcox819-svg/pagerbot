@@ -312,6 +312,7 @@ def resolve_funnel_scripts(
         wants_details_after_intro,
         wants_registration_link,
         is_post_link_registration_question,
+        is_what_required_question,
     )
 
     out = outgoing_texts or []
@@ -411,6 +412,15 @@ def resolve_funnel_scripts(
                     t, effective_step, out, folder_step=0, geo=geo
                 ):
                     return ["06_deposit"]
+            dep_sn = script_ui_snippet("06_deposit", geo)
+            if link_sent and effective_step >= 4 and not script_sent_in_history(
+                out, dep_sn
+            ) and (
+                is_what_required_question(t)
+                or is_post_link_registration_question(t)
+                or intent in ("question", "positive", "interested", "ready")
+            ):
+                return ["06_deposit"]
             if effective_step >= 4 and not link_sent and (
                 intent in ("interested", "positive", "ready", "question")
                 or _positive_signal()
@@ -460,7 +470,8 @@ def resolve_funnel_scripts(
         if link_sent and effective_step >= 4:
             dep_sn = script_ui_snippet("06_deposit", "zm")
             if not script_sent_in_history(out, dep_sn) and (
-                is_post_link_registration_question(t)
+                is_what_required_question(t)
+                or is_post_link_registration_question(t)
                 or intent in ("question", "positive", "interested", "ready")
             ):
                 return ["06_deposit"]
@@ -503,7 +514,14 @@ def resolve_zm_backlog_fallback(
         and effective_step < 8
         and not script_sent_in_history(out, dep_sn)
         and intent
-        in ("joined", "positive", "ready", "deposit_done", "question")
+        in (
+            "joined",
+            "positive",
+            "ready",
+            "deposit_done",
+            "question",
+            "interested",
+        )
     ):
         return ["06_deposit"]
     return []
@@ -534,7 +552,15 @@ def resolve_eg_backlog_fallback(
         link_sent
         and effective_step < 8
         and not script_sent_in_history(out, dep_sn)
-        and intent in ("joined", "positive", "ready", "deposit_done")
+        and intent
+        in (
+            "joined",
+            "positive",
+            "ready",
+            "deposit_done",
+            "question",
+            "interested",
+        )
     ):
         return ["06_deposit"]
     return []

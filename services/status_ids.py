@@ -61,6 +61,39 @@ NO_STATUS_FOLDER_ID = ""
 # Virtual folder — Pager inbox tab «Всі» / «Все» (all statuses, one channel scan).
 ALL_INBOX_FOLDER_ID = "*"
 
+
+def normalize_enabled_folders(enabled: set[str] | None) -> tuple[set[str], bool]:
+    """Split folder picker state into specific ids vs «Всі».
+
+    If both «Всі» and specific folders are enabled, specific folders win
+    (user toggled «Без статусу» without turning off «Всі» in DB).
+    """
+    if not enabled:
+        return set(), False
+    specific = {str(x) for x in enabled if str(x) != ALL_INBOX_FOLDER_ID}
+    all_inbox = ALL_INBOX_FOLDER_ID in enabled
+    if specific:
+        return specific, False
+    if all_inbox:
+        return set(), True
+    return set(), False
+
+
+def conv_folder_key(conv: dict) -> str:
+    """Map conversation to folder id used in pager_channel_folders."""
+    if is_no_status(conv):
+        return NO_STATUS_FOLDER_ID
+    return str(conv.get("statusId") or "").strip()
+
+
+def conv_allowed_in_folders(conv: dict, enabled: set[str] | None) -> bool:
+    specific, all_inbox = normalize_enabled_folders(enabled)
+    if all_inbox:
+        return True
+    if not specific:
+        return False
+    return conv_folder_key(conv) in specific
+
 EXCELLENT = "Excellent 👍"
 
 # Terminal folders — do not auto-reply; patch_status INTO them is still allowed.
@@ -120,19 +153,15 @@ def should_process_conversation(
     geo: str = "zm",
     funnel_statuses: dict[str, str] | None = None,
 ) -> bool:
-    """Process «Без статусу» + funnel folders (ZM/EG always continue the bot funnel)."""
+    """Process chats only in folders the worker collected (no_status + optional funnel)."""
     if should_skip_processing(conv):
         return False
-    active = funnel_status_ids(funnel_statuses)
-    status_id = str(conv.get("statusId") or "").strip()
     if is_no_status(conv):
-        return True
-    if geo in FUNNEL_GEOS and status_id in active:
-        return True
-    if geo == "eg":
         return True
     if not process_funnel_folders():
         return False
+    active = funnel_status_ids(funnel_statuses)
+    status_id = str(conv.get("statusId") or "").strip()
     return status_id in active
 
 

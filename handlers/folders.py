@@ -13,7 +13,7 @@ from config import load_settings
 from handlers.pager_account import _pager_client, _secrets
 from keyboards.main_menu import folders_kb
 from services.pager_api import PagerAPIError
-from services.status_ids import ALL_INBOX_FOLDER_ID
+from services.status_ids import ALL_INBOX_FOLDER_ID, normalize_enabled_folders
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -66,8 +66,8 @@ def _folders_text(folder_rows: list[dict], *, synced: int = 0) -> str:
         )
     elif enabled_ids == {""}:
         hint = (
-            "\n\n⚠️ Только «Без статусу». Включите <b>«Всі (все чаты)»</b> "
-            "или нажмите <b>📂 Включить все</b>."
+            "\n\n✅ Только <b>«Без статусу»</b> — бот отвечает только "
+            "на новые чаты без папки."
         )
     elif all_on:
         hint = "\n\n✅ Все папки включены."
@@ -81,7 +81,13 @@ def _folders_text(folder_rows: list[dict], *, synced: int = 0) -> str:
 
 
 async def _folder_rows(acc: dict) -> list[dict]:
-    return await db.list_account_folder_rows(int(acc["id"]))
+    account_id = int(acc["id"])
+    enabled = await db.get_account_enabled_folders(account_id)
+    if enabled:
+        specific, all_inbox = normalize_enabled_folders(enabled)
+        if specific and ALL_INBOX_FOLDER_ID in enabled:
+            await db.toggle_account_folder(account_id, ALL_INBOX_FOLDER_ID, False)
+    return await db.list_account_folder_rows(account_id)
 
 
 @router.message(F.text == "📂 Выбор папок")
