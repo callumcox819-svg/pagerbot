@@ -341,6 +341,15 @@ _REG_COMPLETE = re.compile(
     r"created (my |an )?account|i have registered)\b",
     re.I,
 )
+_FR_REG_COMPLETE = re.compile(
+    r"(déjà|deja).{0,20}(inscription|inscrit|enregistr)|"
+    r"(inscription|inscrit).{0,12}(fait|faite|termin)|"
+    r"compte.{0,16}(ouvert|1x|créé|cree|ouvre)|"
+    r"(ouvert|ouverte).{0,12}(compte|account)|"
+    r"\bje suis inscrit\b|"
+    r"\bj'ai (créé|cree|ouvert).{0,12}compte\b",
+    re.I,
+)
 _DEPOSIT_TIER = re.compile(r"^(30|50|100|200|300|500|1000|2000)$")
 
 
@@ -445,6 +454,8 @@ def is_registration_complete(text: str) -> bool:
         return False
     if _AR_REG_COMPLETE.search(t):
         return True
+    if _FR_REG_COMPLETE.search(t):
+        return True
     return bool(_REG_COMPLETE.search(t))
 
 
@@ -455,8 +466,9 @@ def is_on_registration_site(text: str) -> bool:
         return False
     return bool(
         re.search(
-            r"\b(1xbet|xbet|on the site|opened the link|opening the link|"
-            r"taking me|it'?s taking me|i'?m on|went to the link)\b",
+            r"\b(1xbet|xbet|1x bet|on the site|opened the link|opening the link|"
+            r"taking me|it'?s taking me|i'?m on|went to the link|"
+            r"compte 1x|sur 1xbet|sur le site)\b",
             t,
             re.I,
         )

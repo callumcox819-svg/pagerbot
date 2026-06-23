@@ -32,7 +32,7 @@ from services.ai_intent import (
     is_messenger_reaction_attachment,
     is_post_link_registration_question,
     is_ready_for_registration,
-    is_registration_complete,
+    is_registration_confirmed,
     is_registration_pending,
     money_refusal_reply,
     needs_human_for_text,
@@ -59,6 +59,7 @@ from services.script_engine import (
     resolve_funnel_scripts,
     resolve_eg_backlog_fallback,
     resolve_zm_backlog_fallback,
+    reg_link_sent_in_history,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -901,6 +902,53 @@ async def _handle_conversation(
 
     esc_chat = _escalation_chat(account)
 
+    if (
+        needs_reply
+        and is_registration_confirmed(text)
+        and reg_link_sent_in_history(op_texts_early, geo=geo)
+    ):
+        completed_sid = str(funnel_statuses.get("completed") or "").strip()
+        reg_done_keys: list[str] = []
+        if should_send_deposit_script(
+            text,
+            effective_step,
+            op_texts_early,
+            folder_step=folder_step,
+            geo=geo,
+        ):
+            reg_done_keys = ["06_deposit"]
+        if completed_sid and pager_user_id:
+            send_buf.queue_status_patch(conv_id, completed_sid)
+        if reg_done_keys:
+            send_buf.queue_script_send(
+                conv_id,
+                reg_done_keys,
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 7),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+        else:
+            await db.save_conversation_state(
+                account_id,
+                conv_id,
+                step=max(stored_step, 6),
+                pause_scripts=1,
+                last_processed_msg_id=msg_id,
+            )
+        logger.info(
+            "conv=%s already registered — completed=%s keys=%s",
+            conv_id[:8],
+            completed_sid[:8] if completed_sid else "?",
+            reg_done_keys,
+        )
+        return True
+
     is_reaction_only = (
         is_messenger_reaction_attachment(attachments)
         or is_funnel_positive_reaction(
@@ -953,6 +1001,8 @@ async def _handle_conversation(
         and effective_step >= 1
         and effective_step < 6
         and is_registration_pending(text)
+        and not is_registration_confirmed(text)
+        and not reg_link_sent_in_history(op_texts_early, geo=geo)
     )
 
     reg_confirmed_funnel = needs_reply and should_send_deposit_script(
@@ -1379,7 +1429,7 @@ async def _handle_conversation(
             )
     if not keys and geo in ("zm", "dj") and is_no_status(conv):
         keys = resolve_zm_backlog_fallback(
-            effective_step, op_outgoing, intent.value, geo=geo
+            effective_step, op_outgoing, intent.value, geo=geo, text=text
         )
         if keys:
             logger.info(
@@ -1430,7 +1480,7 @@ async def _handle_conversation(
             )
         elif geo in ("zm", "dj") and is_no_status(conv):
             keys = resolve_zm_backlog_fallback(
-                effective_step, op_outgoing, intent.value
+                effective_step, op_outgoing, intent.value, geo=geo, text=text
             )
         if not keys:
             await db.save_conversation_state(
@@ -1439,6 +1489,25 @@ async def _handle_conversation(
             return "done"
 
     keys = filter_auto_script_keys(keys)
+
+    if keys and reg_link_sent_in_history(op_outgoing, geo=geo):
+        if is_registration_confirmed(text) or intent == Intent.JOINED:
+            keys = [
+                k
+                for k in keys
+                if k
+                not in (
+                    "01_intro",
+                    "02_how_it_works",
+                    "03_zmw_table",
+                    "04_registration",
+                    "05_link",
+                )
+            ]
+            if should_send_deposit_script(
+                text, effective_step, op_outgoing, folder_step=folder_step, geo=geo
+            ):
+                keys = ["06_deposit"]
 
     if intent == Intent.JOINED and effective_step >= 8:
         await db.save_conversation_state(

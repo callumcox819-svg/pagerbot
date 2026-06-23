@@ -17,6 +17,7 @@ _STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "wait_id": ("чекаю id", "чекаю ід", "wait id", "wait_id"),
     "registration": ("реєстрація", "регистрация", "registration"),
     "deps_pending": ("депи не", "депы не", "deps pending", "deps"),
+    "completed": ("заверш", "completed", "finish", "terminé", "termine"),
 }
 
 FUNNEL_GEOS = frozenset({"zm", "eg"})
