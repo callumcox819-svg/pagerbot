@@ -1017,7 +1017,10 @@ async def _handle_conversation(
             last_processed_msg_id=msg_id,
             pause_scripts=0,
         )
-        if pager_user_id and "06_deposit" in dq_keys:
+        if pager_user_id and (
+            "06_deposit" in dq_keys
+            or (completed_sid and conv_status_id == completed_sid)
+        ):
             send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
         logger.info(
             "conv=%s deposit question keys=%s text=%r",
