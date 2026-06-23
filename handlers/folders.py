@@ -69,15 +69,11 @@ def _folders_text(folder_rows: list[dict], *, synced: int = 0) -> str:
             "\n\n✅ Только <b>«Без статусу»</b> — бот отвечает только "
             "на новые чаты без папки."
         )
-    elif wait_id := next(
-        (str(r.get("status_id") or "") for r in folder_rows if "чекаю" in (r.get("name") or "").lower()),
-        "",
-    ):
-        if wait_id in enabled_ids and "" not in enabled_ids:
-            hint = (
-                "\n\n✅ Включены вороночные папки (напр. «Чекаю ID») — "
-                "бот продолжает скрипты и отвечает в этих папках."
-            )
+    elif enabled_ids - {"", ALL_INBOX_FOLDER_ID}:
+        hint = (
+            "\n\n✅ Включены вороночные папки (В процесі / Чекаю ID / …) — "
+            "бот продолжает скрипты и отвечает в этих папках."
+        )
     elif all_on:
         hint = "\n\n✅ Все папки включены."
     return (
