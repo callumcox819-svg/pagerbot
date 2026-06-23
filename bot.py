@@ -25,6 +25,47 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _ensure_polling_mode(bot: Bot) -> None:
+    me = await bot.get_me()
+    logger.info(
+        "Telegram bot @%s id=%s — Pager AI (ответ: «Pager AI Bot — Zambia»)",
+        me.username,
+        me.id,
+    )
+    for attempt in range(5):
+        wh = await bot.get_webhook_info()
+        if not wh.url:
+            logger.info("Telegram polling OK (webhook cleared)")
+            return
+        logger.warning(
+            "Webhook active (%s) — deleteWebhook try %s/5",
+            wh.url,
+            attempt + 1,
+        )
+        await bot.delete_webhook(drop_pending_updates=False)
+        await asyncio.sleep(1.5)
+    wh = await bot.get_webhook_info()
+    if wh.url:
+        logger.error(
+            "Webhook still set (%s). Другой сервис использует этот BOT_TOKEN — "
+            "остановите его или создайте новый токен в @BotFather.",
+            wh.url,
+        )
+
+
+async def _webhook_guard(bot: Bot) -> None:
+    """Another deployment may call setWebhook — keep polling alive."""
+    while True:
+        await asyncio.sleep(30.0)
+        try:
+            wh = await bot.get_webhook_info()
+            if wh.url:
+                logger.warning("Webhook re-set (%s) — clearing for polling", wh.url)
+                await bot.delete_webhook(drop_pending_updates=False)
+        except Exception as exc:
+            logger.warning("webhook_guard: %s", exc)
+
+
 async def main() -> None:
     settings = load_settings()
     await init_db()
@@ -45,11 +86,9 @@ async def main() -> None:
 
     await register_bot_commands(bot)
     start_worker(bot)
+    await _ensure_polling_mode(bot)
+    asyncio.create_task(_webhook_guard(bot))
     logger.info("Bot + Pager worker running")
-    wh = await bot.get_webhook_info()
-    if wh.url:
-        logger.warning("Telegram webhook active (%s) — removing for polling", wh.url)
-    await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot)
 
 
