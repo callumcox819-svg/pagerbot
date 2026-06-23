@@ -623,6 +623,8 @@ def resolve_zm_backlog_fallback(
         return []
 
     if not intro_sent:
+        if effective_step >= 1 and effective_step < 4 and not how_sent:
+            return ["02_how_it_works", "03_zmw_table"]
         if intent == "declined":
             return []
         if intent not in (

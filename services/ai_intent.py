@@ -230,10 +230,13 @@ def is_short_affirmative(text: str) -> bool:
     if re.fullmatch(
         r"(wii+|wi+|oui+|ouii+|ouais|ouaip|ok+|okay|yep|yes+|yess|"
         r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|allezy|"
+        r"oui\s+exactement|exactement|"
         r"letsgo|letgo|go|sure|alright)",
         t,
         re.I,
     ):
+        return True
+    if re.fullmatch(r"oui\s+exactement\.?", raw.strip(), re.I):
         return True
     if len(t.split()) <= 2 and _FR_POSITIVE.search(raw):
         return True
@@ -612,6 +615,14 @@ def is_deposit_confirmation(text: str) -> bool:
     if not t or is_deposit_question(t):
         return False
     if _AR_DEPOSIT.search(t):
+        return True
+    if re.search(
+        r"\b(recharg|dépos|depos|depot|dépôt|paiement|payé|paye|verse)\b",
+        t,
+        re.I,
+    ) and re.search(
+        r"\b(fait|faite|termin|compte|avec|mon|le|la|j'ai|je)\b", t, re.I
+    ):
         return True
     return bool(
         re.search(
