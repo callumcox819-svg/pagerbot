@@ -357,6 +357,7 @@ def resolve_funnel_scripts(
         is_app_or_browser_question,
         is_deferral_reply,
         is_funnel_positive_reaction,
+        is_refusal_reply,
         is_ready_for_registration,
         is_registration_confirmed,
         is_registration_pending,
@@ -374,11 +375,20 @@ def resolve_funnel_scripts(
             t, attachments, funnel_step=effective_step
         )
 
-    if is_deferral_reply(t):
+    if is_deferral_reply(t) or is_refusal_reply(t) or intent == "declined":
         return []
 
     if effective_step < 1:
-        return ["01_intro"]
+        intro_sn = script_ui_snippet("01_intro", geo)
+        if script_sent_in_history(out, intro_sn):
+            if intent in ("positive", "ready", "interested", "question") or _positive_signal():
+                return ["02_how_it_works", "03_zmw_table"]
+            return []
+        if intent in ("interested", "positive", "ready", "question"):
+            return ["01_intro"]
+        if _positive_signal():
+            return ["01_intro"]
+        return []
 
     if geo == "eg":
         how_sent = script_sent_in_history(
@@ -556,8 +566,20 @@ def resolve_zm_backlog_fallback(
     link_sent = script_sent_in_history(out, link_sn)
 
     if not intro_sent:
+        if intent == "declined":
+            return []
+        if intent not in (
+            "interested",
+            "positive",
+            "ready",
+            "question",
+            "unknown",
+        ):
+            return []
         return ["01_intro"]
     if not how_sent and effective_step < 4:
+        if intent == "declined":
+            return []
         return ["02_how_it_works", "03_zmw_table"]
     if not link_sent and effective_step < 6:
         return ["04_registration", "05_link"]

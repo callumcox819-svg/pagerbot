@@ -17,6 +17,7 @@ class Intent(str, Enum):
     IMAGE_ONLY = "image_only"
     GAME_ID_TEXT = "game_id_text"
     MONEY_REQUEST = "money_request"
+    DECLINED = "declined"
     UNKNOWN = "unknown"
 
 
@@ -70,6 +71,20 @@ _FR_POSITIVE = re.compile(
     re.I,
 )
 _FR_GREETING = re.compile(r"\b(bonjour|bonsoir|salut|coucou|bjr)\b", re.I)
+_FR_REFUSAL = re.compile(
+    r"\b(non|nn|nop|nan|jamais|stop|laisse|"
+    r"pas intéressé|pas interesse|pas envie|"
+    r"je veux pas|j veux pas|j' veux pas|veux pas|"
+    r"non merci|nn merci|merci non|"
+    r"ça m'intéresse pas|ca m'interesse pas|"
+    r"je ne veux pas|je veux plus)\b",
+    re.I,
+)
+_EN_REFUSAL = re.compile(
+    r"\b(no thanks|not interested|don'?t want|do not want|"
+    r"no thank you|leave me alone|not for me)\b",
+    re.I,
+)
 _FR_READY = re.compile(
     r"\b(je suis prêt|je suis pret|prêt à commencer|pret a commencer|"
     r"on commence|commençons|commencons|vas-y|vas y|ok c'est bon)\b",
@@ -198,12 +213,58 @@ def is_messenger_reaction_attachment(attachments: list) -> bool:
     return False
 
 
+def _normalize_short_reply(text: str) -> str:
+    t = re.sub(r"[^\w\s]", "", (text or "").strip())
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def is_short_affirmative(text: str) -> bool:
+    """Oui / Wii / OK — short consent after intro or funnel question."""
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    t = _normalize_short_reply(raw)
+    if not t:
+        return False
+    if re.fullmatch(
+        r"(wii+|wi+|oui+|ouii+|ouais|ouaip|ok+|okay|yep|yes+|yess|"
+        r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|"
+        r"letsgo|letgo|go|sure|alright)",
+        t,
+        re.I,
+    ):
+        return True
+    if len(t.split()) <= 2 and _FR_POSITIVE.search(raw):
+        return True
+    return False
+
+
+def is_refusal_reply(text: str) -> bool:
+    """Client refuses — do not send intro or funnel scripts."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"no\.?", t, re.I):
+        return True
+    if _EN_REFUSAL.search(t):
+        return True
+    if _FR_REFUSAL.search(t):
+        return True
+    if re.search(r"\bmerci\b", t, re.I) and re.search(
+        r"\b(pas|non|nn|veux pas|want)\b", t, re.I
+    ):
+        return True
+    return False
+
+
 def is_funnel_positive_reaction(
     text: str, attachments: list | None = None, *, funnel_step: int = 0
 ) -> bool:
-    """Early funnel — emoji / FB like means «yes, continue»."""
+    """Early funnel — emoji / FB like / short oui means «yes, continue»."""
     if funnel_step >= 4:
         return False
+    if is_short_affirmative(text):
+        return True
     if is_positive_emoji_only(text):
         return True
     if not (text or "").strip() and is_messenger_reaction_attachment(
@@ -615,6 +676,8 @@ def _classify_arabic(t: str) -> Intent | None:
 
 
 def _classify_french(t: str) -> Intent | None:
+    if is_refusal_reply(t):
+        return Intent.DECLINED
     if re.search(r"envoie.*lien|envoyer.*lien", t, re.I):
         return Intent.READY
     if _FR_REG.search(t) and ("?" in t or "comment" in t.lower()):
@@ -625,6 +688,8 @@ def _classify_french(t: str) -> Intent | None:
         return Intent.READY
     if _FR_INTERESTED.search(t):
         return Intent.INTERESTED
+    if is_short_affirmative(t):
+        return Intent.POSITIVE
     if re.fullmatch(r"oui\.?", t.strip(), re.I) or t.strip().lower() in (
         "oui",
         "ouais",
@@ -655,6 +720,8 @@ def classify(
     t = (text or "").strip()
     if is_money_request(t):
         return Intent.MONEY_REQUEST
+    if is_refusal_reply(t):
+        return Intent.DECLINED
     if is_funnel_positive_reaction(
         t, attachments, funnel_step=funnel_step
     ):
@@ -729,7 +796,7 @@ def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
 def needs_human_for_text(
     intent: Intent, step: int, text: str, *, no_status: bool = False, geo: str = "zm"
 ) -> bool:
-    if intent == Intent.MONEY_REQUEST:
+    if intent in (Intent.MONEY_REQUEST, Intent.DECLINED):
         return False
     if geo == "eg" and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False

@@ -28,6 +28,7 @@ from services.ai_intent import (
     is_deposit_question,
     is_deferral_reply,
     is_funnel_positive_reaction,
+    is_refusal_reply,
     is_messenger_reaction_attachment,
     is_post_link_registration_question,
     is_ready_for_registration,
@@ -867,6 +868,21 @@ async def _handle_conversation(
         attachments=attachments,
         funnel_step=effective_step,
     )
+
+    if needs_reply and intent == Intent.DECLINED:
+        logger.info(
+            "conv=%s declined — pause, no scripts text=%r",
+            conv_id[:8],
+            (text or "")[:40],
+        )
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            pause_scripts=1,
+            last_processed_msg_id=msg_id,
+        )
+        return "done"
+
     thread_has_ad = has_ad or any(
         bool(m.get("adId") or m.get("adUrl")) for m in msg_only
     )
@@ -909,6 +925,7 @@ async def _handle_conversation(
         and effective_step < 4
         and not deposit_signal
         and not is_deferral_reply(text)
+        and not is_refusal_reply(text)
         and (
             is_ready_for_registration(text)
             or wants_registration_link(text)
@@ -953,7 +970,12 @@ async def _handle_conversation(
         needs_reply
         and effective_step < 8
         and intent
-        in (Intent.POSITIVE, Intent.INTERESTED, Intent.READY, Intent.MONEY_REQUEST)
+        in (
+            Intent.POSITIVE,
+            Intent.INTERESTED,
+            Intent.READY,
+            Intent.MONEY_REQUEST,
+        )
     )
     funnel_active = auto_funnel or script_funnel
 
