@@ -111,9 +111,6 @@ _SKIP_NAME_FRAGMENTS = (
     "deps",
     "не дійш",
     "не дошл",
-    "заверш",
-    "completed",
-    "finished",
     "скасован",
     "cancelled",
     "думают",
@@ -130,9 +127,15 @@ def is_no_status(conv: dict) -> bool:
     return "без статус" in name or name in ("", "—", "-")
 
 
-def should_skip_processing(conv: dict) -> bool:
+def should_skip_processing(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
     """Skip chats in terminal / handoff folders."""
+    fs = funnel_statuses or ZM_STATUSES
     status_id = str(conv.get("statusId") or "").strip()
+    completed_sid = str(fs.get("completed") or "").strip()
+    if completed_sid and status_id == completed_sid:
+        return False
     if status_id and status_id in SKIP_PROCESSING_STATUS_IDS:
         return True
     name = ((conv.get("status") or {}).get("name") or "").strip().lower()
@@ -156,12 +159,22 @@ def should_process_conversation(
     allowed_folders: set[str] | None = None,
 ) -> bool:
     """Process chats in «Без статусу» + funnel folders enabled in 📂 picker (or env)."""
-    if should_skip_processing(conv):
+    if should_skip_processing(conv, funnel_statuses):
         return False
     if is_no_status(conv):
         return True
     active = funnel_status_ids(funnel_statuses)
     status_id = str(conv.get("statusId") or "").strip()
+    completed_sid = str((funnel_statuses or ZM_STATUSES).get("completed") or "").strip()
+    if completed_sid and status_id == completed_sid:
+        if allowed_folders is not None:
+            specific, all_inbox = normalize_enabled_folders(allowed_folders)
+            wait_sid = str((funnel_statuses or ZM_STATUSES).get("wait_id") or "").strip()
+            if all_inbox or conv_allowed_in_folders(conv, allowed_folders):
+                return True
+            if wait_sid and wait_sid in specific:
+                return True
+        return False
     if status_id not in active:
         return False
     if process_funnel_folders():

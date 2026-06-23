@@ -26,6 +26,7 @@ from services.ai_intent import (
     is_commitment_reply,
     is_deposit_confirmation,
     is_deposit_question,
+    is_already_registered_before_funnel,
     is_deferral_reply,
     is_deposit_tier_choice,
     is_funnel_positive_reaction,
@@ -676,6 +677,14 @@ async def _handle_conversation(
         return False
 
     state = await db.get_conversation_state(account_id, conv_id)
+    completed_sid = str(funnel_statuses.get("completed") or "").strip()
+    conv_status_id = str(conv.get("statusId") or "").strip()
+    if (
+        completed_sid
+        and conv_status_id == completed_sid
+        and int(state.get("step") or 0) >= 9
+    ):
+        return "done"
     if int(state.get("send_failures") or 0) >= 5:
         logger.info(
             "conv=%s skipped send_failures=%s (use /reset_pauses)",
@@ -931,7 +940,6 @@ async def _handle_conversation(
         and is_registration_confirmed(text)
         and reg_link_sent_in_history(op_texts_early, geo=geo)
     ):
-        completed_sid = str(funnel_statuses.get("completed") or "").strip()
         reg_done_keys: list[str] = []
         if should_send_deposit_script(
             text,
@@ -941,8 +949,16 @@ async def _handle_conversation(
             geo=geo,
         ):
             reg_done_keys = ["06_deposit"]
-        if completed_sid and pager_user_id:
-            send_buf.queue_status_patch(conv_id, completed_sid)
+        if reg_done_keys and pager_user_id:
+            send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
+        elif (
+            pager_user_id
+            and is_already_registered_before_funnel(text)
+            and not reg_done_keys
+        ):
+            completed_sid = str(funnel_statuses.get("completed") or "").strip()
+            if completed_sid:
+                send_buf.queue_status_patch(conv_id, completed_sid)
         if reg_done_keys:
             send_buf.queue_script_send(
                 conv_id,
@@ -966,10 +982,48 @@ async def _handle_conversation(
                 last_processed_msg_id=msg_id,
             )
         logger.info(
-            "conv=%s already registered — completed=%s keys=%s",
+            "conv=%s reg confirmed — wait_id=%s keys=%s",
             conv_id[:8],
-            completed_sid[:8] if completed_sid else "?",
+            (funnel_statuses.get("wait_id") or "")[:8],
             reg_done_keys,
+        )
+        return True
+
+    if (
+        needs_reply
+        and is_deposit_question(text)
+        and 4 <= effective_step < 9
+        and reg_link_sent_in_history(op_texts_early, geo=geo)
+    ):
+        table_sn = script_ui_snippet("03_zmw_table", geo)
+        dep_sn = script_ui_snippet("06_deposit", geo)
+        if script_sent_in_history(op_texts_early, dep_sn):
+            dq_keys = ["03_zmw_table"]
+        elif script_sent_in_history(op_texts_early, table_sn):
+            dq_keys = ["03_zmw_table"]
+        else:
+            dq_keys = ["06_deposit"]
+        send_buf.queue_script_send(
+            conv_id,
+            dq_keys,
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        new_dq_step = 7 if "06_deposit" in dq_keys else max(step, 3)
+        send_buf.queue_commit(
+            conv_id,
+            step=new_dq_step,
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        if pager_user_id and "06_deposit" in dq_keys:
+            send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
+        logger.info(
+            "conv=%s deposit question keys=%s text=%r",
+            conv_id[:8],
+            dq_keys,
+            (text or "")[:50],
         )
         return True
 
@@ -1865,6 +1919,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
             or is_no_status(c)
             or str(c.get("statusId") or "").strip() in funnel_status_ids(funnel_statuses)
+            or str(c.get("statusId") or "").strip()
+            == str(funnel_statuses.get("completed") or "").strip()
         ]
 
         no_status_count = sum(1 for c in inbound_convs if is_no_status(c))

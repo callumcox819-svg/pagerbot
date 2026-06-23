@@ -523,6 +523,21 @@ def is_registration_confirmed(text: str) -> bool:
     )
 
 
+def is_already_registered_before_funnel(text: str) -> bool:
+    """Client was registered before our link — move to completed, no deposit funnel."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"(déjà|deja).{0,24}(inscription|inscrit|enregistr)|"
+            r"(already|déjà|deja).{0,16}(registered|have an account)",
+            t,
+            re.I,
+        )
+    )
+
+
 def is_deposit_tier_choice(text: str) -> bool:
     """Answer to ZMW/DJF table (30 / 300 / 500…) — treat as ready for registration."""
     t = (text or "").strip()
@@ -612,7 +627,8 @@ def is_deposit_question(text: str) -> bool:
         return True
     return bool(
         re.search(
-            r"\b(how much|what (amount|to deposit)|where (do i|to) deposit)\b",
+            r"\b(how much|what (amount|to deposit)|where (do i|to) deposit|"
+            r"must deposit|need to deposit|should i deposit)\b",
             t,
             re.I,
         )

@@ -669,6 +669,8 @@ class PagerClient:
                     channel_id[:8],
                 )
             status_pages = max(max_pages, 20 if ALL_INBOX_FOLDER_ID in allowed else 12)
+            wait_sid = str(fs.get("wait_id") or "").strip()
+            completed_sid = str(fs.get("completed") or "").strip()
             for status_id in allowed_eff:
                 if status_id == NO_STATUS_FOLDER_ID:
                     await _collect_no_status(channel_id)
@@ -676,6 +678,15 @@ class PagerClient:
                     await _collect_status(
                         channel_id, status_id, pages=status_pages
                     )
+            if (
+                wait_sid
+                and completed_sid
+                and wait_sid in allowed_eff
+                and completed_sid not in allowed_eff
+            ):
+                await _collect_status(
+                    channel_id, completed_sid, pages=3
+                )
 
         if not channel_folders:
             await _legacy_global()
