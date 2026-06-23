@@ -1,8 +1,10 @@
-Voici ce que tu peux obtenir avec mon aide :
-Le premier montant est ton dépôt.
-Le deuxième montant est ton profit.
-30 - 300
-50 - 500
-100 - 1000
-200 - 2000
-Tu es prêt à commencer aujourd'hui ?
+Avec mon aide :
+
+💰 Dépôt → profit possible
+
+300 DJF  →  3 000 DJF
+500 DJF  →  8 000 DJF
+1 000 DJF  →  15 000 DJF
+
+Tu choisis quoi pour commencer ?
+(300, 500 ou 1000)

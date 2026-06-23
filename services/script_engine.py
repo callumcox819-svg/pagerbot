@@ -57,16 +57,16 @@ EG_SCRIPT_UI_SNIPPETS: dict[str, str] = {
 DJ_SAVED_REPLY_FOLDER_NAMES = ("Djibouti", "DJIBOUTI", "Djibouti FR", "DJ")
 
 DJ_SCRIPT_UI_SNIPPETS: dict[str, str] = {
-    "01_intro": "Je veux te montrer",
-    "02_how_it_works": "Comment ça marche",
-    "03_zmw_table": "30 - 300",
-    "04_registration": "code promo DJIB577",
-    "05_link": "tinyurl.com/DJIB577",
-    "06_deposit": "clique sur \"Dépôt\"",
-    "07_game_id": "commence par 16",
+    "01_intro": "Moses Zulu",
+    "02_how_it_works": "Voici le plan",
+    "03_zmw_table": "3 000 DJF",
+    "04_registration": "BJI777",
+    "05_link": "tinyurl.com/Djibouti7",
+    "06_deposit": "bouton vert",
+    "07_game_id": "commence par 17",
     "08_tg_invite": "canal Telegram privé",
-    "09_tg_link": "t.me/+",
-    "10_reg_screenshot": "ibb.co",
+    "09_tg_link": "5FWd_blXeRM5OTJi",
+    "10_reg_screenshot": "Problème à l'inscription",
 }
 
 GEO_SCRIPT_UI_SNIPPETS: dict[str, dict[str, str]] = {
@@ -166,10 +166,37 @@ def _step_for_outgoing_text_eg(text: str) -> int:
     return 0
 
 
+def _step_for_outgoing_text_dj(text: str) -> int:
+    t = (text or "").lower()
+    if "5fwd_blxe" in t:
+        return 9
+    if "canal telegram" in t or "rejoins notre" in t:
+        return 8
+    if "déposer" in t or "deposer" in t or "bouton vert" in t:
+        return 7
+    if "commence par 17" in t or "identifiant de jeu" in t:
+        return 6
+    if "tinyurl.com/djibouti7" in t:
+        return 5
+    if "bji777" in t and "voici le lien" in t:
+        return 5
+    if "bji777" in t or "coupe le vpn" in t:
+        return 4
+    if "3 000 djf" in t or "8 000 djf" in t or "15 000 djf" in t:
+        return 3
+    if "voici le plan" in t or "étape par étape" in t:
+        return 2
+    if "moses zulu" in t:
+        return 1
+    return 0
+
+
 def _step_for_outgoing_text(text: str, geo: str = "zm") -> int:
     """Map one operator message to funnel step (strict markers only)."""
     if geo == "eg":
         return _step_for_outgoing_text_eg(text)
+    if geo == "dj":
+        return _step_for_outgoing_text_dj(text)
     t = (text or "").lower()
     if "t.me/+" in t or "vhfjiofy" in t:
         return 9
@@ -614,7 +641,7 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
 
 
 def extract_game_id(text: str, geo: str = "zm") -> str:
-    if geo == "eg":
+    if geo in ("eg", "dj"):
         m = re.search(r"\b(17\d{6,})\b", text or "")
         if m:
             return m.group(1)

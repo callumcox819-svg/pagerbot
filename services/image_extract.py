@@ -32,6 +32,10 @@ async def extract_id_from_image_url(
     return ""
 
 
+def _game_id_geo(geo: str) -> str:
+    return "17" if geo in ("eg", "dj") else "16"
+
+
 async def _vision_openai(url: str, api_key: str, *, geo: str = "zm") -> str:
     import base64
 
@@ -48,7 +52,7 @@ async def _vision_openai(url: str, api_key: str, *, geo: str = "zm") -> str:
                         "text": (
                             "This is a casino app screenshot. Extract the ACCOUNT number or "
                             "game ID (often starts with "
-                            + ("17" if geo == "eg" else "16")
+                            + _game_id_geo(geo)
                             + "). Reply with digits only, or NONE."
                         ),
                     },
@@ -71,14 +75,14 @@ async def _vision_openai(url: str, api_key: str, *, geo: str = "zm") -> str:
     text = (body["choices"][0]["message"]["content"] or "").strip()
     if text.upper() == "NONE":
         return ""
-    m = _ID17_RE.search(text) if geo == "eg" else _ID16_RE.search(text)
+    m = _ID17_RE.search(text) if geo in ("eg", "dj") else _ID16_RE.search(text)
     if not m:
         m = _ID16_RE.search(text) or _ID17_RE.search(text)
     return m.group(1) if m else ""
 
 
 def extract_id_from_text(text: str, *, geo: str = "zm") -> str:
-    if geo == "eg":
+    if geo in ("eg", "dj"):
         m = _ID17_RE.search(text or "")
         if m:
             return m.group(1)

@@ -72,11 +72,12 @@ _FR_POSITIVE = re.compile(
 _FR_GREETING = re.compile(r"\b(bonjour|bonsoir|salut|coucou|bjr)\b", re.I)
 _FR_READY = re.compile(
     r"\b(je suis prêt|je suis pret|prêt à commencer|pret a commencer|"
-    r"on commence|commençons|commencons)\b",
+    r"on commence|commençons|commencons|vas-y|vas y|ok c'est bon)\b",
     re.I,
 )
 _FR_REG = re.compile(
-    r"\b(inscription|inscrit|lien|enregistrer|créer un compte|creer un compte)\b",
+    r"\b(inscription|inscrit|lien|enregistrer|créer un compte|creer un compte|"
+    r"envoie.*lien|envoyer.*lien)\b",
     re.I,
 )
 _FRENCH_LATIN = re.compile(r"[\u00C0-\u024F]")
@@ -614,6 +615,8 @@ def _classify_arabic(t: str) -> Intent | None:
 
 
 def _classify_french(t: str) -> Intent | None:
+    if re.search(r"envoie.*lien|envoyer.*lien", t, re.I):
+        return Intent.READY
     if _FR_REG.search(t) and ("?" in t or "comment" in t.lower()):
         return Intent.INTERESTED
     if is_post_link_registration_question(t):
@@ -668,7 +671,7 @@ def classify(
         if funnel_step >= 1 and funnel_step < 4:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY
-    game_re = _GAME_ID_EG if geo == "eg" else _GAME_ID
+    game_re = _GAME_ID_EG if geo in ("eg", "dj") else _GAME_ID
     if game_re.search(t):
         return Intent.GAME_ID_TEXT
     if geo == "eg" or _ARABIC.search(t):
