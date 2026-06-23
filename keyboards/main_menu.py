@@ -22,17 +22,37 @@ def connect_kb() -> InlineKeyboardMarkup:
     )
 
 
-def channels_kb(channels: list[dict]) -> InlineKeyboardMarkup:
+from database import normalize_channel_geo, next_channel_geo
+
+GEO_BUTTON_LABELS = {
+    "zm": "🇿🇲 ZM",
+    "eg": "🇪🇬 EG",
+    "dj": "🇩🇯 DJ",
+}
+
+
+def channel_geo_label(ch: dict, *, account_geo: str = "zm") -> str:
+    raw = str(ch.get("geo") or "").strip().lower()
+    geo = normalize_channel_geo(raw, default=account_geo) if raw else normalize_channel_geo(account_geo)
+    return GEO_BUTTON_LABELS.get(geo, geo.upper())
+
+
+def channels_kb(channels: list[dict], *, account_geo: str = "zm") -> InlineKeyboardMarkup:
     rows = []
     for ch in channels:
         en = ch.get("enabled")
         mark = "✅" if en else "⬜"
+        cid = ch.get("channel_id")
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{mark} {ch.get('name') or ch.get('channel_id')}",
-                    callback_data=f"ch:toggle:{ch.get('channel_id')}",
-                )
+                    text=f"{mark} {ch.get('name') or cid}",
+                    callback_data=f"ch:toggle:{cid}",
+                ),
+                InlineKeyboardButton(
+                    text=channel_geo_label(ch, account_geo=account_geo),
+                    callback_data=f"ch:geo:{cid}",
+                ),
             ]
         )
     rows.append(

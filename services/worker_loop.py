@@ -92,6 +92,16 @@ _session_cache: dict[int, tuple[float, dict[str, str]]] = {}
 _SESSION_CACHE_TTL = 3600.0
 
 
+def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
+    """Geo for a chat: per-channel setting, else account default."""
+    default = db.normalize_channel_geo(str(account.get("geo") or "zm"))
+    cmap = account.get("_channel_geo") or {}
+    cid = (channel_id or "").strip()
+    if cid and cid in cmap:
+        return db.normalize_channel_geo(str(cmap[cid]), default=default)
+    return default
+
+
 class _CycleSendBuffer:
     """Queue outbound texts for one Playwright login per worker cycle."""
 
@@ -119,6 +129,7 @@ class _CycleSendBuffer:
         self._script_keys: dict[str, list[str]] = {}
         self._clients: dict[str, str] = {}
         self._channels: dict[str, str] = {}
+        self._geos: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
         self._status_patches: dict[str, list[str]] = {}
         self._order: list[str] = []
@@ -131,6 +142,7 @@ class _CycleSendBuffer:
         script_keys: list[str] | None = None,
         client_name: str = "",
         channel_id: str = "",
+        geo: str = "",
     ) -> None:
         bodies = [t.strip() for t in texts if (t or "").strip()]
         keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
@@ -148,6 +160,9 @@ class _CycleSendBuffer:
         ch = (channel_id or "").strip()
         if ch:
             self._channels[conv_id] = ch
+        g = (geo or "").strip().lower()
+        if g:
+            self._geos[conv_id] = db.normalize_channel_geo(g)
         if conv_id not in self._order:
             self._order.append(conv_id)
 
@@ -158,6 +173,7 @@ class _CycleSendBuffer:
         *,
         client_name: str = "",
         channel_id: str = "",
+        geo: str = "",
     ) -> None:
         self.queue_send(
             conv_id,
@@ -165,6 +181,7 @@ class _CycleSendBuffer:
             script_keys=script_keys,
             client_name=client_name,
             channel_id=channel_id,
+            geo=geo,
         )
 
     def queue_commit(self, conv_id: str, **kwargs: Any) -> None:
@@ -253,16 +270,22 @@ class _CycleSendBuffer:
         rest_parallel: int = 12,
     ) -> tuple[set[str], list[tuple]]:
         """Send funnel scripts via REST (local .txt) — faster than Playwright."""
-        geo = str(self.account.get("geo") or "zm")
+        account_geo = db.normalize_channel_geo(str(self.account.get("geo") or "zm"))
         eligible: list[tuple] = []
         browser_jobs: list[tuple] = []
         for job in jobs:
-            cid, texts, _client, _channel_hint, keys, _patches = job
+            cid, texts, _client, _channel_hint, keys, _patches = job[:6]
+            job_geo = (
+                str(job[6]).strip().lower()
+                if len(job) > 6 and job[6]
+                else self._geos.get(cid) or account_geo
+            )
+            job_geo = db.normalize_channel_geo(job_geo, default=account_geo)
             keys = filter_auto_script_keys(list(keys or []))
-            if not texts and keys and self._rest_script_keys_ok(keys, geo):
-                eligible.append(job)
+            if not texts and keys and self._rest_script_keys_ok(keys, job_geo):
+                eligible.append((*job[:6], job_geo))
             else:
-                browser_jobs.append(job)
+                browser_jobs.append((*job[:6], job_geo))
 
         if not eligible:
             return set(), jobs
@@ -271,7 +294,7 @@ class _CycleSendBuffer:
         job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "45"))
 
         async def _one(job: tuple) -> str | None:
-            cid, _texts, _client, channel_hint, keys, patches = job
+            cid, _texts, _client, channel_hint, keys, patches, geo = job
             keys = filter_auto_script_keys(list(keys or []))
             status_patches = list(patches or [])
 
@@ -388,6 +411,8 @@ class _CycleSendBuffer:
                 self._channels.get(cid, ""),
                 self._script_keys.get(cid, []),
                 self._status_patches.get(cid, []),
+                self._geos.get(cid)
+                or resolve_conv_geo(self.account, self._channels.get(cid, "")),
             )
             for cid in conv_ids
         ]
@@ -405,6 +430,7 @@ class _CycleSendBuffer:
             self._script_keys.clear()
             self._clients.clear()
             self._channels.clear()
+            self._geos.clear()
             self._commits.clear()
             self._status_patches.clear()
             self._order.clear()
@@ -439,7 +465,7 @@ class _CycleSendBuffer:
                         email=email,
                         password=password,
                         parallel=self.parallel,
-                        geo=str(self.account.get("geo") or "zm"),
+                        geo=db.normalize_channel_geo(str(self.account.get("geo") or "zm")),
                     ),
                     timeout=timeout,
                 )
@@ -483,6 +509,7 @@ class _CycleSendBuffer:
         self._script_keys.clear()
         self._clients.clear()
         self._channels.clear()
+        self._geos.clear()
         self._commits.clear()
         self._status_patches.clear()
         self._order.clear()
@@ -601,7 +628,8 @@ async def _handle_conversation(
 ) -> bool | str:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
-    geo = str(account.get("geo") or "zm").strip().lower() or "zm"
+    channel_id = str(conv.get("channelId") or "")
+    geo = resolve_conv_geo(account, channel_id)
     funnel_statuses = account.get("_funnel_statuses") or ZM_STATUSES
     active_funnel = funnel_status_ids(funnel_statuses)
     if not conv_id:
@@ -611,7 +639,6 @@ async def _handle_conversation(
         return False
 
     enabled = await _enabled_channel_ids(account_id)
-    channel_id = str(conv.get("channelId") or "")
     if enabled is None:
         return False
     if not enabled or channel_id not in enabled:
@@ -937,6 +964,7 @@ async def _handle_conversation(
             [body],
             client_name=client_name,
             channel_id=channel_id,
+            geo=geo,
         )
         send_buf.queue_commit(
             conv_id,
@@ -971,8 +999,10 @@ async def _handle_conversation(
         return "paused"
 
     logger.info(
-        "conv=%s intent=%s step=%s hist_step=%s eff_step=%s post_intro=%s reg_resend=%s reg_ok=%s folder=%r retry=%s text=%r",
+        "conv=%s ch=%s geo=%s intent=%s step=%s hist_step=%s eff_step=%s post_intro=%s reg_resend=%s reg_ok=%s folder=%r retry=%s text=%r",
         conv_id[:8],
+        channel_id[:8] if channel_id else "?",
+        geo,
         intent.value,
         step,
         hist_step,
@@ -1006,6 +1036,7 @@ async def _handle_conversation(
             script_keys=script_keys,
             client_name=client_name,
             channel_id=channel_id,
+            geo=geo,
         )
 
     async def send(text: str) -> None:
@@ -1324,9 +1355,9 @@ async def _handle_conversation(
                 effective_step,
                 keys,
             )
-    if not keys and geo == "zm" and is_no_status(conv):
+    if not keys and geo in ("zm", "dj") and is_no_status(conv):
         keys = resolve_zm_backlog_fallback(
-            effective_step, op_outgoing, intent.value
+            effective_step, op_outgoing, intent.value, geo=geo
         )
         if keys:
             logger.info(
@@ -1342,7 +1373,7 @@ async def _handle_conversation(
             and step >= 4
             and not funnel_active
             and not (geo == "eg" and is_no_status(conv))
-            and not (geo == "zm" and is_no_status(conv))
+            and not (geo in ("zm", "dj") and is_no_status(conv))
         ):
             escalated = await _escalate_once(
                 bot,
@@ -1375,7 +1406,7 @@ async def _handle_conversation(
             keys = resolve_eg_backlog_fallback(
                 effective_step, op_outgoing, intent.value
             )
-        elif geo == "zm" and is_no_status(conv):
+        elif geo in ("zm", "dj") and is_no_status(conv):
             keys = resolve_zm_backlog_fallback(
                 effective_step, op_outgoing, intent.value
             )
@@ -1405,13 +1436,14 @@ async def _handle_conversation(
             keys,
             client_name=client_name,
             channel_id=channel_id,
+            geo=geo,
         )
         actions_sent = True
 
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     explain_keys = {"02_how_it_works", "03_zmw_table"}
-    reg_handoff = geo in ("zm", "eg") and bool(reg_keys.intersection(keys))
+    reg_handoff = geo in ("zm", "eg", "dj") and bool(reg_keys.intersection(keys))
     if reg_handoff:
         new_step = 4
         if pager_user_id:
@@ -1621,6 +1653,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 )
         funnel_statuses = resolve_funnel_statuses(status_rows)
         account["_funnel_statuses"] = funnel_statuses
+        account["_channel_geo"] = await db.get_channel_geo_map(
+            account_id, account_geo=str(account.get("geo") or "zm")
+        )
         if channel_folders:
             sample = next(iter(channel_folders.values()), set()) or set()
             specific, all_inbox = normalize_enabled_folders(sample)
@@ -1636,7 +1671,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             convs = await client.collect_conversations(
                 enabled,
                 max_pages=10 if len(enabled) <= 1 else 6,
-                geo=str(account.get("geo") or "zm"),
+                geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
+                channel_geo_map=account.get("_channel_geo") or {},
                 channel_folders=channel_folders,
                 funnel_statuses=funnel_statuses,
             )
@@ -1653,13 +1689,17 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             acc = await db.get_account_by_tg(int(account["tg_user_id"]))
             if acc:
                 account.update(acc)
+                account["_channel_geo"] = await db.get_channel_geo_map(
+                    account_id, account_geo=str(account.get("geo") or "zm")
+                )
             client = _make_client(fresh)
             await client.warm_session()
             channel_folders = await db.build_channel_folders_map(account_id, enabled)
             convs = await client.collect_conversations(
                 enabled,
                 max_pages=10 if len(enabled) <= 1 else 6,
-                geo=str(account.get("geo") or "zm"),
+                geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
+                channel_geo_map=account.get("_channel_geo") or {},
                 channel_folders=channel_folders,
                 funnel_statuses=funnel_statuses,
             )

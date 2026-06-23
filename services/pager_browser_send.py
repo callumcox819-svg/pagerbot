@@ -2697,22 +2697,33 @@ async def send_batch_via_browser(
 
     def _parse_job(
         job: tuple,
-    ) -> tuple[str, list[str], list[str], str, str, list[str]] | None:
+        *,
+        default_geo: str = "zm",
+    ) -> tuple[str, list[str], list[str], str, str, list[str], str] | None:
         conv_id = str(job[0] or "")
         texts = job[1]
         client_name = (job[2] if len(job) > 2 else "").strip()
         channel_hint = (job[3] if len(job) > 3 else "").strip()
         script_keys = list(job[4]) if len(job) > 4 else []
         status_patches = list(job[5]) if len(job) > 5 else []
+        job_geo = (
+            str(job[6]).strip().lower()
+            if len(job) > 6 and job[6]
+            else default_geo
+        )
+        if job_geo not in ("zm", "eg", "dj"):
+            job_geo = default_geo
         keys = filter_auto_script_keys(
             [k.strip() for k in script_keys if (k or "").strip()]
         )
         bodies = [t.strip() for t in texts if (t or "").strip()]
         if not conv_id or (not bodies and not keys):
             return None
-        return conv_id, bodies, keys, client_name, channel_hint, status_patches
+        return conv_id, bodies, keys, client_name, channel_hint, status_patches, job_geo
 
-    work = [parsed for job in jobs if (parsed := _parse_job(job))]
+    work = [
+        parsed for job in jobs if (parsed := _parse_job(job, default_geo=geo))
+    ]
     if not work:
         return set(), {}
 
@@ -2747,7 +2758,7 @@ async def send_batch_via_browser(
                 timeout=120.0,
             )
             first_ch = ""
-            for _, _, _, _, channel_hint, _ in work:
+            for _, _, _, _, channel_hint, _, _ in work:
                 if channel_hint:
                     first_ch = channel_hint
                     break
@@ -2766,6 +2777,7 @@ async def send_batch_via_browser(
                 client_name: str,
                 channel_hint: str,
                 status_patches: list[str],
+                job_geo: str,
             ) -> str | None:
                 async with sem:
                     tab = await context.new_page()
@@ -2792,7 +2804,7 @@ async def send_batch_via_browser(
                             user_id=uid,
                             locale=locale,
                             status_patches=status_patches,
-                            geo=geo,
+                            geo=job_geo,
                         )
                         return conv_id
                     except Exception as exc:
@@ -2811,9 +2823,15 @@ async def send_batch_via_browser(
             results = await asyncio.gather(
                 *[
                     _run_one(
-                        conv_id, bodies, keys, client_name, channel_hint, patches
+                        conv_id,
+                        bodies,
+                        keys,
+                        client_name,
+                        channel_hint,
+                        patches,
+                        job_geo,
                     )
-                    for conv_id, bodies, keys, client_name, channel_hint, patches in work
+                    for conv_id, bodies, keys, client_name, channel_hint, patches, job_geo in work
                 ]
             )
             ok = {cid for cid in results if cid}

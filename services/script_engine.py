@@ -53,6 +53,28 @@ EG_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "08_app_or_browser": "ينفع الاتنين",
 }
 
+# Djibouti — French saved replies folder in Pager (create manually).
+DJ_SAVED_REPLY_FOLDER_NAMES = ("Djibouti", "DJIBOUTI", "Djibouti FR", "DJ")
+
+DJ_SCRIPT_UI_SNIPPETS: dict[str, str] = {
+    "01_intro": "Je veux te montrer",
+    "02_how_it_works": "Comment ça marche",
+    "03_zmw_table": "30 - 300",
+    "04_registration": "code promo DJIB577",
+    "05_link": "tinyurl.com/DJIB577",
+    "06_deposit": "clique sur \"Dépôt\"",
+    "07_game_id": "commence par 16",
+    "08_tg_invite": "canal Telegram privé",
+    "09_tg_link": "t.me/+",
+    "10_reg_screenshot": "ibb.co",
+}
+
+GEO_SCRIPT_UI_SNIPPETS: dict[str, dict[str, str]] = {
+    "zm": SCRIPT_UI_SNIPPETS,
+    "eg": EG_SCRIPT_UI_SNIPPETS,
+    "dj": DJ_SCRIPT_UI_SNIPPETS,
+}
+
 # When needle is a substring of another template, exclude those bodies.
 EG_SCRIPT_EXCLUDE_SNIPPETS: dict[str, tuple[str, ...]] = {
     "04_registration": ("تمام كده", "هتعمل إيداع"),
@@ -64,6 +86,8 @@ _cache: dict[str, str] = {}
 def saved_reply_folder_names(geo: str = "zm") -> tuple[str, ...]:
     if geo == "eg":
         return EG_SAVED_REPLY_FOLDER_NAMES
+    if geo == "dj":
+        return DJ_SAVED_REPLY_FOLDER_NAMES
     return SAVED_REPLY_FOLDER_NAMES
 
 
@@ -75,7 +99,7 @@ def script_exclude_snippets(key: str, geo: str = "zm") -> tuple[str, ...]:
 
 def script_ui_snippet(key: str, geo: str = "zm") -> str:
     """Text needle for locating a saved reply in Pager UI."""
-    snippets = EG_SCRIPT_UI_SNIPPETS if geo == "eg" else SCRIPT_UI_SNIPPETS
+    snippets = GEO_SCRIPT_UI_SNIPPETS.get(geo) or SCRIPT_UI_SNIPPETS
     sn = snippets.get(key, "").strip()
     if sn:
         return sn
@@ -87,7 +111,7 @@ def script_ui_snippet(key: str, geo: str = "zm") -> str:
 
 def script_verify_snippet(key: str, geo: str = "zm") -> str:
     """Substring used to verify delivery in message history."""
-    snippets = EG_SCRIPT_UI_SNIPPETS if geo == "eg" else SCRIPT_UI_SNIPPETS
+    snippets = GEO_SCRIPT_UI_SNIPPETS.get(geo) or SCRIPT_UI_SNIPPETS
     sn = snippets.get(key, "").strip()
     if sn:
         return sn
@@ -465,10 +489,10 @@ def resolve_funnel_scripts(
     if effective_step < 7:
         if intent == "game_id_text":
             return []
-        link_sn = script_ui_snippet("05_link", "zm")
+        link_sn = script_ui_snippet("05_link", geo)
         link_sent = script_sent_in_history(out, link_sn)
         if link_sent and effective_step >= 4:
-            dep_sn = script_ui_snippet("06_deposit", "zm")
+            dep_sn = script_ui_snippet("06_deposit", geo)
             if not script_sent_in_history(out, dep_sn) and (
                 is_what_required_question(t)
                 or is_post_link_registration_question(t)
@@ -492,12 +516,14 @@ def resolve_zm_backlog_fallback(
     effective_step: int,
     outgoing_texts: list[str],
     intent: str = "unknown",
+    *,
+    geo: str = "zm",
 ) -> list[str]:
-    """ZM «Без статусу» — advance funnel when intent did not match templates."""
+    """ZM/DJ «Без статусу» — advance funnel when intent did not match templates."""
     out = outgoing_texts or []
-    intro_sn = script_ui_snippet("01_intro", "zm")
-    how_sn = script_ui_snippet("02_how_it_works", "zm")
-    link_sn = script_ui_snippet("05_link", "zm")
+    intro_sn = script_ui_snippet("01_intro", geo)
+    how_sn = script_ui_snippet("02_how_it_works", geo)
+    link_sn = script_ui_snippet("05_link", geo)
     intro_sent = script_sent_in_history(out, intro_sn)
     how_sent = script_sent_in_history(out, how_sn)
     link_sent = script_sent_in_history(out, link_sn)
@@ -508,7 +534,7 @@ def resolve_zm_backlog_fallback(
         return ["02_how_it_works", "03_zmw_table"]
     if not link_sent and effective_step < 6:
         return ["04_registration", "05_link"]
-    dep_sn = script_ui_snippet("06_deposit", "zm")
+    dep_sn = script_ui_snippet("06_deposit", geo)
     if (
         link_sent
         and effective_step < 8

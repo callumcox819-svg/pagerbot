@@ -535,6 +535,7 @@ class PagerClient:
         *,
         max_pages: int = 5,
         geo: str = "zm",
+        channel_geo_map: dict[str, str] | None = None,
         channel_folders: dict[str, set[str] | None] | None = None,
         funnel_statuses: dict[str, str] | None = None,
     ) -> list[dict]:
@@ -553,13 +554,25 @@ class PagerClient:
         fs = funnel_statuses or resolve_funnel_statuses()
         funnel_ids = _funnel_ids(fs)
         seen: dict[str, dict] = {}
+        cmap = channel_geo_map or {}
+        default_geo = (geo or "zm").strip().lower() or "zm"
+
+        def _conv_geo(channel_id: str) -> str:
+            ch = (channel_id or "").strip()
+            raw = str(cmap.get(ch) or "").strip().lower()
+            if raw in ("zm", "eg", "dj"):
+                return raw
+            return default_geo
 
         def _add(convs: list[dict]) -> None:
             for conv in convs:
                 ch = str(conv.get("channelId") or "")
                 if ch not in enabled_channel_ids:
                     continue
-                if not should_process_conversation(conv, geo=geo, funnel_statuses=fs):
+                conv_geo = _conv_geo(ch)
+                if not should_process_conversation(
+                    conv, geo=conv_geo, funnel_statuses=fs
+                ):
                     continue
                 cid = str(conv.get("id") or "")
                 if cid:

@@ -88,11 +88,12 @@ async def pager_menu(message: Message) -> None:
             f"✅ Pager подключён\n"
             f"Email: <code>{acc.get('email') or '—'}</code>\n"
             f"Org: <code>{acc.get('org_id') or '—'}</code>\n"
-            f"Geo: <code>{acc.get('geo') or 'zm'}</code> "
-            f"(zm / eg)\n"
+            f"Geo по умолчанию: <code>{acc.get('geo') or 'zm'}</code> "
+            f"(zm / eg / dj)\n"
             f"Авто-ответ: {'вкл' if acc.get('auto_reply') else 'выкл'}\n"
             f"Пауза: {'да' if acc.get('paused') else 'нет'}\n\n"
-            f"Сменить geo: /set_geo zm или /set_geo eg"
+            f"Страна на канал: 📡 Каналы → кнопка 🇿🇲/🇪🇬/🇩🇯\n"
+            f"Geo по умолчанию: /set_geo zm | eg | dj"
         )
     else:
         err = (acc or {}).get("last_error") or ""
@@ -103,8 +104,8 @@ async def pager_menu(message: Message) -> None:
 @router.message(Command("set_geo"))
 async def cmd_set_geo(message: Message) -> None:
     parts = (message.text or "").strip().split()
-    if len(parts) < 2 or parts[1].lower() not in ("zm", "eg"):
-        await message.answer("Использование: /set_geo zm  или  /set_geo eg")
+    if len(parts) < 2 or parts[1].lower() not in ("zm", "eg", "dj"):
+        await message.answer("Использование: /set_geo zm  |  /set_geo eg  |  /set_geo dj")
         return
     acc = await db.get_account_by_tg(message.from_user.id)
     if not acc or not acc.get("session_ok"):
@@ -112,7 +113,7 @@ async def cmd_set_geo(message: Message) -> None:
         return
     geo = parts[1].lower()
     await db.set_account_flags(message.from_user.id, geo=geo)
-    label = "Замбия" if geo == "zm" else "Египет (hapkatest)"
+    label = {"zm": "Замбия", "eg": "Египет", "dj": "Джибути"}.get(geo, geo)
     cleared = 0
     uid = ""
     try:
@@ -135,7 +136,8 @@ async def cmd_set_geo(message: Message) -> None:
     if cleared:
         extra += f"\nСброшено пауз: {cleared} (чаты снова в очереди)"
     await message.answer(
-        f"✅ Geo = <code>{geo}</code> ({label}){extra}\n\n"
+        f"✅ Geo по умолчанию = <code>{geo}</code> ({label}){extra}\n\n"
+        "Новые каналы получат эту страну, если не задана отдельно в 📡 Каналы.\n"
         "Если ответов нет — ещё раз /reset_pauses",
         parse_mode="HTML",
     )
@@ -243,9 +245,11 @@ async def channels_menu(message: Message) -> None:
         return
     enabled = sum(1 for c in chs if c.get("enabled"))
     hint = f" ({enabled} вкл.)" if enabled else " (все выкл — нажмите чтобы включить)"
+    acc_geo = str(acc.get("geo") or "zm")
     await message.answer(
-        f"Каналы{hint} — нажмите чтобы вкл/выкл:",
-        reply_markup=channels_kb(chs),
+        f"Каналы{hint}\n"
+        "Слева — вкл/выкл, справа — страна (нажмите чтобы сменить).",
+        reply_markup=channels_kb(chs, account_geo=acc_geo),
     )
 
 
@@ -261,7 +265,8 @@ async def cb_toggle_channel(cb: CallbackQuery) -> None:
     enabled = not (current and current.get("enabled"))
     await db.toggle_channel(int(acc["id"]), channel_id, enabled)
     chs = await db.list_channels(int(acc["id"]))
-    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
+    acc_geo = str(acc.get("geo") or "zm")
+    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs, account_geo=acc_geo))
     if enabled:
         await cb.answer("Включено — непрочитанные чаты обработаются ~45 сек")
     else:
@@ -276,8 +281,33 @@ async def cb_all_off_channels(cb: CallbackQuery) -> None:
         return
     await db.disable_all_channels(int(acc["id"]))
     chs = await db.list_channels(int(acc["id"]))
-    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs))
-    await cb.answer("Все выключены — включите только Kelvin Phiri")
+    acc_geo = str(acc.get("geo") or "zm")
+    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs, account_geo=acc_geo))
+    await cb.answer("Все выключены — включите нужные и задайте страну справа")
+
+
+@router.callback_query(F.data.startswith("ch:geo:"))
+async def cb_channel_geo(cb: CallbackQuery) -> None:
+    acc = await db.get_account_by_tg(cb.from_user.id)
+    if not acc:
+        await cb.answer("Нет аккаунта")
+        return
+    channel_id = cb.data.split(":", 2)[2]
+    chs = await db.list_channels(int(acc["id"]))
+    current = next((c for c in chs if c["channel_id"] == channel_id), None)
+    if not current:
+        await cb.answer("Канал не найден")
+        return
+    acc_geo = str(acc.get("geo") or "zm")
+    raw = str(current.get("geo") or "").strip().lower()
+    cur_geo = db.normalize_channel_geo(raw, default=acc_geo) if raw else acc_geo
+    new_geo = db.next_channel_geo(cur_geo)
+    await db.set_channel_geo(int(acc["id"]), channel_id, new_geo)
+    chs = await db.list_channels(int(acc["id"]))
+    acc_geo = str(acc.get("geo") or "zm")
+    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs, account_geo=acc_geo))
+    names = {"zm": "Замбия", "eg": "Египет", "dj": "Джибути"}
+    await cb.answer(f"Страна: {names.get(new_geo, new_geo)}")
 
 
 @router.callback_query(F.data == "ch:refresh")
@@ -316,9 +346,11 @@ async def cb_refresh_channels(cb: CallbackQuery) -> None:
         chs = await db.list_channels(int(acc["id"]))
         enabled = sum(1 for c in chs if c.get("enabled"))
         hint = f" ({enabled} вкл.)" if enabled else " (все выкл.)"
+        acc_geo = str(acc.get("geo") or "zm")
         await cb.message.edit_text(
-            f"Каналы{hint} — {len(chs)} шт. Нажмите чтобы вкл/выкл:",
-            reply_markup=channels_kb(chs),
+            f"Каналы{hint} — {len(chs)} шт.\n"
+            "Слева вкл/выкл, справа страна:",
+            reply_markup=channels_kb(chs, account_geo=acc_geo),
         )
     except PagerAPIError as exc:
         await cb.message.answer(

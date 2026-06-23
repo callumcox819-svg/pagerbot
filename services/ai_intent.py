@@ -26,6 +26,9 @@ MONEY_REFUSAL_AR = (
 MONEY_REFUSAL_EN = (
     "We don't give money — we only help you earn with our tactics."
 )
+MONEY_REFUSAL_FR = (
+    "Nous ne donnons pas d'argent — nous vous aidons seulement à gagner avec nos tactiques."
+)
 
 _MONEY_REQUEST = re.compile(
     r"\b(send(ing)?\s+me\s+(money|cash|funds)|give\s+me\s+(money|cash|funds)|"
@@ -40,6 +43,43 @@ _AR_MONEY_REQUEST = re.compile(
     r"محتاج\s*فلوس|عايز\s*فلوس|عاوز\s*فلوس|"
     r"ساعدني\s*بفلوس|اديني\s*فلوس|اعطني\s*فلوس"
 )
+_FR_MONEY_REQUEST = re.compile(
+    r"\b(argent|francs?|prête|prêt|donne.*argent|envoyer.*argent|"
+    r"envoie.*argent|besoin d'argent|besoin d argent)\b",
+    re.I,
+)
+_FR_WHAT_REQUIRED = re.compile(
+    r"\b(que faire|quoi faire|qu'est-ce qu'il faut|quest ce qu il faut|"
+    r"c'est quoi|cest quoi|il me faut quoi)\b",
+    re.I,
+)
+_FR_POST_LINK = re.compile(
+    r"\b(et après|et apres|prochaine étape|prochaine etape|"
+    r"comment déposer|comment deposer|déposer|deposer|"
+    r"vous êtes inscrit|etes vous inscrit|êtes-vous inscrit|inscrit\??)\b",
+    re.I,
+)
+_FR_INTERESTED = re.compile(
+    r"\b(intéressé|interesse|intéressée|interessee|explique|expliquez|"
+    r"comment ça marche|comment ca marche|je veux|dites-moi|dites moi)\b",
+    re.I,
+)
+_FR_POSITIVE = re.compile(
+    r"\b(oui|d'accord|daccord|ok|okay|bien sûr|bien sur|"
+    r"je suis partant|d'acc|volontiers|avec plaisir)\b",
+    re.I,
+)
+_FR_GREETING = re.compile(r"\b(bonjour|bonsoir|salut|coucou|bjr)\b", re.I)
+_FR_READY = re.compile(
+    r"\b(je suis prêt|je suis pret|prêt à commencer|pret a commencer|"
+    r"on commence|commençons|commencons)\b",
+    re.I,
+)
+_FR_REG = re.compile(
+    r"\b(inscription|inscrit|lien|enregistrer|créer un compte|creer un compte)\b",
+    re.I,
+)
+_FRENCH_LATIN = re.compile(r"[\u00C0-\u024F]")
 _AR_WHAT_REQUIRED = re.compile(
     r"ايه\s*المطلوب|إيه\s*المطلوب|ماذا\s*المطلوب|وش\s*المطلوب|"
     r"طب\s*ايه|ايه\s*اللي|إيه\s*اللي|ايه\s*المطلوب"
@@ -248,6 +288,8 @@ def is_money_request(text: str) -> bool:
         return False
     if _AR_MONEY_REQUEST.search(t):
         return True
+    if _FR_MONEY_REQUEST.search(t):
+        return True
     return bool(_MONEY_REQUEST.search(t))
 
 
@@ -255,6 +297,8 @@ def money_refusal_reply(text: str, *, geo: str = "zm") -> str:
     t = (text or "").strip()
     if geo == "eg" or _ARABIC.search(t):
         return MONEY_REFUSAL_AR
+    if geo == "dj" or _FRENCH_LATIN.search(t):
+        return MONEY_REFUSAL_FR
     return MONEY_REFUSAL_EN
 
 
@@ -263,6 +307,8 @@ def is_what_required_question(text: str) -> bool:
     if not t:
         return False
     if _AR_WHAT_REQUIRED.search(t):
+        return True
+    if _FR_WHAT_REQUIRED.search(t):
         return True
     return is_post_link_registration_question(t)
 
@@ -305,6 +351,8 @@ def is_post_link_registration_question(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _FR_POST_LINK.search(t):
+        return True
     return bool(_POST_LINK_QUESTION.search(t))
 
 
@@ -565,6 +613,33 @@ def _classify_arabic(t: str) -> Intent | None:
     return None
 
 
+def _classify_french(t: str) -> Intent | None:
+    if _FR_REG.search(t) and ("?" in t or "comment" in t.lower()):
+        return Intent.INTERESTED
+    if is_post_link_registration_question(t):
+        return Intent.QUESTION
+    if _FR_READY.search(t):
+        return Intent.READY
+    if _FR_INTERESTED.search(t):
+        return Intent.INTERESTED
+    if re.fullmatch(r"oui\.?", t.strip(), re.I) or t.strip().lower() in (
+        "oui",
+        "ouais",
+        "d'accord",
+        "daccord",
+        "ok",
+        "okay",
+    ):
+        return Intent.POSITIVE
+    if _FR_POSITIVE.search(t):
+        return Intent.POSITIVE
+    if _FR_GREETING.search(t) and len(t.split()) <= 8:
+        return Intent.INTERESTED
+    if "?" in t:
+        return Intent.QUESTION
+    return None
+
+
 def classify(
     text: str,
     *,
@@ -600,6 +675,10 @@ def classify(
         ar = _classify_arabic(t)
         if ar is not None:
             return ar
+    if geo == "dj" or _FRENCH_LATIN.search(t):
+        fr = _classify_french(t)
+        if fr is not None:
+            return fr
     if _COMPLAINT.search(t):
         return Intent.COMPLAINT
     if is_deposit_confirmation(t):
@@ -652,7 +731,7 @@ def needs_human_for_text(
     if geo == "eg" and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
     if (
-        geo == "zm"
+        geo in ("zm", "dj")
         and no_status
         and step < 6
         and intent in (Intent.UNKNOWN, Intent.QUESTION)

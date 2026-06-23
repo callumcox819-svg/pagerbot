@@ -90,6 +90,7 @@ async def init_db() -> None:
             "ALTER TABLE pager_accounts ADD COLUMN pager_locale TEXT NOT NULL DEFAULT 'uk'",
             "ALTER TABLE conversation_states ADD COLUMN send_failures INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversation_states ADD COLUMN last_escalation_msg_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE pager_channels ADD COLUMN geo TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 await db.execute(stmt)
@@ -261,6 +262,23 @@ async def deactivate_other_accounts(*, email: str = "", keep_id: int) -> None:
         await db.commit()
 
 
+VALID_CHANNEL_GEOS = ("zm", "eg", "dj")
+
+
+def normalize_channel_geo(geo: str, *, default: str = "zm") -> str:
+    g = (geo or "").strip().lower()
+    if g in VALID_CHANNEL_GEOS:
+        return g
+    d = (default or "zm").strip().lower()
+    return d if d in VALID_CHANNEL_GEOS else "zm"
+
+
+def next_channel_geo(current: str) -> str:
+    order = list(VALID_CHANNEL_GEOS)
+    cur = normalize_channel_geo(current, default=order[0])
+    return order[(order.index(cur) + 1) % len(order)]
+
+
 async def sync_channels(
     account_id: int,
     channels: list[dict[str, str]],
@@ -268,13 +286,21 @@ async def sync_channels(
     default_enabled: bool = False,
 ) -> None:
     """Upsert channels; keep enabled state for existing rows."""
+    existing_rows = await list_channels(account_id)
     existing = {
-        c["channel_id"]: int(c.get("enabled") or 0)
-        for c in await list_channels(account_id)
+        c["channel_id"]: int(c.get("enabled") or 0) for c in existing_rows
     }
     incoming_ids = {ch["channel_id"] for ch in channels}
 
+    account_geo = "zm"
     async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT geo FROM pager_accounts WHERE id = ?", (account_id,)
+        )
+        row = await cur.fetchone()
+        if row and row[0]:
+            account_geo = normalize_channel_geo(str(row[0]))
+
         for cid in set(existing) - incoming_ids:
             await db.execute(
                 "DELETE FROM pager_channels WHERE account_id = ? AND channel_id = ?",
@@ -292,14 +318,55 @@ async def sync_channels(
                     (name, account_id, cid),
                 )
             else:
+                ch_geo = normalize_channel_geo(
+                    str(ch.get("geo") or ""), default=account_geo
+                )
                 await db.execute(
                     """
-                    INSERT INTO pager_channels (account_id, channel_id, name, enabled)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO pager_channels (account_id, channel_id, name, enabled, geo)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (account_id, cid, name, 1 if default_enabled else 0),
+                    (
+                        account_id,
+                        cid,
+                        name,
+                        1 if default_enabled else 0,
+                        ch_geo,
+                    ),
                 )
         await db.commit()
+
+
+async def set_channel_geo(
+    account_id: int, channel_id: str, geo: str
+) -> str:
+    """Set channel geo; returns normalized value stored."""
+    g = normalize_channel_geo(geo)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            UPDATE pager_channels SET geo = ?
+            WHERE account_id = ? AND channel_id = ?
+            """,
+            (g, account_id, channel_id),
+        )
+        await db.commit()
+    return g
+
+
+async def get_channel_geo_map(
+    account_id: int, *, account_geo: str = "zm"
+) -> dict[str, str]:
+    """channel_id -> geo (falls back to account default when channel geo unset)."""
+    fallback = normalize_channel_geo(account_geo)
+    out: dict[str, str] = {}
+    for ch in await list_channels(account_id):
+        cid = str(ch.get("channel_id") or "").strip()
+        if not cid:
+            continue
+        raw = str(ch.get("geo") or "").strip().lower()
+        out[cid] = normalize_channel_geo(raw, default=fallback) if raw else fallback
+    return out
 
 
 async def replace_channels(account_id: int, channels: list[dict[str, str]]) -> None:
