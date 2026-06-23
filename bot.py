@@ -46,6 +46,10 @@ async def main() -> None:
     await register_bot_commands(bot)
     start_worker(bot)
     logger.info("Bot + Pager worker running")
+    wh = await bot.get_webhook_info()
+    if wh.url:
+        logger.warning("Telegram webhook active (%s) — removing for polling", wh.url)
+    await bot.delete_webhook(drop_pending_updates=False)
     await dp.start_polling(bot)
 
 
