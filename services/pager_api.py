@@ -570,8 +570,12 @@ class PagerClient:
                 if ch not in enabled_channel_ids:
                     continue
                 conv_geo = _conv_geo(ch)
+                allowed = (channel_folders or {}).get(ch) if channel_folders else None
                 if not should_process_conversation(
-                    conv, geo=conv_geo, funnel_statuses=fs
+                    conv,
+                    geo=conv_geo,
+                    funnel_statuses=fs,
+                    allowed_folders=allowed,
                 ):
                     continue
                 cid = str(conv.get("id") or "")
@@ -664,7 +668,7 @@ class PagerClient:
                     "collect «Без статусу» only channel=%s",
                     channel_id[:8],
                 )
-            status_pages = max(max_pages, 15 if ALL_INBOX_FOLDER_ID in allowed else 8)
+            status_pages = max(max_pages, 20 if ALL_INBOX_FOLDER_ID in allowed else 12)
             for status_id in allowed_eff:
                 if status_id == NO_STATUS_FOLDER_ID:
                     await _collect_no_status(channel_id)

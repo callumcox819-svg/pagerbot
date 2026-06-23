@@ -652,12 +652,16 @@ async def _handle_conversation(
     if not enabled or channel_id not in enabled:
         return False
 
+    allowed_folders = await db.get_account_enabled_folders(account_id)
+
     if not should_process_conversation(
-        conv, geo=geo, funnel_statuses=funnel_statuses
+        conv,
+        geo=geo,
+        funnel_statuses=funnel_statuses,
+        allowed_folders=allowed_folders,
     ):
         return False
 
-    allowed_folders = await db.get_account_enabled_folders(account_id)
     if allowed_folders is not None and not conv_allowed_in_folders(
         conv, allowed_folders
     ):
@@ -1840,6 +1844,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             for c in convs
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
             or is_no_status(c)
+            or str(c.get("statusId") or "").strip() in funnel_status_ids(funnel_statuses)
         ]
 
         no_status_count = sum(1 for c in inbound_convs if is_no_status(c))
@@ -1894,6 +1899,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 return (-3, ts + fails * 1e12)
             if status_id == funnel_statuses.get("in_progress") and (
                 st.get("pause_scripts") or st.get("last_escalation_msg_id")
+            ):
+                return (-2, ts)
+            if status_id in (
+                funnel_statuses.get("wait_id"),
+                funnel_statuses.get("registration"),
+            ) and _is_incoming_direction(
+                str(conv.get("lastMessageDirection") or "")
             ):
                 return (-2, ts)
             if st.get("human_takeover"):
@@ -1966,7 +1978,12 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             account, cookies, org_slug=org_slug
         )
         funnel_cap = max(8, (max_plans * 2 + 1) // 3)
+        funnel_n = len(inbound_convs) - no_status_count
+        if funnel_n > 10:
+            funnel_cap = max(funnel_cap, min(32, funnel_n))
         max_handle = max(32, int(os.getenv("PAGER_MAX_HANDLE", "72") or "72"))
+        if funnel_n > 20:
+            max_handle = max(max_handle, 96)
         logger.info(
             "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s "
             "max_handle=%s (no_status=%s)",

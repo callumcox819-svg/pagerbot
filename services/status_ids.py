@@ -153,17 +153,22 @@ def should_process_conversation(
     *,
     geo: str = "zm",
     funnel_statuses: dict[str, str] | None = None,
+    allowed_folders: set[str] | None = None,
 ) -> bool:
-    """Process chats only in folders the worker collected (no_status + optional funnel)."""
+    """Process chats in «Без статусу» + funnel folders enabled in 📂 picker (or env)."""
     if should_skip_processing(conv):
         return False
     if is_no_status(conv):
         return True
-    if not process_funnel_folders():
-        return False
     active = funnel_status_ids(funnel_statuses)
     status_id = str(conv.get("statusId") or "").strip()
-    return status_id in active
+    if status_id not in active:
+        return False
+    if process_funnel_folders():
+        return True
+    if allowed_folders is not None and conv_allowed_in_folders(conv, allowed_folders):
+        return True
+    return False
 
 
 def infer_step_from_status(
