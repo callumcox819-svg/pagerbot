@@ -27,6 +27,7 @@ from services.ai_intent import (
     is_deposit_confirmation,
     is_deposit_question,
     is_deferral_reply,
+    is_deposit_tier_choice,
     is_funnel_positive_reaction,
     is_refusal_reply,
     is_messenger_reaction_attachment,
@@ -639,7 +640,11 @@ async def _handle_conversation(
         return False
 
     if not _is_incoming_direction(str(conv.get("lastMessageDirection") or "")):
-        return False
+        if not is_no_status(conv):
+            return False
+        st_peek = int((await db.get_conversation_state(account_id, conv_id)).get("step") or 0)
+        if st_peek < 1:
+            return False
 
     enabled = await _enabled_channel_ids(account_id)
     if enabled is None:
@@ -1419,6 +1424,7 @@ async def _handle_conversation(
             )
         elif (
             geo in ("zm", "dj")
+            and effective_step < 4
             and intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
             and (
                 is_funnel_positive_reaction(
@@ -1438,6 +1444,19 @@ async def _handle_conversation(
                     conv_id[:8],
                     keys,
                 )
+        elif (
+            geo in ("zm", "dj")
+            and 2 <= effective_step < 6
+            and is_deposit_tier_choice(text)
+            and not reg_link_sent_in_history(op_outgoing, geo=geo)
+        ):
+            keys = ["04_registration", "05_link"]
+            logger.info(
+                "conv=%s tier-choice fallback keys=%s text=%r",
+                conv_id[:8],
+                keys,
+                (text or "")[:40],
+            )
     if not keys and geo == "eg" and is_no_status(conv):
         keys = resolve_eg_backlog_fallback(
             effective_step, op_outgoing, intent.value
@@ -1820,6 +1839,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             c
             for c in convs
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
+            or is_no_status(c)
         ]
 
         no_status_count = sum(1 for c in inbound_convs if is_no_status(c))

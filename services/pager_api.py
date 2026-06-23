@@ -633,7 +633,7 @@ class PagerClient:
                     break
                 batch = [c for c in convs if is_no_status(c)]
                 _add(batch)
-                if not batch:
+                if len(convs) < 100:
                     break
 
         async def _collect_status(

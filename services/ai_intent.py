@@ -355,6 +355,10 @@ _DEPOSIT_TIER = re.compile(
     r"^(2000|1000|500|300|200|100|50|30)\s*(?:djf|zmw|fr|f)?\.?$",
     re.I,
 )
+_TIER_AMOUNT = re.compile(
+    r"\b(2000|1000|500|300|200|100|50|30)\s*(?:djf|zmw|fr|f)?\b",
+    re.I,
+)
 
 
 def is_money_request(text: str) -> bool:
@@ -510,8 +514,15 @@ def is_registration_confirmed(text: str) -> bool:
 
 
 def is_deposit_tier_choice(text: str) -> bool:
-    """Answer to ZMW table (30 / 50 / 100…) — treat as ready for registration."""
-    return bool(_DEPOSIT_TIER.match((text or "").strip()))
+    """Answer to ZMW/DJF table (30 / 300 / 500…) — treat as ready for registration."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _DEPOSIT_TIER.match(t):
+        return True
+    if len(t.split()) <= 12 and _TIER_AMOUNT.search(t):
+        return True
+    return False
 
 
 def wants_details_after_intro(text: str) -> bool:
@@ -550,6 +561,10 @@ def is_ready_for_registration(text: str) -> bool:
     if _AR_POSITIVE.search(t) and len(t.split()) <= 5 and not _AR_DETAILS.search(t):
         return True
     if is_deposit_tier_choice(t):
+        return True
+    if is_short_affirmative(t):
+        return True
+    if _FR_POSITIVE.search(t) and len(t.split()) <= 4:
         return True
     if re.fullmatch(r"yes\.?", t, re.I):
         return True
