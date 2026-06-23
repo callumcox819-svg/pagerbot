@@ -358,6 +358,13 @@ _DEPOSIT_TIER = re.compile(
     r"^(2000|1000|500|300|200|100|50|30)\s*(?:djf|zmw|fr|f)?\.?$",
     re.I,
 )
+_TIER_TYPO = {
+  # client often types profit (3 000) instead of deposit tier (300)
+    3000: 300,
+    5000: 500,
+    10000: 1000,
+    20000: 2000,
+}
 _TIER_AMOUNT = re.compile(
     r"\b(2000|1000|500|300|200|100|50|30)\s*(?:djf|zmw|fr|f)?\b",
     re.I,
@@ -522,6 +529,9 @@ def is_deposit_tier_choice(text: str) -> bool:
     if not t:
         return False
     if _DEPOSIT_TIER.match(t):
+        return True
+    digits = re.sub(r"[^\d]", "", t)
+    if digits.isdigit() and int(digits) in _TIER_TYPO:
         return True
     if len(t.split()) <= 12 and _TIER_AMOUNT.search(t):
         return True
