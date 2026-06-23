@@ -350,7 +350,10 @@ _FR_REG_COMPLETE = re.compile(
     r"\bj'ai (créé|cree|ouvert).{0,12}compte\b",
     re.I,
 )
-_DEPOSIT_TIER = re.compile(r"^(30|50|100|200|300|500|1000|2000)$")
+_DEPOSIT_TIER = re.compile(
+    r"^(2000|1000|500|300|200|100|50|30)\s*(?:djf|zmw|fr|f)?\.?$",
+    re.I,
+)
 
 
 def is_money_request(text: str) -> bool:
