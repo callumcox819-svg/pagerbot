@@ -752,6 +752,20 @@ async def _handle_conversation(
     has_image = bool(attachments)
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
 
+    def _recent_client_image_in_thread(limit: int = 6) -> bool:
+        n = 0
+        for m in reversed(msg_only):
+            if not _is_incoming_direction(str(m.get("messageDirection") or "")):
+                continue
+            atts = m.get("attachments") or []
+            if atts and not is_messenger_reaction_attachment(atts):
+                if any(a.get("type") == "image" for a in atts):
+                    return True
+            n += 1
+            if n >= limit:
+                break
+        return False
+
     hist_step = max(
         infer_step_from_history(msg_only, pager_user_id, geo=geo),
         infer_step_from_thread(msg_only, geo=geo),
@@ -1210,8 +1224,14 @@ async def _handle_conversation(
         )
 
         tg_sn = script_ui_snippet("09_tg_link", geo)
-        if (
+        deposit_proof = (
             has_real_image
+            or _recent_client_image_in_thread()
+            or is_deposit_confirmation(text)
+            or intent == Intent.DEPOSIT_DONE
+        )
+        if (
+            deposit_proof
             and effective_step >= 7
             and geo != "eg"
             and not script_sent_in_history(op_outgoing, tg_sn)
