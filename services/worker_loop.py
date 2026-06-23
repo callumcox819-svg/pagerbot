@@ -34,6 +34,7 @@ from services.ai_intent import (
     is_ready_for_registration,
     is_registration_confirmed,
     is_registration_pending,
+    is_short_affirmative,
     money_refusal_reply,
     needs_human_for_text,
     wants_details_after_intro,
@@ -1416,6 +1417,27 @@ async def _handle_conversation(
                 keys,
                 (folder[:20] if folder else ""),
             )
+        elif (
+            geo in ("zm", "dj")
+            and intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
+            and (
+                is_funnel_positive_reaction(
+                    text, attachments, funnel_step=max(effective_step, 1)
+                )
+                or is_short_affirmative(text)
+            )
+        ):
+            intro_sn = script_ui_snippet("01_intro", geo)
+            how_sn = script_ui_snippet("02_how_it_works", geo)
+            if script_sent_in_history(op_outgoing, intro_sn) and not script_sent_in_history(
+                op_outgoing, how_sn
+            ):
+                keys = ["02_how_it_works", "03_zmw_table"]
+                logger.info(
+                    "conv=%s positive-after-intro fallback keys=%s",
+                    conv_id[:8],
+                    keys,
+                )
     if not keys and geo == "eg" and is_no_status(conv):
         keys = resolve_eg_backlog_fallback(
             effective_step, op_outgoing, intent.value

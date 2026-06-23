@@ -87,7 +87,8 @@ _EN_REFUSAL = re.compile(
 )
 _FR_READY = re.compile(
     r"\b(je suis prêt|je suis pret|prêt à commencer|pret a commencer|"
-    r"on commence|commençons|commencons|vas-y|vas y|ok c'est bon)\b",
+    r"on commence|commençons|commencons|vas-y|vas y|"
+    r"allez-y|allez y|allons-y|allons y|ok c'est bon)\b",
     re.I,
 )
 _FR_REG = re.compile(
@@ -228,7 +229,7 @@ def is_short_affirmative(text: str) -> bool:
         return False
     if re.fullmatch(
         r"(wii+|wi+|oui+|ouii+|ouais|ouaip|ok+|okay|yep|yes+|yess|"
-        r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|"
+        r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|allezy|"
         r"letsgo|letgo|go|sure|alright)",
         t,
         re.I,
