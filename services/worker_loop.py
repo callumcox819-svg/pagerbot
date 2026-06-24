@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any
 
@@ -107,6 +108,92 @@ def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
     return default
 
 
+def _interleave_process_order(
+    scored: list[tuple[tuple[int, float], dict]],
+    *,
+    limit: int,
+) -> list[dict]:
+    """Each cycle: advance fresh replies (Oui after intro) and backlog together."""
+    fresh: list[dict] = []
+    backlog: list[dict] = []
+    other: list[dict] = []
+    for (prio, _), conv in scored:
+        if prio <= -5:
+            fresh.append(conv)
+        elif prio <= -2:
+            backlog.append(conv)
+        else:
+            other.append(conv)
+    out: list[dict] = []
+    fi = bi = oi = 0
+    while len(out) < limit:
+        progressed = False
+        for _ in range(2):
+            if fi < len(fresh) and len(out) < limit:
+                out.append(fresh[fi])
+                fi += 1
+                progressed = True
+        if bi < len(backlog) and len(out) < limit:
+            out.append(backlog[bi])
+            bi += 1
+            progressed = True
+        if oi < len(other) and len(out) < limit:
+            out.append(other[oi])
+            oi += 1
+            progressed = True
+        if not progressed:
+            break
+    return out
+
+
+def _compute_cycle_limits(
+    queue_n: int,
+    no_status_n: int,
+    n_enabled: int,
+) -> dict[str, int]:
+    """Scale throughput with queue size — large traffic must not wait days."""
+    base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "64")))
+    max_handle = max(64, int(os.getenv("PAGER_MAX_HANDLE", "200") or "200"))
+    try:
+        batch_chunk = int(os.getenv("PAGER_BROWSER_BATCH_SIZE") or "0")
+    except ValueError:
+        batch_chunk = 0
+    try:
+        browser_parallel = int(os.getenv("PAGER_BROWSER_PARALLEL") or "0")
+    except ValueError:
+        browser_parallel = 0
+
+    if batch_chunk < 4:
+        batch_chunk = 24 if n_enabled <= 1 else 16
+    if browser_parallel < 1:
+        browser_parallel = 6 if n_enabled <= 1 else 4
+
+    if queue_n > 50:
+        max_handle = max(max_handle, min(2000, queue_n))
+        base_plans = max(base_plans, min(300, queue_n // 5))
+        batch_chunk = max(batch_chunk, 32)
+        browser_parallel = max(browser_parallel, 8)
+
+    if queue_n > 500:
+        max_handle = max(max_handle, min(3000, queue_n))
+        base_plans = max(base_plans, min(500, queue_n // 4))
+        batch_chunk = max(batch_chunk, 48)
+        browser_parallel = min(max(browser_parallel, 12), 16)
+
+    max_plans = base_plans
+    if no_status_n > 15 and n_enabled > 1:
+        max_plans = max(max_plans, min(200, no_status_n // 3))
+
+    funnel_cap = max(max_plans, 32)
+    return {
+        "max_handle": max_handle,
+        "max_plans": max_plans,
+        "funnel_cap": funnel_cap,
+        "batch_chunk": batch_chunk,
+        "browser_parallel": browser_parallel,
+    }
+
+
 class _CycleSendBuffer:
     """Queue outbound texts for one Playwright login per worker cycle."""
 
@@ -130,6 +217,7 @@ class _CycleSendBuffer:
         self.client = client
         self.batch_chunk_size = max(1, batch_chunk_size)
         self.parallel = max(1, parallel)
+        self._lock = threading.Lock()
         self._jobs: dict[str, list[str]] = {}
         self._script_keys: dict[str, list[str]] = {}
         self._clients: dict[str, str] = {}
@@ -149,27 +237,28 @@ class _CycleSendBuffer:
         channel_id: str = "",
         geo: str = "",
     ) -> None:
-        bodies = [t.strip() for t in texts if (t or "").strip()]
-        keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
-        keys = filter_auto_script_keys(keys)
-        if not bodies and not keys:
-            return
-        if bodies:
-            bucket = self._jobs.setdefault(conv_id, [])
-            bucket.extend(bodies)
-        if keys:
-            sk = self._script_keys.setdefault(conv_id, [])
-            sk.extend(keys)
-        if client_name:
-            self._clients[conv_id] = client_name.strip()
-        ch = (channel_id or "").strip()
-        if ch:
-            self._channels[conv_id] = ch
-        g = (geo or "").strip().lower()
-        if g:
-            self._geos[conv_id] = db.normalize_channel_geo(g)
-        if conv_id not in self._order:
-            self._order.append(conv_id)
+        with self._lock:
+            bodies = [t.strip() for t in texts if (t or "").strip()]
+            keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
+            keys = filter_auto_script_keys(keys)
+            if not bodies and not keys:
+                return
+            if bodies:
+                bucket = self._jobs.setdefault(conv_id, [])
+                bucket.extend(bodies)
+            if keys:
+                sk = self._script_keys.setdefault(conv_id, [])
+                sk.extend(keys)
+            if client_name:
+                self._clients[conv_id] = client_name.strip()
+            ch = (channel_id or "").strip()
+            if ch:
+                self._channels[conv_id] = ch
+            g = (geo or "").strip().lower()
+            if g:
+                self._geos[conv_id] = db.normalize_channel_geo(g)
+            if conv_id not in self._order:
+                self._order.append(conv_id)
 
     def queue_script_send(
         self,
@@ -190,16 +279,18 @@ class _CycleSendBuffer:
         )
 
     def queue_commit(self, conv_id: str, **kwargs: Any) -> None:
-        for i, (cid, fields) in enumerate(self._commits):
-            if cid == conv_id:
-                self._commits[i] = (cid, {**fields, **kwargs})
-                return
-        self._commits.append((conv_id, dict(kwargs)))
+        with self._lock:
+            for i, (cid, fields) in enumerate(self._commits):
+                if cid == conv_id:
+                    self._commits[i] = (cid, {**fields, **kwargs})
+                    return
+            self._commits.append((conv_id, dict(kwargs)))
 
     def queue_status_patch(self, conv_id: str, status_id: str) -> None:
-        sid = (status_id or "").strip()
-        if sid:
-            self._status_patches.setdefault(conv_id, []).append(sid)
+        with self._lock:
+            sid = (status_id or "").strip()
+            if sid:
+                self._status_patches.setdefault(conv_id, []).append(sid)
 
     async def _apply_fresh_cookies(
         self, fresh_cookies: dict[str, str], account_id: int
@@ -272,7 +363,7 @@ class _CycleSendBuffer:
         *,
         account_id: int,
         uid: str,
-        rest_parallel: int = 12,
+        rest_parallel: int = 32,
     ) -> tuple[set[str], list[tuple]]:
         """Send funnel scripts via REST (local .txt) — faster than Playwright."""
         account_geo = db.normalize_channel_geo(str(self.account.get("geo") or "zm"))
@@ -1749,7 +1840,7 @@ async def _ensure_enabled_channels(
     return {c["channel_id"] for c in chs if c.get("enabled")}
 
 
-async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
+async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
     try:
         account_id = int(account["id"])
         cookies = _cookies(account)
@@ -1763,7 +1854,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             )
             fresh = await refresh_pager_session(account)
             if not fresh:
-                return
+                return 0
             _session_cache[account_id] = (time.time(), dict(fresh))
             acc = await db.get_account_by_tg(int(account["tg_user_id"]))
             if acc:
@@ -1831,7 +1922,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             )
             fresh = await refresh_pager_session(account)
             if not fresh:
-                return
+                return 0
             _session_cache[account_id] = (time.time(), dict(fresh))
             acc = await db.get_account_by_tg(int(account["tg_user_id"]))
             if acc:
@@ -1847,7 +1938,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                     account_id,
                     exc,
                 )
-                return
+                return 0
         else:
             _session_cache[account_id] = (time.time(), dict(client.cookies))
 
@@ -1857,13 +1948,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 "Worker account=%s: no channels — refresh in Telegram bot",
                 account_id,
             )
-            return
+            return 0
         if not enabled:
             logger.warning(
                 "Worker account=%s: no enabled channels",
                 account_id,
             )
-            return
+            return 0
         await client.warm_session()
         if not client.session_user_id:
             uid = await client.resolve_session_user_id()
@@ -1903,7 +1994,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         try:
             convs = await client.collect_conversations(
                 enabled,
-                max_pages=10 if len(enabled) <= 1 else 6,
+                max_pages=max(15, 10 if len(enabled) <= 1 else 12),
                 geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
                 channel_geo_map=account.get("_channel_geo") or {},
                 channel_folders=channel_folders,
@@ -1918,7 +2009,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             )
             fresh = await refresh_pager_session(account)
             if not fresh:
-                return
+                return 0
             acc = await db.get_account_by_tg(int(account["tg_user_id"]))
             if acc:
                 account.update(acc)
@@ -1930,28 +2021,28 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             channel_folders = await db.build_channel_folders_map(account_id, enabled)
             convs = await client.collect_conversations(
                 enabled,
-                max_pages=10 if len(enabled) <= 1 else 6,
+                max_pages=max(15, 10 if len(enabled) <= 1 else 12),
                 geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
                 channel_geo_map=account.get("_channel_geo") or {},
                 channel_folders=channel_folders,
                 funnel_statuses=funnel_statuses,
             )
+        completed_sid = str(funnel_statuses.get("completed") or "").strip()
         inbound_convs = [
             c
             for c in convs
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
-            or is_no_status(c)
             or str(c.get("statusId") or "").strip() in funnel_status_ids(funnel_statuses)
-            or str(c.get("statusId") or "").strip()
-            == str(funnel_statuses.get("completed") or "").strip()
+            or (completed_sid and str(c.get("statusId") or "").strip() == completed_sid)
         ]
 
         no_status_count = sum(1 for c in inbound_convs if is_no_status(c))
         if inbound_convs:
             logger.info(
-                "Worker account=%s: inbound=%s no_status=%s funnel=%s",
+                "Worker account=%s: need_reply=%s (collected=%s) no_status=%s funnel=%s",
                 account.get("id"),
                 len(inbound_convs),
+                len(convs),
                 no_status_count,
                 len(inbound_convs) - no_status_count,
             )
@@ -2025,81 +2116,33 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
         for c in inbound_convs:
             scored.append((await _priority(c), c))
         scored.sort(key=lambda x: (x[0][0], x[0][1]))
-        inbound_convs = [c for _, c in scored]
-
-        async def _in_funnel(conv: dict) -> bool:
-            cid = str(conv.get("id") or "")
-            st = await db.get_conversation_state(account_id, cid)
-            return int(st.get("step") or 0) >= 1
-
-        funnel_active = [c for c in inbound_convs if await _in_funnel(c)]
-        funnel_active_ids = {str(c.get("id") or "") for c in funnel_active}
-        fresh_inbound = [
-            c for c in inbound_convs if str(c.get("id") or "") not in funnel_active_ids
-        ]
-        if funnel_active:
-            logger.info(
-                "Worker account=%s: funnel-active=%s fresh-inbound=%s",
-                account.get("id"),
-                len(funnel_active),
-                len(fresh_inbound),
-            )
-        # Keep priority sort — do not push all funnel chats ahead of new leads.
-        process_order = inbound_convs
+        limits = _compute_cycle_limits(
+            len(inbound_convs), no_status_count, len(enabled)
+        )
+        max_handle = limits["max_handle"]
+        max_plans = limits["max_plans"]
+        funnel_cap = limits["funnel_cap"]
+        batch_chunk = limits["batch_chunk"]
+        browser_parallel = limits["browser_parallel"]
+        process_order = _interleave_process_order(scored, limit=max_handle)
 
         inbound = len(process_order)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
         no_status_n = sum(1 for c in inbound_convs if is_no_status(c))
         n_enabled = len(enabled)
-        base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "32")))
-        batch_env = (os.getenv("PAGER_BROWSER_BATCH_SIZE") or "").strip()
-        try:
-            batch_env_n = int(batch_env) if batch_env else 0
-        except ValueError:
-            batch_env_n = 0
-        if batch_env_n >= 4:
-            batch_chunk = batch_env_n
-        else:
-            batch_chunk = 16 if n_enabled <= 1 else 8
-        par_env = (os.getenv("PAGER_BROWSER_PARALLEL") or "").strip()
-        try:
-            par_env_n = int(par_env) if par_env else 0
-        except ValueError:
-            par_env_n = 0
-        browser_parallel = par_env_n if par_env_n >= 1 else 3
-        if n_enabled <= 1:
-            max_plans = min(24, base_plans)
-        elif no_status_n > 15:
-            max_plans = min(28, base_plans)
-            batch_chunk = max(batch_chunk, 12)
-            browser_parallel = min(max(browser_parallel, 4), 6)
-        elif no_status_n > 8:
-            max_plans = min(12, base_plans)
-        else:
-            max_plans = min(8, base_plans)
         pager_user_id = resolve_account_operator_id(
             account, cookies, org_slug=org_slug
         )
-        funnel_cap = max(8, (max_plans * 2 + 1) // 3)
-        funnel_n = len(inbound_convs) - no_status_count
-        if funnel_n > 10:
-            funnel_cap = max(funnel_cap, min(64, funnel_n))
-        max_handle = max(32, int(os.getenv("PAGER_MAX_HANDLE", "72") or "72"))
-        if len(inbound_convs) > 500:
-            max_handle = max(max_handle, min(300, len(inbound_convs) // 4))
-            max_plans = max(max_plans, 48)
-            funnel_cap = max(funnel_cap, 48)
-        elif funnel_n > 20:
-            max_handle = max(max_handle, 120)
         logger.info(
             "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s "
-            "max_handle=%s (no_status=%s)",
+            "max_handle=%s work_queue=%s (no_status=%s)",
             account.get("id"),
             max_plans,
             funnel_cap,
             batch_chunk,
             browser_parallel,
             max_handle,
+            inbound,
             no_status_n,
         )
         send_buf = _CycleSendBuffer(
@@ -2113,59 +2156,56 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             parallel=browser_parallel,
         )
         planned = 0
-        funnel_planned = 0
-        max_total = max_plans + funnel_cap
-        handled = 0
-        for conv in process_order:
-            if handled >= max_handle:
-                break
-            handled += 1
-            cid = str(conv.get("id") or "")
-            in_funnel = cid in funnel_active_ids
-            if in_funnel and funnel_planned >= funnel_cap:
-                if planned >= max_plans:
-                    continue
+        plan_parallel = max(1, int(os.getenv("PAGER_PLAN_PARALLEL", "20") or "20"))
+        plan_sem = asyncio.Semaphore(plan_parallel)
+
+        async def _plan_conv(conv: dict) -> None:
+            nonlocal planned
             conv_id = str(conv.get("id") or "")
-            try:
-                result = await _handle_conversation(
-                    bot,
-                    account,
-                    conv,
-                    client,
-                    send_buf,
-                )
-                if result == "paused":
-                    skipped["paused"] += 1
-                elif result == "done":
-                    skipped["done"] += 1
-                elif result == "no_script":
-                    skipped["no_script"] += 1
-                elif result:
-                    if in_funnel:
-                        funnel_planned += 1
-                    else:
-                        planned += 1
-                if result is True and pager_user_id:
-                    try:
-                        await client.mark_conversation_read(
-                            conv_id, user_id=pager_user_id
-                        )
-                    except Exception:
-                        pass
-            except PagerAPIError as exc:
-                logger.warning(
-                    "conv API error account=%s conv=%s: %s",
-                    account.get("id"),
-                    conv_id,
-                    exc,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "conv plan failed account=%s conv=%s: %s",
-                    account.get("id"),
-                    conv_id,
-                    exc,
-                )
+            async with plan_sem:
+                try:
+                    result = await _handle_conversation(
+                        bot,
+                        account,
+                        conv,
+                        client,
+                        send_buf,
+                    )
+                except PagerAPIError as exc:
+                    logger.warning(
+                        "conv API error account=%s conv=%s: %s",
+                        account.get("id"),
+                        conv_id,
+                        exc,
+                    )
+                    return
+                except Exception as exc:
+                    logger.warning(
+                        "conv plan failed account=%s conv=%s: %s",
+                        account.get("id"),
+                        conv_id,
+                        exc,
+                    )
+                    return
+            if result == "paused":
+                skipped["paused"] += 1
+            elif result == "done":
+                skipped["done"] += 1
+            elif result == "no_script":
+                skipped["no_script"] += 1
+            elif result:
+                planned += 1
+            if result is True and pager_user_id:
+                try:
+                    await client.mark_conversation_read(
+                        conv_id, user_id=pager_user_id
+                    )
+                except Exception:
+                    pass
+
+        for start in range(0, len(process_order), plan_parallel):
+            batch = process_order[start : start + plan_parallel]
+            await asyncio.gather(*(_plan_conv(c) for c in batch))
 
         delivered = 0
         try:
@@ -2219,6 +2259,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 pager_user_id=pager_uid,
                 session_ok=1,
             )
+        return len(inbound_convs)
     except PagerAPIError as exc:
         if is_session_error(exc):
             await db.upsert_account(
@@ -2227,6 +2268,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
                 last_error="Session expired — reconnect in bot",
             )
         logger.warning("Pager API account=%s: %s", account.get("id"), exc)
+    return 0
 
 
 async def worker_loop(bot: Bot) -> None:
@@ -2246,12 +2288,14 @@ async def worker_loop(bot: Bot) -> None:
                 )
             else:
                 logger.info("Worker tick: accounts=%s", len(accounts))
+            max_queue = 0
             for acc in accounts:
                 try:
-                    await asyncio.wait_for(
+                    q = await asyncio.wait_for(
                         _process_account(bot, acc),
                         timeout=1200.0,
                     )
+                    max_queue = max(max_queue, int(q or 0))
                 except asyncio.TimeoutError:
                     logger.error(
                         "Worker account=%s: cycle timeout 1200s",
@@ -2259,7 +2303,21 @@ async def worker_loop(bot: Bot) -> None:
                     )
         except Exception:
             logger.exception("worker tick failed")
-        await asyncio.sleep(_settings.poll_sec)
+            poll_wait = settings.poll_sec
+        else:
+            if max_queue > 800:
+                poll_wait = min(settings.poll_sec, 6.0)
+            elif max_queue > 200:
+                poll_wait = min(settings.poll_sec, 10.0)
+            else:
+                poll_wait = settings.poll_sec
+            if max_queue > 200:
+                logger.info(
+                    "Worker adaptive poll=%ss (queue=%s)",
+                    poll_wait,
+                    max_queue,
+                )
+        await asyncio.sleep(poll_wait)
 
 
 def start_worker(bot: Bot) -> asyncio.Task:
