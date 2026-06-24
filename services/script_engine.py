@@ -65,7 +65,7 @@ DJ_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "06_deposit": "bouton vert",
     "07_game_id": "commence par 17",
     "08_tg_invite": "canal Telegram privé",
-    "09_tg_link": "5FWd_blXeRM5OTJi",
+    "09_tg_link": "eylDdIKyykg0MWUyc",
     "10_reg_screenshot": "Problème à l'inscription",
 }
 
@@ -168,7 +168,7 @@ def _step_for_outgoing_text_eg(text: str) -> int:
 
 def _step_for_outgoing_text_dj(text: str) -> int:
     t = (text or "").lower()
-    if "5fwd_blxe" in t:
+    if "eylddikyykg" in t or "5fwd_blxe" in t or "t.me/+" in t:
         return 9
     if "canal telegram" in t or "rejoins notre" in t:
         return 8

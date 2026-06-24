@@ -1527,6 +1527,26 @@ async def _handle_conversation(
                 )
         elif (
             geo in ("zm", "dj")
+            and 4 <= effective_step < 7
+            and intent in (Intent.POSITIVE, Intent.READY)
+            and (
+                is_short_affirmative(text)
+                or is_registration_confirmed(text)
+            )
+            and reg_link_sent_in_history(op_outgoing, geo=geo)
+            and not script_sent_in_history(
+                op_outgoing, script_ui_snippet("06_deposit", geo)
+            )
+        ):
+            keys = ["06_deposit"]
+            logger.info(
+                "conv=%s positive-after-link fallback keys=%s text=%r",
+                conv_id[:8],
+                keys,
+                (text or "")[:40],
+            )
+        elif (
+            geo in ("zm", "dj")
             and 2 <= effective_step < 6
             and is_deposit_tier_choice(text)
             and not reg_link_sent_in_history(op_outgoing, geo=geo)
@@ -1996,6 +2016,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> None:
             if is_no_status(conv) or status_id in funnel_status_ids(
                 funnel_statuses
             ):
+                if incoming and st_step < 4:
+                    return (-5, -ts + fails * 1e-9)
                 return (-2, ts + fails * 1e-6)
             return (1, ts)
 
