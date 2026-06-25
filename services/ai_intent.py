@@ -229,7 +229,7 @@ def is_short_affirmative(text: str) -> bool:
         return False
     if re.fullmatch(
         r"(wii+|wi+|oui+|ouii+|ouais|ouaip|ok+|okay|yep|yes+|yess|"
-        r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|allezy|"
+        r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|allezy|chef|"
         r"oui\s+exactement|exactement|"
         r"letsgo|letgo|go|sure|alright)",
         t,

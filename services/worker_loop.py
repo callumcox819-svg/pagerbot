@@ -634,6 +634,55 @@ def _is_outgoing_direction(value: str) -> bool:
     return (value or "").strip().lower() in ("outgoing", "out")
 
 
+def _recent_incoming_messages(
+    msg_only: list[dict[str, Any]], *, limit: int = 10
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for m in reversed(msg_only):
+        if not _is_incoming_direction(str(m.get("messageDirection") or "")):
+            continue
+        if "oldStatusId" in m:
+            continue
+        out.append(m)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _pick_client_turn_message(
+    msg_only: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    geo: str,
+    hint_step: int,
+    op_texts: list[str],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Don't lose tier choice (300) when client then sends sticker or «Chef»."""
+    incoming = _recent_incoming_messages(msg_only)
+    if not incoming:
+        return fallback
+    last_processed = str(state.get("last_processed_msg_id") or "")
+    if (
+        hint_step >= 2
+        and hint_step < 6
+        and not reg_link_sent_in_history(op_texts, geo=geo)
+    ):
+        for m in incoming:
+            t = (m.get("text") or "").strip()
+            if is_deposit_tier_choice(t):
+                return m
+    for m in incoming:
+        mid = str(m.get("id") or "")
+        if mid and mid == last_processed:
+            continue
+        t = (m.get("text") or "").strip()
+        atts = m.get("attachments") or []
+        if t or (atts and not is_messenger_reaction_attachment(atts)):
+            return m
+    return fallback
+
+
 def _escalation_chat(account: dict[str, Any]) -> int:
     cid = int(account.get("escalation_chat_id") or 0)
     return cid or int(account["tg_user_id"])
@@ -881,6 +930,28 @@ async def _handle_conversation(
         and (m.get("text") or "").strip()
         and (m.get("isDelivered") or m.get("facebookMessageId"))
     ]
+    last_in = _pick_client_turn_message(
+        msg_only,
+        state,
+        geo=geo,
+        hint_step=effective_step_early,
+        op_texts=op_texts_early,
+        fallback=last_in,
+    )
+    turn_text = (last_in.get("text") or "").strip()
+    if turn_text != (text or "").strip() or str(last_in.get("id") or "") != msg_id:
+        logger.info(
+            "conv=%s client turn text=%r (was %r)",
+            conv_id[:8],
+            turn_text[:40] or "(attach)",
+            (text or "")[:40] or "(attach)",
+        )
+    msg_id = str(last_in.get("id") or "")
+    last_in_ts = str(last_in.get("createdAt") or "")
+    text = (last_in.get("text") or "").strip()
+    attachments = last_in.get("attachments") or []
+    has_image = bool(attachments)
+    has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
     deposit_funnel_early = should_send_deposit_script(
         text,
         effective_step_early,
@@ -1672,6 +1743,26 @@ async def _handle_conversation(
                 keys,
             )
 
+    if (
+        not keys
+        and needs_reply
+        and geo in ("zm", "dj")
+        and 2 <= effective_step < 6
+        and not reg_link_sent_in_history(op_outgoing, geo=geo)
+    ):
+        for m in _recent_incoming_messages(msg_only):
+            tier_text = (m.get("text") or "").strip()
+            if is_deposit_tier_choice(tier_text):
+                keys = ["04_registration", "05_link"]
+                msg_id = str(m.get("id") or "")
+                logger.info(
+                    "conv=%s tier-in-thread keys=%s text=%r",
+                    conv_id[:8],
+                    keys,
+                    tier_text[:20],
+                )
+                break
+
     if needs_reply and not deposit_signal and not keys:
         if (
             intent in (Intent.QUESTION, Intent.UNKNOWN)
@@ -1893,6 +1984,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
 
         client = _make_client(cookies)
         await client.warm_session()
+        if not client.org_id:
+            await client.resolve_org_id_live()
         session_ok = False
         for attempt in range(2):
             try:
