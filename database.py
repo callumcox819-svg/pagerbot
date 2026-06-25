@@ -675,7 +675,7 @@ async def build_channel_folders_map(
 
 
 async def clear_pauses_for_account(account_id: int) -> int:
-    """Reset pause flags only — keep processed/escalation markers for dedupe."""
+    """Reset pause flags only — keep escalation markers to avoid TG spam."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """
@@ -686,6 +686,7 @@ async def clear_pauses_for_account(account_id: int) -> int:
                 updated_at = datetime('now')
             WHERE account_id = ?
               AND (pause_scripts = 1 OR human_takeover = 1 OR send_failures > 0)
+              AND (last_escalation_msg_id IS NULL OR last_escalation_msg_id = '')
             """,
             (account_id,),
         )

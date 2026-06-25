@@ -866,7 +866,7 @@ def needs_human_for_text(
 ) -> bool:
     if intent in (Intent.MONEY_REQUEST, Intent.DECLINED):
         return False
-    if geo == "eg" and step < 4 and intent in (Intent.UNKNOWN, Intent.QUESTION):
+    if geo == "eg" and step < 6 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
     if (
         geo in ("zm", "dj")

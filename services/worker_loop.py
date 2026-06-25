@@ -715,15 +715,24 @@ async def _escalate_once(
     last_message: str,
     extra: str = "",
     pause: bool = True,
+    *,
+    allow_repeat: bool = False,
 ) -> bool:
     """Notify operator once per inbound message; return True if sent."""
     fresh = await db.get_conversation_state(account_id, conv_id)
     esc_msg = str(fresh.get("last_escalation_msg_id") or "")
-    if msg_id and esc_msg and msg_id == esc_msg:
+    if esc_msg and not allow_repeat:
+        if not msg_id or msg_id == esc_msg:
+            logger.info(
+                "conv=%s skip duplicate escalation msg=%s",
+                conv_id[:8],
+                (msg_id or "")[:8],
+            )
+            return False
         logger.info(
-            "conv=%s skip duplicate escalation msg=%s",
+            "conv=%s skip repeat escalation (prior msg=%s)",
             conv_id[:8],
-            msg_id[:8],
+            esc_msg[:8],
         )
         return False
     if (
@@ -959,19 +968,15 @@ async def _handle_conversation(
         folder_step=folder_step,
         geo=geo,
     )
-    if deposit_funnel_early and (
-        state.get("pause_scripts") or state.get("last_escalation_msg_id")
-    ):
+    if deposit_funnel_early and state.get("pause_scripts"):
         await db.save_conversation_state(
             account_id,
             conv_id,
             pause_scripts=0,
-            last_escalation_msg_id="",
         )
         state = {
             **state,
             "pause_scripts": 0,
-            "last_escalation_msg_id": "",
         }
 
     if _has_failed_ghost_after(last_in_ts):
