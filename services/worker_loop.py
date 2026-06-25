@@ -715,7 +715,6 @@ async def _escalate_once(
     last_message: str,
     extra: str = "",
     pause: bool = True,
-    *,
     allow_repeat: bool = False,
 ) -> bool:
     """Notify operator once per inbound message; return True if sent."""
