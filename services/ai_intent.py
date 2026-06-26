@@ -816,6 +816,61 @@ def is_deposit_question(text: str) -> bool:
     )
 
 
+_READY_CONTINUE_BROADCAST = re.compile(
+    r"\b("
+    r"prêt à continuer|pret a continuer|prêt à commencer|pret a commencer|"
+    r"notre stratégie|notre strategie|bons résultats|bons resultats|"
+    r"stratégie donne|strategie donne|tu es prêt|tu es pret|"
+    r"êtes-vous prêt|etes-vous pret|ready to continue"
+    r")\b",
+    re.I,
+)
+
+
+def outgoing_has_ready_continue_broadcast(outgoing_texts: list[str]) -> bool:
+    """Operator mass-message: «Prêt à continuer?» / strategy pitch."""
+    for raw in reversed(outgoing_texts or []):
+        t = (raw or "").strip()
+        if not t:
+            continue
+        if _READY_CONTINUE_BROADCAST.search(t):
+            return True
+        if len(t) > 40:
+            break
+    return False
+
+
+def is_affirmative_to_ready_broadcast(
+    text: str,
+    outgoing_texts: list[str],
+    *,
+    geo: str = "zm",
+) -> bool:
+    """Client «Oui» after operator asked to continue / deposit follow-up."""
+    if not is_short_affirmative(text) and not is_ready_for_registration(
+        text, geo=geo
+    ):
+        t = (text or "").strip().lower()
+        if not re.fullmatch(r"(déjà fait|deja fait|déjà|deja)\.?", t, re.I):
+            return False
+    return outgoing_has_ready_continue_broadcast(outgoing_texts)
+
+
+def deposit_screenshot_nudge_reply(*, geo: str = "cm") -> str:
+    from services.script_engine import load_script
+
+    g = (geo or "cm").strip().lower()
+    if g not in ("cm", "dj"):
+        g = "cm"
+    try:
+        return load_script(g, "extras/deposit_screenshot_nudge")
+    except FileNotFoundError:
+        return (
+            "Super, dès que vous aurez rechargé votre compte, "
+            "envoyez-nous une capture d'écran."
+        )
+
+
 _DEPOSIT_CHECK_OUT = re.compile(
     r"\b("
     r"tu as fait le d[ée]p[oô]t|vous avez fait le d[ée]p[oô]t|"
@@ -842,7 +897,8 @@ def is_affirmative_to_deposit_check(
             continue
         if _DEPOSIT_CHECK_OUT.search(t):
             return True
-        break
+        if _READY_CONTINUE_BROADCAST.search(t):
+            return is_short_affirmative(text)
     return False
 
 

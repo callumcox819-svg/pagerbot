@@ -29,7 +29,10 @@ from services.ai_intent import (
     is_commitment_reply,
     is_deposit_confirmation,
     is_affirmative_to_deposit_check,
+    is_affirmative_to_ready_broadcast,
     is_deposit_question,
+    deposit_screenshot_nudge_reply,
+    outgoing_has_ready_continue_broadcast,
     is_already_registered_before_funnel,
     is_age_answer,
     is_deferral_reply,
@@ -1315,9 +1318,12 @@ async def _handle_conversation(
             pause_scripts=1,
             last_processed_msg_id=msg_id,
         )
+        if pager_user_id:
+            try:
+                await client.mark_conversation_read(conv_id, user_id=pager_user_id)
+            except Exception:
+                pass
         return "done"
-
-    thread_has_ad = has_ad or any(
         bool(m.get("adId") or m.get("adUrl")) for m in msg_only
     )
     if (
@@ -1500,9 +1506,22 @@ async def _handle_conversation(
         folder_step=folder_step,
         geo=geo,
     )
+    ready_broadcast_reply = needs_reply and geo in ("cm", "dj") and (
+        is_affirmative_to_ready_broadcast(
+            text, op_texts_early, geo=geo
+        )
+        or (
+            is_short_affirmative(text)
+            and outgoing_has_ready_continue_broadcast(op_texts_early)
+        )
+        or is_affirmative_to_deposit_check(text, op_texts_early, geo=geo)
+    )
 
     auto_funnel = (
-        post_intro_followup or registration_resend or reg_confirmed_funnel
+        post_intro_followup
+        or registration_resend
+        or reg_confirmed_funnel
+        or ready_broadcast_reply
     )
     script_funnel = (
         needs_reply
@@ -2159,6 +2178,31 @@ async def _handle_conversation(
                 )
                 break
 
+    if needs_reply and ready_broadcast_reply and not deposit_signal and not keys:
+        nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
+        if not script_sent_in_history(op_outgoing, nudge_sn):
+            body = deposit_screenshot_nudge_reply(geo=geo)
+            send_buf.queue_send(
+                conv_id,
+                [body],
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 5),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s ready-broadcast nudge folder=%r text=%r",
+                conv_id[:8],
+                (folder[:20] if folder else ""),
+                (text or "")[:40],
+            )
+            return True
+
     if needs_reply and not deposit_signal and not keys:
         if (
             intent in (Intent.QUESTION, Intent.UNKNOWN)
@@ -2647,6 +2691,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             ):
                 return (-3, -ts + fails * 1e-9)
             if status_id == funnel_statuses.get("registration") and incoming:
+                return (-4, -ts + fails * 1e-9)
+            if status_id == funnel_statuses.get("in_progress") and incoming:
                 return (-4, -ts + fails * 1e-9)
             if status_id in (
                 funnel_statuses.get("wait_id"),
