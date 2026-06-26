@@ -48,8 +48,10 @@ from services.ai_intent import (
     is_registration_confirmed,
     is_registration_pending,
     is_short_affirmative,
+    is_xbet_site_question,
     money_refusal_reply,
     phone_chat_only_reply,
+    xbet_site_confirm_reply,
     needs_human_for_text,
     wants_details_after_intro,
     wants_registration_followup,
@@ -1524,12 +1526,17 @@ async def _handle_conversation(
         )
         or is_affirmative_to_deposit_check(text, op_texts_early, geo=geo)
     )
+    xbet_site_reply = needs_reply and is_xbet_site_question(text) and (
+        reg_link_sent_in_history(op_texts_early, geo=geo)
+        or effective_step >= 3
+    )
 
     auto_funnel = (
         post_intro_followup
         or registration_resend
         or reg_confirmed_funnel
         or ready_broadcast_reply
+        or xbet_site_reply
     )
     script_funnel = (
         needs_reply
@@ -1564,6 +1571,29 @@ async def _handle_conversation(
             conv_id[:8],
             effective_step,
             (text or "")[:40],
+        )
+        return True
+
+    if needs_reply and xbet_site_reply:
+        body = xbet_site_confirm_reply(geo=geo)
+        send_buf.queue_send(
+            conv_id,
+            [body],
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        send_buf.queue_commit(
+            conv_id,
+            step=max(step, 3),
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        logger.info(
+            "conv=%s xbet_site_confirm geo=%s text=%r",
+            conv_id[:8],
+            geo,
+            (text or "")[:50],
         )
         return True
 

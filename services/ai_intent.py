@@ -69,6 +69,17 @@ _FR_POST_LINK = re.compile(
     r"vous êtes inscrit|etes vous inscrit|êtes-vous inscrit|inscrit\??)\b",
     re.I,
 )
+_XBET_BRAND = re.compile(r"\b(1xbet|1x\s*bet|xbet|1хбет|1х\s*бет)\b", re.I)
+_XBET_SITE_QUESTION = re.compile(
+    r"\b("
+    r"ce site|cet site|this site|the site|ce lien|this link|le lien|"
+    r"c'est quoi|cest quoi|c'est bien|cest bien|is it|is this|"
+    r"m'envoi|m'envoie|me envoie|me envoi|envoie vers|envoi vers|"
+    r"redirige|redirect|sur 1x|vers 1x|to 1x|"
+    r"hein|n'est-ce pas|nest ce pas|right|correct"
+    r")\b",
+    re.I,
+)
 _FR_INTERESTED = re.compile(
     r"\b(intéressé|interesse|intéressée|interessee|explique|expliquez|"
     r"comment ça marche|comment ca marche|je veux|dites-moi|dites moi)\b",
@@ -593,9 +604,56 @@ def is_post_link_registration_question(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if is_xbet_site_question(t):
+        return True
     if _FR_POST_LINK.search(t):
         return True
     return bool(_POST_LINK_QUESTION.search(t))
+
+
+def is_xbet_site_question(text: str) -> bool:
+    """«Ce site m'envoie sur 1xbet?» — confirm platform + must register."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _XBET_BRAND.search(t):
+        if "?" in t or _XBET_SITE_QUESTION.search(t):
+            return True
+        if re.search(r"\b(sur|vers|to|on|loin)\b", t, re.I):
+            return True
+        return is_on_registration_site(t)
+    if _XBET_SITE_QUESTION.search(t) and re.search(
+        r"\b(bet|inscri|register|promo|code|site|lien|link)\b", t, re.I
+    ):
+        return True
+    return False
+
+
+def xbet_site_confirm_reply(*, geo: str = "zm") -> str:
+    from services.script_engine import load_script
+
+    g = (geo or "zm").strip().lower()
+    if g not in ("zm", "eg", "dj", "cm"):
+        g = "zm"
+    try:
+        return load_script(g, "extras/xbet_site_confirm")
+    except FileNotFoundError:
+        fallbacks = {
+            "eg": "أيوه، عشان تستخدم كود العرض لازم تسجّل على الموقع.",
+            "cm": (
+                "Oui, pour utiliser le code promotionnel que nous vous avons fourni, "
+                "vous devez vous inscrire."
+            ),
+            "dj": (
+                "Oui, pour utiliser le code promotionnel que nous vous avons fourni, "
+                "vous devez vous inscrire."
+            ),
+            "zm": (
+                "Yes — to use the promotional code we gave you, "
+                "you need to register on the site."
+            ),
+        }
+        return fallbacks.get(g, fallbacks["zm"])
 
 
 def wants_registration_link(text: str) -> bool:
@@ -1178,6 +1236,8 @@ def needs_human_for_text(
     ):
         return False
     if is_post_link_registration_question(text) and step < 7:
+        return False
+    if is_xbet_site_question(text) and step < 8:
         return False
     if is_deferral_reply(text) and step < 6:
         return False
