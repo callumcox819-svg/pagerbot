@@ -665,6 +665,16 @@ def wants_registration_link(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if re.search(
+        r"(?i)\b(lequel|laquelle|quel|quelle|where|which)\b.{0,24}\blien\b",
+        t,
+    ):
+        return True
+    if re.search(
+        r"(?i)\blien\b.{0,24}\b(lequel|laquelle|quel|quelle)\b",
+        t,
+    ):
+        return True
     if _FR_LINK_ASK.search(t):
         return True
     if _FR_REG.search(t) and "lien" in t.lower():
@@ -915,11 +925,23 @@ def is_broadcast_positive_reply(text: str, *, geo: str = "cm") -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if wants_registration_link(t) or is_post_link_registration_question(t):
+        return False
+    if is_deposit_tier_choice(t, geo=geo):
+        return False
+    if "?" in t and re.search(r"(?i)\blien\b", t):
+        return False
     if len(t.split()) > 10 and not _BROADCAST_POSITIVE_REPLY.search(t):
         return False
     if is_short_affirmative(t):
         return True
     if _BROADCAST_POSITIVE_REPLY.search(t):
+        if "?" in t and len(t.split()) > 2:
+            if not re.search(
+                r"(?i)\b(je\s+suis\s+intéress|je\s+suis\s+interesse|pr[eê]t)\b",
+                t,
+            ):
+                return False
         return True
     return False
 
@@ -974,6 +996,8 @@ def client_replied_to_ready_broadcast(
 ) -> bool:
     """True when client answered directly after operator mass-mail."""
     if is_deposit_tier_choice(client_text, geo=geo):
+        return False
+    if wants_registration_link(client_text):
         return False
     if not is_broadcast_positive_reply(client_text, geo=geo):
         return False

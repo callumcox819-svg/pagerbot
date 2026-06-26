@@ -598,6 +598,9 @@ def resolve_funnel_scripts(
         if tier_sent and is_deposit_tier_choice(t, geo=geo) and not link_sent:
             return ["05_registration", "06_link", "07_chrome"]
 
+        if wants_registration_link(t) and not link_sent and steps_sent:
+            return ["05_registration", "06_link", "07_chrome"]
+
         if effective_step < 1:
             if not intro_sent:
                 if intent in ("interested", "positive", "ready", "question") or _positive_signal():
@@ -629,9 +632,7 @@ def resolve_funnel_scripts(
 
         if effective_step < 4:
             if wants_registration_link(t) and steps_sent and not link_sent:
-                if tier_sent:
-                    return ["05_registration", "06_link", "07_chrome"]
-                return ["04_tier"]
+                return ["05_registration", "06_link", "07_chrome"]
             if steps_sent and not tier_sent:
                 if (
                     intent in ("positive", "ready", "interested", "question")

@@ -1487,6 +1487,38 @@ async def _handle_conversation(
             )
             return True
 
+    if (
+        needs_reply
+        and wants_registration_link(text)
+        and not reg_link_sent_in_history(op_texts_early, geo=geo)
+        and geo in ("cm", "zm", "dj")
+    ):
+        reg_keys = (
+            ["05_registration", "06_link", "07_chrome"]
+            if geo == "cm"
+            else ["04_registration", "05_link"]
+        )
+        send_buf.queue_script_send(
+            conv_id,
+            reg_keys,
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        send_buf.queue_commit(
+            conv_id,
+            step=max(step, 5),
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        logger.info(
+            "conv=%s link-request reg keys=%s text=%r",
+            conv_id[:8],
+            reg_keys,
+            (text or "")[:40],
+        )
+        return True
+
     if needs_reply and ready_broadcast_reply:
         nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
         if not script_sent_in_history(thread_out_early, nudge_sn) and not (
