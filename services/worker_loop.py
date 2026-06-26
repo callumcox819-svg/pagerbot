@@ -44,6 +44,7 @@ from services.ai_intent import (
     is_registration_pending,
     is_short_affirmative,
     money_refusal_reply,
+    phone_chat_only_reply,
     needs_human_for_text,
     wants_details_after_intro,
     wants_registration_followup,
@@ -1417,6 +1418,29 @@ async def _handle_conversation(
         )
     )
     funnel_active = auto_funnel or script_funnel
+
+    if needs_reply and intent == Intent.PHONE_REQUEST:
+        body = phone_chat_only_reply(text, geo=geo)
+        send_buf.queue_send(
+            conv_id,
+            [body],
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        send_buf.queue_commit(
+            conv_id,
+            step=max(step, 1),
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        logger.info(
+            "conv=%s phone_request reply step=%s text=%r",
+            conv_id[:8],
+            effective_step,
+            (text or "")[:40],
+        )
+        return True
 
     if needs_reply and intent == Intent.MONEY_REQUEST:
         if geo in ("cm", "dj") and effective_step < 6:

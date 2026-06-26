@@ -17,6 +17,7 @@ class Intent(str, Enum):
     IMAGE_ONLY = "image_only"
     GAME_ID_TEXT = "game_id_text"
     MONEY_REQUEST = "money_request"
+    PHONE_REQUEST = "phone_request"
     DECLINED = "declined"
     UNKNOWN = "unknown"
 
@@ -445,6 +446,30 @@ _TIER_AMOUNT = re.compile(
 )
 
 
+_PHONE_REQUEST = re.compile(
+    r"\b(your|ur)\s+(phone\s*)?number\b|"
+    r"\b(send|give|share|drop)\s+(me\s+)?(your\s+)?(phone\s*)?number\b|"
+    r"\b(phone|mobile|cell)\s*number\b|"
+    r"\bcall\s+me\b|"
+    r"\bwhatsapp\s*(number|no\.?)?\b|"
+    r"\bnumber\s+please\b",
+    re.I,
+)
+_FR_PHONE_REQUEST = re.compile(
+    r"\b(envoy\w*|donn\w*|pass\w*|mets?)\b.{0,30}\b(ton|votre|ta)\s*(numéro|numero)\b|"
+    r"\b(numéro|numero)\s+(de\s+)?(téléphone|telephone|tel)\b|"
+    r"\b(ton|votre|ta)\s+(numéro|numero|tel)\b|"
+    r"\bappelle[- ]moi\b|"
+    r"\bwhatsapp\b",
+    re.I,
+)
+_AR_PHONE_REQUEST = re.compile(
+    r"رقمك|رقمك؟|رقم الهاتف|رقم التليفون|رقم الواتس|"
+    r"واتس|واتساب|اتصل(ي)?\s*بي|اتصل\s*معي|"
+    r"ابعت(لي)?\s*رقم|ارسل(لي)?\s*رقم|رقمك\s*ايه|رقمك\s*إيه"
+)
+
+
 def is_money_request(text: str) -> bool:
     t = (text or "").strip()
     if not t:
@@ -456,6 +481,17 @@ def is_money_request(text: str) -> bool:
     return bool(_MONEY_REQUEST.search(t))
 
 
+def is_phone_number_request(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_PHONE_REQUEST.search(t):
+        return True
+    if _FR_PHONE_REQUEST.search(t):
+        return True
+    return bool(_PHONE_REQUEST.search(t))
+
+
 def money_refusal_reply(text: str, *, geo: str = "zm") -> str:
     t = (text or "").strip()
     if geo == "eg" or _ARABIC.search(t):
@@ -463,6 +499,38 @@ def money_refusal_reply(text: str, *, geo: str = "zm") -> str:
     if geo == "dj" or geo == "cm" or _FRENCH_LATIN.search(t):
         return MONEY_REFUSAL_FR
     return MONEY_REFUSAL_EN
+
+
+def phone_chat_only_reply(text: str, *, geo: str = "zm") -> str:
+    """Reply when client asks for phone / WhatsApp — language follows channel geo."""
+    from services.script_engine import load_script
+
+    g = (geo or "zm").strip().lower()
+    if g not in ("zm", "eg", "dj", "cm"):
+        g = "zm"
+    try:
+        return load_script(g, "extras/chat_only")
+    except FileNotFoundError:
+        pass
+    fallbacks = {
+        "eg": (
+            "نتحدث فقط عبر الإنترنت في هذه المحادثة. "
+            "إذا كنت مهتماً، أخبرني وسنكمل هنا."
+        ),
+        "cm": (
+            "Nous communiquons uniquement en ligne dans ce chat. "
+            "Si tu es intéressé(e), dis-le moi et on continue ici."
+        ),
+        "dj": (
+            "Nous communiquons uniquement en ligne dans ce chat. "
+            "Si tu es intéressé(e), dis-le moi et on continue ici."
+        ),
+        "zm": (
+            "We only communicate online in this chat. "
+            "If you're interested, let me know and we'll continue here."
+        ),
+    }
+    return fallbacks.get(g, fallbacks["zm"])
 
 
 def is_what_required_question(text: str) -> bool:
@@ -889,6 +957,8 @@ def classify(
     message_reaction: str | None = None,
 ) -> Intent:
     t = (text or "").strip()
+    if is_phone_number_request(t):
+        return Intent.PHONE_REQUEST
     if is_money_request(t):
         return Intent.MONEY_REQUEST
     if is_refusal_reply(t):
@@ -973,7 +1043,7 @@ def needs_human(intent: Intent, step: int, *, no_status: bool = False) -> bool:
 def needs_human_for_text(
     intent: Intent, step: int, text: str, *, no_status: bool = False, geo: str = "zm"
 ) -> bool:
-    if intent in (Intent.MONEY_REQUEST, Intent.DECLINED):
+    if intent in (Intent.MONEY_REQUEST, Intent.PHONE_REQUEST, Intent.DECLINED):
         return False
     if geo == "eg" and step < 6 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
