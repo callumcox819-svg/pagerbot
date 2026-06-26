@@ -875,15 +875,53 @@ def is_deposit_question(text: str) -> bool:
 
 
 _READY_CONTINUE_BROADCAST = re.compile(
+    r"prêt à continuer|pret a continuer",
+    re.I,
+)
+_BROADCAST_PITCH = re.compile(
+    r"notre stratégie|notre strategie",
+    re.I,
+)
+_BROADCAST_RESULTS = re.compile(
+    r"bons résultats|bons resultats|prêt à continuer|pret a continuer",
+    re.I,
+)
+_BROADCAST_POSITIVE_REPLY = re.compile(
     r"\b("
-    r"prêt à continuer|pret a continuer|prêt à commencer|pret a commencer|"
-    r"notre stratégie|notre strategie|bons résultats|bons resultats|"
-    r"stratégie donne|strategie donne|tu es prêt|tu es pret|"
-    r"êtes-vous prêt|etes-vous pret|ready to continue|"
-    r"good results today|our strategy"
+    r"je suis intéressé|je suis interesse|je suis partant|"
+    r"intéressé|interesse|pourquoi pas|"
+    r"oui|ok|d'accord|daccord|vas[- ]?y|allons[- ]?y"
     r")\b",
     re.I,
 )
+
+
+def is_operator_ready_broadcast(text: str) -> bool:
+    """Pager mass-mail: «Notre stratégie… Prêt à continuer?» (not bot scripts)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _READY_CONTINUE_BROADCAST.search(t):
+        return True
+    return bool(_BROADCAST_PITCH.search(t) and _BROADCAST_RESULTS.search(t))
+
+
+def is_broadcast_positive_reply(text: str, *, geo: str = "cm") -> bool:
+    """Client reply to operator broadcast — Oui, Je suis intéressé, etc."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if is_short_affirmative(t):
+        return True
+    if _BROADCAST_POSITIVE_REPLY.search(t):
+        return True
+    if is_ready_for_registration(t, geo=geo):
+        return True
+    if _FR_POSITIVE.search(t) and len(t.split()) <= 6:
+        return True
+    if _FR_INTERESTED.search(t):
+        return True
+    return False
 
 
 def outgoing_has_ready_continue_broadcast(
@@ -891,18 +929,47 @@ def outgoing_has_ready_continue_broadcast(
     *,
     limit: int = 16,
 ) -> bool:
-    """Operator mass-message: «Prêt à continuer?» / strategy pitch."""
+    """Any operator broadcast pitch in recent outgoing texts."""
     checked = 0
     for raw in reversed(outgoing_texts or []):
         t = (raw or "").strip()
         if not t:
             continue
-        if _READY_CONTINUE_BROADCAST.search(t):
+        if is_operator_ready_broadcast(t):
             return True
         checked += 1
         if checked >= limit:
             break
     return False
+
+
+def client_replied_to_ready_broadcast(
+    messages: list[dict],
+    client_msg: dict,
+    client_text: str,
+    *,
+    geo: str = "cm",
+) -> bool:
+    """True when client answered AFTER operator mass-mail (not old thread noise)."""
+    if not is_broadcast_positive_reply(client_text, geo=geo):
+        return False
+    client_ts = str(client_msg.get("createdAt") or "")
+    if not client_ts:
+        return False
+    broadcast_ts = ""
+    for m in messages:
+        direction = str(m.get("messageDirection") or "").strip().lower()
+        if direction not in ("outgoing", "out"):
+            continue
+        if "oldStatusId" in m or "oldResponsibleId" in m:
+            continue
+        body = (m.get("text") or "").strip()
+        if not is_operator_ready_broadcast(body):
+            continue
+        ts = str(m.get("createdAt") or "")
+        if ts and ts <= client_ts and ts > broadcast_ts:
+            broadcast_ts = ts
+    return bool(broadcast_ts)
 
 
 def is_affirmative_to_ready_broadcast(
@@ -911,13 +978,9 @@ def is_affirmative_to_ready_broadcast(
     *,
     geo: str = "zm",
 ) -> bool:
-    """Client «Oui» after operator asked to continue / deposit follow-up."""
-    if not is_short_affirmative(text) and not is_ready_for_registration(
-        text, geo=geo
-    ):
-        t = (text or "").strip().lower()
-        if not re.fullmatch(r"(déjà fait|deja fait|déjà|deja)\.?", t, re.I):
-            return False
+    """Legacy helper — prefer client_replied_to_ready_broadcast with timestamps."""
+    if not is_broadcast_positive_reply(text, geo=geo):
+        return False
     return outgoing_has_ready_continue_broadcast(outgoing_texts)
 
 

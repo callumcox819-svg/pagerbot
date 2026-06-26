@@ -30,10 +30,9 @@ from services.ai_intent import (
     is_deposit_acknowledgment,
     is_deposit_confirmation,
     is_affirmative_to_deposit_check,
-    is_affirmative_to_ready_broadcast,
+    client_replied_to_ready_broadcast,
     is_deposit_question,
     deposit_screenshot_nudge_reply,
-    outgoing_has_ready_continue_broadcast,
     is_already_registered_before_funnel,
     is_age_answer,
     is_deferral_reply,
@@ -1532,14 +1531,9 @@ async def _handle_conversation(
         geo=geo,
     )
     ready_broadcast_reply = needs_reply and geo in ("cm", "dj") and (
-        is_affirmative_to_ready_broadcast(
-            text, thread_out_early, geo=geo
+        client_replied_to_ready_broadcast(
+            msg_only, last_in, text, geo=geo
         )
-        or (
-            is_short_affirmative(text)
-            and outgoing_has_ready_continue_broadcast(thread_out_early)
-        )
-        or is_affirmative_to_deposit_check(text, thread_out_early, geo=geo)
     )
     xbet_site_reply = needs_reply and is_xbet_site_question(text) and (
         reg_link_sent_in_history(op_texts_early, geo=geo)

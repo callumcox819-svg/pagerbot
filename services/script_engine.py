@@ -666,26 +666,6 @@ def resolve_funnel_scripts(
         if effective_step < 8 and intent == "game_id_text":
             return [gid_key]
 
-        nudge_key = "extras/deposit_screenshot_nudge"
-        nudge_sn = script_ui_snippet(nudge_key, geo)
-        from services.ai_intent import (
-            is_affirmative_to_ready_broadcast,
-            outgoing_has_ready_continue_broadcast,
-            is_affirmative_to_deposit_check,
-            is_short_affirmative,
-        )
-
-        if not script_sent_in_history(out, nudge_sn):
-            if is_affirmative_to_ready_broadcast(t, out, geo=geo):
-                return [nudge_key]
-            if (
-                is_short_affirmative(t)
-                and outgoing_has_ready_continue_broadcast(out)
-            ):
-                return [nudge_key]
-            if is_affirmative_to_deposit_check(t, out, geo=geo):
-                return [nudge_key]
-
         return []
 
     if effective_step < 1:
