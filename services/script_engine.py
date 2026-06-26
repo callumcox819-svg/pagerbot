@@ -449,10 +449,11 @@ def filter_auto_script_keys(keys: list[str]) -> list[str]:
 
 
 CM_REG_SEND_KEYS = frozenset({"05_registration", "06_link", "07_chrome"})
+ZM_REG_SEND_KEYS = frozenset({"04_registration", "05_link"})
 
 
 def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
-    """Outbound message bodies — CM reg+link+chrome as one block (link-only ghosts on FB)."""
+    """Outbound message bodies — reg+link as one block (link-only ghosts on FB)."""
     keys = filter_auto_script_keys(list(keys or []))
     if not keys:
         return []
@@ -469,12 +470,28 @@ def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
         if link and link not in reg_text:
             parts.append(link)
         return ["\n\n".join(p for p in parts if p)]
+    if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(set(keys)):
+        reg = load_script(geo, "04_registration")
+        link = load_script(geo, "05_link")
+        reg_text = reg.rstrip()
+        if reg_text.endswith("Here is the link:"):
+            reg_text = reg_text[: -len("Here is the link:")].rstrip()
+        if reg_text.endswith("Voici le lien :"):
+            reg_text = reg_text[: -len("Voici le lien :")].rstrip()
+        parts = [reg_text]
+        if link and link not in reg_text:
+            parts.append(link)
+        return ["\n\n".join(p for p in parts if p)]
     return [load_script(geo, k) for k in keys]
 
 
 def uses_combined_reg_bundle(geo: str, keys: list[str]) -> bool:
     keys = filter_auto_script_keys(list(keys or []))
-    return geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys))
+    if geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys)):
+        return True
+    if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(set(keys)):
+        return True
+    return False
 
 
 def scripts_to_resend_for_step(hist_step: int) -> list[str]:

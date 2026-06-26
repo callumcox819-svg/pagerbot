@@ -279,6 +279,24 @@ def next_channel_geo(current: str) -> str:
     return order[(order.index(cur) + 1) % len(order)]
 
 
+def infer_channel_geo_from_name(name: str, *, default: str = "zm") -> str:
+    """Guess geo from Pager channel title (Moses Zulu → dj, Ndzié → cm, …)."""
+    n = (name or "").lower()
+    if any(
+        x in n
+        for x in ("moses", "zulu", "djibouti", "moukoko", "brice")
+    ):
+        return "dj"
+    if any(
+        x in n
+        for x in ("ndzié", "ndzie", "mvondo", "cameroun", "cameroon", "камерун")
+    ):
+        return "cm"
+    if any(x in n for x in ("mahmoud", "fathy", "egypt")):
+        return "eg"
+    return normalize_channel_geo(default)
+
+
 async def sync_channels(
     account_id: int,
     channels: list[dict[str, str]],
@@ -289,6 +307,12 @@ async def sync_channels(
     existing_rows = await list_channels(account_id)
     existing = {
         c["channel_id"]: int(c.get("enabled") or 0) for c in existing_rows
+    }
+    existing_geos = {
+        str(c["channel_id"]): normalize_channel_geo(
+            str(c.get("geo") or ""), default="zm"
+        )
+        for c in existing_rows
     }
     incoming_ids = {ch["channel_id"] for ch in channels}
 
@@ -309,18 +333,25 @@ async def sync_channels(
         for ch in channels:
             cid = ch["channel_id"]
             name = ch.get("name", "")
+            inferred = infer_channel_geo_from_name(name, default=account_geo)
             if cid in existing:
+                stored = existing_geos.get(cid, account_geo)
+                geo = stored
+                if stored == account_geo and inferred != account_geo:
+                    geo = inferred
                 await db.execute(
                     """
-                    UPDATE pager_channels SET name = ?
+                    UPDATE pager_channels SET name = ?, geo = ?
                     WHERE account_id = ? AND channel_id = ?
                     """,
-                    (name, account_id, cid),
+                    (name, geo, account_id, cid),
                 )
             else:
                 ch_geo = normalize_channel_geo(
-                    str(ch.get("geo") or ""), default=account_geo
+                    str(ch.get("geo") or ""), default=inferred
                 )
+                if ch_geo == account_geo and inferred != account_geo:
+                    ch_geo = inferred
                 await db.execute(
                     """
                     INSERT INTO pager_channels (account_id, channel_id, name, enabled, geo)

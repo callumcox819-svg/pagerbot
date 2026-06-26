@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,6 +118,34 @@ def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
     return default
 
 
+def _round_robin_by_channel(convs: list[dict]) -> list[dict]:
+    """Fair merge — EG/CM backlog must not starve DJ (or any) channel."""
+    if len(convs) <= 1:
+        return convs
+    by_ch: dict[str, list[dict]] = defaultdict(list)
+    order: list[str] = []
+    for conv in convs:
+        ch = str(conv.get("channelId") or "")
+        if ch not in by_ch:
+            order.append(ch)
+        by_ch[ch].append(conv)
+    if len(order) <= 1:
+        return convs
+    out: list[dict] = []
+    idx = {ch: 0 for ch in order}
+    while True:
+        progressed = False
+        for ch in order:
+            i = idx[ch]
+            if i < len(by_ch[ch]):
+                out.append(by_ch[ch][i])
+                idx[ch] = i + 1
+                progressed = True
+        if not progressed:
+            break
+    return out
+
+
 def _interleave_process_order(
     scored: list[tuple[tuple[int, float], dict]],
     *,
@@ -133,6 +162,9 @@ def _interleave_process_order(
             backlog.append(conv)
         else:
             other.append(conv)
+    fresh = _round_robin_by_channel(fresh)
+    backlog = _round_robin_by_channel(backlog)
+    other = _round_robin_by_channel(other)
     out: list[dict] = []
     fi = bi = oi = 0
     while len(out) < limit:
@@ -2262,6 +2294,22 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 account_id,
             )
             return 0
+        ch_rows = await db.list_channels(account_id)
+        ch_names = {
+            str(c.get("channel_id") or ""): str(c.get("name") or "")
+            for c in ch_rows
+        }
+        cmap = account.get("_channel_geo") or await db.get_channel_geo_map(
+            account_id, account_geo=str(account.get("geo") or "zm")
+        )
+        for cid in sorted(enabled):
+            logger.info(
+                "Worker account=%s: enabled channel %s name=%r geo=%s",
+                account_id,
+                cid[:8],
+                ch_names.get(cid, "?")[:32],
+                resolve_conv_geo({**account, "_channel_geo": cmap}, cid),
+            )
         await client.warm_session()
         if not client.session_user_id:
             uid = await client.resolve_session_user_id()
@@ -2298,7 +2346,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 all_inbox,
             )
 
-        list_pages = 28 if len(enabled) > 1 else 22
+        list_pages = 22 + min(16, 6 * len(enabled))
 
         try:
             convs = await client.collect_conversations(
@@ -2309,6 +2357,21 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 channel_folders=channel_folders,
                 funnel_statuses=funnel_statuses,
             )
+            collected_by_ch = Counter(
+                str(c.get("channelId") or "") for c in convs
+            )
+            for cid in sorted(enabled):
+                geo = resolve_conv_geo(account, cid)
+                n = collected_by_ch.get(cid, 0)
+                level = logger.warning if n == 0 else logger.info
+                level(
+                    "Worker account=%s: collected channel=%s name=%r geo=%s convs=%s",
+                    account_id,
+                    cid[:8],
+                    ch_names.get(cid, "?")[:32],
+                    geo,
+                    n,
+                )
         except PagerAPIError as exc:
             if not is_session_error(exc):
                 raise
