@@ -1,0 +1,4 @@
+Problème au dépôt ?
+1) Essaie une autre banque
+2) Vérifie le code de confirmation
+3) Réessaie un peu plus tard

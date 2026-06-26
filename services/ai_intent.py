@@ -66,8 +66,11 @@ _FR_INTERESTED = re.compile(
     re.I,
 )
 _FR_POSITIVE = re.compile(
-    r"\b(oui|d'accord|daccord|ok|okay|bien sûr|bien sur|"
-    r"je suis partant|d'acc|volontiers|avec plaisir)\b",
+    r"\b(oui|ouii+|d'accord|daccord|ok|okay|bien sûr|bien sur|"
+    r"je suis partant|d'acc|volontiers|avec plaisir|"
+    r"parfait|super|génial|genial|nickel|ça marche|ca marche|"
+    r"c'est bon|cest bon|très bien|tres bien|entendu|"
+    r"comme tu veux|je suis d'accord|why not|pas de problème|pas de probleme)\b",
     re.I,
 )
 _FR_GREETING = re.compile(r"\b(bonjour|bonsoir|salut|coucou|bjr)\b", re.I)
@@ -174,6 +177,61 @@ def is_positive_emoji_only(text: str) -> bool:
     return bool(_POSITIVE_EMOJI.match(t))
 
 
+def contains_positive_emoji(text: str) -> bool:
+    """Short reply with 👍 / ✅ — e.g. «Ok 👍», «👍 oui»."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if is_positive_emoji_only(t):
+        return True
+    if len(t) > 20:
+        return False
+    if not re.search(r"[👍👌✅💯🙂😊🙏👏❤️❤]", t):
+        return False
+    letters = re.sub(
+        r"[\s👍👌✅💯🙂😊🙏👏❤️❤\W]",
+        "",
+        t,
+        flags=re.UNICODE,
+    )
+    return len(letters) <= 8
+
+
+def is_positive_message_reaction(reaction: str | None) -> bool:
+    """Pager/Facebook message.reaction field — like / love / 👍."""
+    if not reaction:
+        return False
+    r = str(reaction).strip().lower()
+    if r in ("like", "love", "care"):
+        return True
+    return is_positive_emoji_only(str(reaction).strip())
+
+
+def is_reaction_only_message(
+    text: str,
+    attachments: list | None = None,
+    *,
+    message_reaction: str | None = None,
+) -> bool:
+    """Thumbs / FB like only — not verbal oui/ok (those go through funnel)."""
+    t = (text or "").strip()
+    if contains_positive_emoji(t):
+        return True
+    if not t and is_messenger_reaction_attachment(attachments or []):
+        return True
+    if not t and is_positive_message_reaction(message_reaction):
+        return True
+    return False
+
+
+def _funnel_positive_max_step(geo: str = "zm") -> int:
+    if geo == "cm":
+        return 6
+    if geo == "eg":
+        return 5
+    return 4
+
+
 def is_messenger_reaction_attachment(attachments: list) -> bool:
     """Facebook like / sticker — not a deposit or ID screenshot."""
     for att in attachments or []:
@@ -229,9 +287,10 @@ def is_short_affirmative(text: str) -> bool:
         return False
     if re.fullmatch(
         r"(wii+|wi+|oui+|ouii+|ouais|ouaip|ok+|okay|yep|yes+|yess|"
-        r"daccord|dacc|cbien|cbon|cestbon|vasy|allonsy|allezy|chef|"
+        r"daccord|dacc|cbien|cbon|cestbon|tres bien|très bien|"
+        r"vasy|allonsy|allezy|chef|si|yup|"
         r"oui\s+exactement|exactement|"
-        r"letsgo|letgo|go|sure|alright)",
+        r"letsgo|letgo|go|sure|alright|parfait|super|nickel)",
         t,
         re.I,
     ):
@@ -262,19 +321,25 @@ def is_refusal_reply(text: str) -> bool:
 
 
 def is_funnel_positive_reaction(
-    text: str, attachments: list | None = None, *, funnel_step: int = 0
+    text: str,
+    attachments: list | None = None,
+    *,
+    funnel_step: int = 0,
+    geo: str = "zm",
+    message_reaction: str | None = None,
 ) -> bool:
     """Early funnel — emoji / FB like / short oui means «yes, continue»."""
-    if funnel_step >= 4:
+    if funnel_step >= _funnel_positive_max_step(geo):
         return False
     if is_short_affirmative(text):
         return True
-    if is_positive_emoji_only(text):
+    if contains_positive_emoji(text):
         return True
-    if not (text or "").strip() and is_messenger_reaction_attachment(
-        attachments or []
-    ):
-        return True
+    if not (text or "").strip():
+        if is_messenger_reaction_attachment(attachments or []):
+            return True
+        if is_positive_message_reaction(message_reaction):
+            return True
     return False
 
 
@@ -386,7 +451,7 @@ def money_refusal_reply(text: str, *, geo: str = "zm") -> str:
     t = (text or "").strip()
     if geo == "eg" or _ARABIC.search(t):
         return MONEY_REFUSAL_AR
-    if geo == "dj" or _FRENCH_LATIN.search(t):
+    if geo == "dj" or geo == "cm" or _FRENCH_LATIN.search(t):
         return MONEY_REFUSAL_FR
     return MONEY_REFUSAL_EN
 
@@ -538,10 +603,18 @@ def is_already_registered_before_funnel(text: str) -> bool:
     )
 
 
-def is_deposit_tier_choice(text: str) -> bool:
-    """Answer to ZMW/DJF table (30 / 300 / 500…) — treat as ready for registration."""
+def is_deposit_tier_choice(text: str, *, geo: str = "zm") -> bool:
+    """Answer to deposit tier table — treat as ready for registration."""
     t = (text or "").strip()
     if not t:
+        return False
+    if geo == "cm":
+        if re.fullmatch(r"^(1000|1500)\s*(?:cfa|fr|f)?\.?$", t, re.I):
+            return True
+        if len(t.split()) <= 8 and re.search(
+            r"\b(1000|1500)\s*(?:cfa|fr|f)?\b", t, re.I
+        ):
+            return True
         return False
     if _DEPOSIT_TIER.match(t):
         return True
@@ -549,6 +622,20 @@ def is_deposit_tier_choice(text: str) -> bool:
     if digits.isdigit() and int(digits) in _TIER_TYPO:
         return True
     if len(t.split()) <= 12 and _TIER_AMOUNT.search(t):
+        return True
+    return False
+
+
+def is_age_answer(text: str) -> bool:
+    """CM funnel — client answers the age question."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"\d{1,2}", t):
+        return 15 <= int(t) <= 99
+    if re.search(r"\b(j'ai|jai|ai)\s*\d{1,2}\s*ans\b", t, re.I):
+        return True
+    if re.search(r"\b\d{1,2}\s*ans\b", t, re.I):
         return True
     return False
 
@@ -588,7 +675,7 @@ def is_ready_for_registration(text: str) -> bool:
         return True
     if _AR_POSITIVE.search(t) and len(t.split()) <= 5 and not _AR_DETAILS.search(t):
         return True
-    if is_deposit_tier_choice(t):
+    if is_deposit_tier_choice(t, geo=geo):
         return True
     if is_short_affirmative(t):
         return True
@@ -784,6 +871,7 @@ def classify(
     geo: str = "zm",
     attachments: list | None = None,
     funnel_step: int = 0,
+    message_reaction: str | None = None,
 ) -> Intent:
     t = (text or "").strip()
     if is_money_request(t):
@@ -791,12 +879,18 @@ def classify(
     if is_refusal_reply(t):
         return Intent.DECLINED
     if is_funnel_positive_reaction(
-        t, attachments, funnel_step=funnel_step
+        t,
+        attachments,
+        funnel_step=funnel_step,
+        geo=geo,
+        message_reaction=message_reaction,
     ):
         return Intent.POSITIVE
-    if is_positive_emoji_only(t):
+    if contains_positive_emoji(t) or is_positive_emoji_only(t):
         return Intent.POSITIVE
     if not t and is_messenger_reaction_attachment(attachments or []):
+        return Intent.POSITIVE
+    if not t and is_positive_message_reaction(message_reaction):
         return Intent.POSITIVE
     if has_ad and not t and not has_image:
         return Intent.INTERESTED
@@ -806,14 +900,14 @@ def classify(
         if funnel_step >= 1 and funnel_step < 4:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY
-    game_re = _GAME_ID_EG if geo in ("eg", "dj") else _GAME_ID
+    game_re = _GAME_ID_EG if geo in ("eg", "dj", "cm") else _GAME_ID
     if game_re.search(t):
         return Intent.GAME_ID_TEXT
     if geo == "eg" or _ARABIC.search(t):
         ar = _classify_arabic(t)
         if ar is not None:
             return ar
-    if geo == "dj" or _FRENCH_LATIN.search(t):
+    if geo == "dj" or geo == "cm" or _FRENCH_LATIN.search(t):
         fr = _classify_french(t)
         if fr is not None:
             return fr
@@ -825,7 +919,7 @@ def classify(
         return Intent.POSITIVE
     if is_deferral_reply(t):
         return Intent.UNKNOWN
-    if is_deposit_tier_choice(t):
+    if is_deposit_tier_choice(t, geo=geo):
         return Intent.READY
     if _ACK.search(t):
         return Intent.POSITIVE
@@ -885,6 +979,6 @@ def needs_human_for_text(
         return False
     if is_ready_for_registration(text) and step < 5:
         return False
-    if is_deposit_tier_choice(text) and step < 5:
+    if is_deposit_tier_choice(text, geo=geo) and step < 5:
         return False
     return needs_human(intent, step, no_status=no_status)

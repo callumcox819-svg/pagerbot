@@ -28,9 +28,12 @@ from services.ai_intent import (
     is_deposit_confirmation,
     is_deposit_question,
     is_already_registered_before_funnel,
+    is_age_answer,
     is_deferral_reply,
     is_deposit_tier_choice,
     is_funnel_positive_reaction,
+    is_positive_message_reaction,
+    is_reaction_only_message,
     is_refusal_reply,
     is_messenger_reaction_attachment,
     is_post_link_registration_question,
@@ -64,6 +67,9 @@ from services.script_engine import (
     resolve_eg_backlog_fallback,
     resolve_zm_backlog_fallback,
     reg_link_sent_in_history,
+    reg_script_keys_set,
+    deposit_script_key,
+    game_id_script_key,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -670,7 +676,7 @@ def _pick_client_turn_message(
     ):
         for m in incoming:
             t = (m.get("text") or "").strip()
-            if is_deposit_tier_choice(t):
+            if is_deposit_tier_choice(t, geo=geo):
                 return m
     for m in incoming:
         mid = str(m.get("id") or "")
@@ -678,8 +684,13 @@ def _pick_client_turn_message(
             continue
         t = (m.get("text") or "").strip()
         atts = m.get("attachments") or []
-        if t or (atts and not is_messenger_reaction_attachment(atts)):
-            return m
+        if t or atts or is_positive_message_reaction(m.get("reaction")):
+            if t or (atts and not is_messenger_reaction_attachment(atts)):
+                return m
+            if is_messenger_reaction_attachment(atts):
+                return m
+            if is_positive_message_reaction(m.get("reaction")):
+                return m
     return fallback
 
 
@@ -843,7 +854,11 @@ async def _handle_conversation(
 
     messages = await client.list_messages(conv_id, page_size=80)
     # API returns newest first — work chronologically
-    msg_only = [m for m in messages if m.get("text") is not None or m.get("attachments")]
+    msg_only = [
+        m
+        for m in messages
+        if m.get("text") is not None or m.get("attachments") or m.get("reaction")
+    ]
     msg_only.sort(key=lambda m: m.get("createdAt") or "")
 
     last_in = None
@@ -958,6 +973,7 @@ async def _handle_conversation(
     last_in_ts = str(last_in.get("createdAt") or "")
     text = (last_in.get("text") or "").strip()
     attachments = last_in.get("attachments") or []
+    message_reaction = last_in.get("reaction")
     has_image = bool(attachments)
     has_ad = bool(last_in.get("adId") or last_in.get("adUrl"))
     deposit_funnel_early = should_send_deposit_script(
@@ -1000,6 +1016,7 @@ async def _handle_conversation(
             geo=geo,
             attachments=attachments,
             funnel_step=max(effective_step_early, 1),
+            message_reaction=message_reaction,
         )
         funnel_retry = needs_reply and effective_step_early < 8 and (
             pre_intent
@@ -1013,6 +1030,8 @@ async def _handle_conversation(
                 text,
                 attachments,
                 funnel_step=max(effective_step_early, 1),
+                geo=geo,
+                message_reaction=message_reaction,
             )
         )
         if state.get("pause_scripts") and not deposit_funnel_early and not funnel_retry:
@@ -1067,6 +1086,7 @@ async def _handle_conversation(
         geo=geo,
         attachments=attachments,
         funnel_step=effective_step,
+        message_reaction=message_reaction,
     )
 
     if needs_reply and intent == Intent.DECLINED:
@@ -1196,11 +1216,10 @@ async def _handle_conversation(
         )
         return True
 
-    is_reaction_only = (
-        is_messenger_reaction_attachment(attachments)
-        or is_funnel_positive_reaction(
-            text, attachments, funnel_step=effective_step
-        )
+    is_reaction_only = is_reaction_only_message(
+        text,
+        attachments,
+        message_reaction=message_reaction,
     )
     has_real_image = has_image and not is_messenger_reaction_attachment(attachments)
 
@@ -1214,10 +1233,11 @@ async def _handle_conversation(
         )
     )
 
+    post_intro_max = 6 if geo == "cm" else 4
     post_intro_followup = bool(
         needs_reply
         and effective_step >= 1
-        and effective_step < 4
+        and effective_step < post_intro_max
         and not deposit_signal
         and not is_deferral_reply(text)
         and not is_refusal_reply(text)
@@ -1225,7 +1245,11 @@ async def _handle_conversation(
             is_ready_for_registration(text)
             or wants_registration_link(text)
             or is_funnel_positive_reaction(
-                text, attachments, funnel_step=effective_step
+                text,
+                attachments,
+                funnel_step=effective_step,
+                geo=geo,
+                message_reaction=message_reaction,
             )
             or wants_details_after_intro(text)
             or is_post_link_registration_question(text)
@@ -1369,15 +1393,16 @@ async def _handle_conversation(
         and needs_reply
         and effective_step >= 4
         and effective_step < 7
+        and reg_link_sent_in_history(op_texts_early, geo=geo)
     ):
         link_sn = script_ui_snippet("05_link", geo)
-        dep_sn = script_ui_snippet("06_deposit", geo)
+        dep_sn = script_ui_snippet(deposit_script_key(geo), geo)
         if script_sent_in_history(
             op_texts_early, link_sn
         ) and not script_sent_in_history(op_texts_early, dep_sn):
             send_buf.queue_script_send(
                 conv_id,
-                ["06_deposit"],
+                [deposit_script_key(geo)],
                 client_name=client_name,
                 channel_id=channel_id,
             )
@@ -1659,6 +1684,7 @@ async def _handle_conversation(
             outgoing_texts=op_outgoing,
             attachments=attachments,
             geo=geo,
+            message_reaction=message_reaction,
         )
         if keys:
             logger.info(
@@ -1670,12 +1696,73 @@ async def _handle_conversation(
                 (folder[:20] if folder else ""),
             )
         elif (
-            geo in ("zm", "dj", "cm")
+            geo == "cm"
+            and effective_step < 6
+            and intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
+            and (
+                is_funnel_positive_reaction(
+                    text,
+                    attachments,
+                    funnel_step=max(effective_step, 1),
+                    geo=geo,
+                    message_reaction=message_reaction,
+                )
+                or is_short_affirmative(text)
+                or is_age_answer(text)
+                or is_reaction_only_message(
+                    text, attachments, message_reaction=message_reaction
+                )
+            )
+        ):
+            intro_sn = script_ui_snippet("01_intro", geo)
+            intro2_sn = script_ui_snippet("01_intro_2", geo)
+            age_sn = script_ui_snippet("02_age", geo)
+            steps_sn = script_ui_snippet("03_steps", geo)
+            tier_sn = script_ui_snippet("04_tier", geo)
+            dep_key = deposit_script_key(geo)
+            if not script_sent_in_history(op_outgoing, intro_sn):
+                keys = ["01_intro", "01_intro_2"]
+            elif not script_sent_in_history(op_outgoing, intro2_sn):
+                keys = ["01_intro_2"]
+            elif not script_sent_in_history(op_outgoing, age_sn):
+                keys = ["02_age"]
+            elif not script_sent_in_history(op_outgoing, steps_sn):
+                if is_age_answer(text) or is_funnel_positive_reaction(
+                    text,
+                    attachments,
+                    funnel_step=max(effective_step, 2),
+                    geo=geo,
+                    message_reaction=message_reaction,
+                ) or is_short_affirmative(text):
+                    keys = ["03_steps"]
+            elif not script_sent_in_history(op_outgoing, tier_sn):
+                keys = ["04_tier"]
+            elif is_deposit_tier_choice(text, geo=geo) and not reg_link_sent_in_history(
+                op_outgoing, geo=geo
+            ):
+                keys = ["05_registration", "06_link", "07_chrome"]
+            elif (
+                script_sent_in_history(op_outgoing, tier_sn)
+                and not reg_link_sent_in_history(op_outgoing, geo=geo)
+            ):
+                keys = ["05_registration", "06_link", "07_chrome"]
+            if keys:
+                logger.info(
+                    "conv=%s CM funnel fallback keys=%s",
+                    conv_id[:8],
+                    keys,
+                )
+        elif (
+            geo in ("zm", "dj")
             and effective_step < 4
             and intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
             and (
                 is_funnel_positive_reaction(
-                    text, attachments, funnel_step=max(effective_step, 1)
+                    text,
+                    attachments,
+                    funnel_step=max(effective_step, 1),
+                    geo=geo,
+                    message_reaction=message_reaction,
                 )
                 or is_short_affirmative(text)
             )
@@ -1701,10 +1788,10 @@ async def _handle_conversation(
             )
             and reg_link_sent_in_history(op_outgoing, geo=geo)
             and not script_sent_in_history(
-                op_outgoing, script_ui_snippet("06_deposit", geo)
+                op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
             )
         ):
-            keys = ["06_deposit"]
+            keys = [deposit_script_key(geo)]
             logger.info(
                 "conv=%s positive-after-link fallback keys=%s text=%r",
                 conv_id[:8],
@@ -1712,9 +1799,22 @@ async def _handle_conversation(
                 (text or "")[:40],
             )
         elif (
-            geo in ("zm", "dj", "cm")
+            geo == "cm"
+            and 3 <= effective_step < 6
+            and is_deposit_tier_choice(text, geo=geo)
+            and not reg_link_sent_in_history(op_outgoing, geo=geo)
+        ):
+            keys = ["05_registration", "06_link", "07_chrome"]
+            logger.info(
+                "conv=%s CM tier-choice fallback keys=%s text=%r",
+                conv_id[:8],
+                keys,
+                (text or "")[:40],
+            )
+        elif (
+            geo in ("zm", "dj")
             and 2 <= effective_step < 6
-            and is_deposit_tier_choice(text)
+            and is_deposit_tier_choice(text, geo=geo)
             and not reg_link_sent_in_history(op_outgoing, geo=geo)
         ):
             keys = ["04_registration", "05_link"]
@@ -1860,8 +1960,12 @@ async def _handle_conversation(
         actions_sent = True
 
     new_step = step
-    reg_keys = {"04_registration", "05_link"}
-    explain_keys = {"02_how_it_works", "03_zmw_table"}
+    reg_keys = reg_script_keys_set(geo)
+    explain_keys = (
+        {"02_age", "03_steps", "04_tier"}
+        if geo == "cm"
+        else {"02_how_it_works", "03_zmw_table"}
+    )
     reg_handoff = geo in ("zm", "eg", "dj", "cm") and bool(reg_keys.intersection(keys))
     if reg_handoff:
         new_step = 4
@@ -1873,13 +1977,13 @@ async def _handle_conversation(
         new_step = max(new_step, 2 if geo == "eg" else 3)
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
-    elif "06_deposit" in keys:
+    elif deposit_script_key(geo) in keys:
         new_step = max(new_step, 7)
         if pager_user_id:
             send_buf.queue_status_patch(
                 conv_id, funnel_statuses["wait_id"]
             )
-    elif "07_game_id" in keys:
+    elif game_id_script_key(geo) in keys:
         new_step = max(new_step, 6)
         if pager_user_id:
             send_buf.queue_status_patch(

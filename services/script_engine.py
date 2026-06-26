@@ -69,12 +69,70 @@ DJ_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "10_reg_screenshot": "Problème à l'inscription",
 }
 
-# Cameroon — saved replies folder in Pager (create manually; scripts TBD).
-CM_SAVED_REPLY_FOLDER_NAMES = ("Cameroon", "CAMEROON", "Cameroun", "CM")
+# Cameroon — folder «Камерун» in Pager saved replies (French templates).
+CM_SAVED_REPLY_FOLDER_NAMES = (
+    "Камерун",
+    "камерун",
+    "Cameroon",
+    "CAMEROON",
+    "Cameroun",
+    "CM",
+)
 
 CM_SCRIPT_UI_SNIPPETS: dict[str, str] = {
-    **SCRIPT_UI_SNIPPETS,
+    "01_intro": "Tu es du Cameroun",
+    "01_intro_2": "Mon équipe cumule",
+    "02_age": "Quel âge avez-vous",
+    "03_steps": "voici comment ça fonctionne",
+    "04_tier": "140 000 CFA",
+    "05_registration": "CASH056",
+    "06_link": "Camerun01",
+    "07_chrome": "Google Chrome",
+    "08_game_id": "commence par 17",
+    "09_deposit": "bouton vert",
+    "10_tg_invite": "canal Telegram privé",
+    "11_tg_link": "XtIY04zvcVw2YzZi",
+    # ZM-style aliases (worker / shared helpers)
+    "02_how_it_works": "Quel âge avez-vous",
+    "03_zmw_table": "140 000 CFA",
+    "04_registration": "CASH056",
+    "05_link": "Camerun01",
+    "06_deposit": "bouton vert",
+    "07_game_id": "commence par 17",
+    "08_tg_invite": "canal Telegram privé",
+    "09_tg_link": "XtIY04zvcVw2YzZi",
 }
+
+CM_REG_SCRIPT_KEYS = frozenset({"05_registration", "06_link", "07_chrome"})
+
+_CM_KEY_ALIASES: dict[str, str] = {
+    "02_how_it_works": "02_age",
+    "03_zmw_table": "04_tier",
+    "04_registration": "05_registration",
+    "05_link": "06_link",
+    "06_deposit": "09_deposit",
+    "07_game_id": "08_game_id",
+    "08_tg_invite": "10_tg_invite",
+    "09_tg_link": "11_tg_link",
+}
+
+
+def resolve_cm_key(key: str) -> str:
+    return _CM_KEY_ALIASES.get(key, key)
+
+
+def deposit_script_key(geo: str = "zm") -> str:
+    return "09_deposit" if geo == "cm" else "06_deposit"
+
+
+def game_id_script_key(geo: str = "zm") -> str:
+    return "08_game_id" if geo == "cm" else "07_game_id"
+
+
+def reg_script_keys_set(geo: str = "zm") -> frozenset[str]:
+    if geo == "cm":
+        return CM_REG_SCRIPT_KEYS
+    return frozenset({"04_registration", "05_link"})
 
 GEO_SCRIPT_UI_SNIPPETS: dict[str, dict[str, str]] = {
     "zm": SCRIPT_UI_SNIPPETS,
@@ -109,6 +167,8 @@ def script_exclude_snippets(key: str, geo: str = "zm") -> tuple[str, ...]:
 
 def script_ui_snippet(key: str, geo: str = "zm") -> str:
     """Text needle for locating a saved reply in Pager UI."""
+    if geo == "cm":
+        key = resolve_cm_key(key)
     snippets = GEO_SCRIPT_UI_SNIPPETS.get(geo) or SCRIPT_UI_SNIPPETS
     sn = snippets.get(key, "").strip()
     if sn:
@@ -121,6 +181,8 @@ def script_ui_snippet(key: str, geo: str = "zm") -> str:
 
 def script_verify_snippet(key: str, geo: str = "zm") -> str:
     """Substring used to verify delivery in message history."""
+    if geo == "cm":
+        key = resolve_cm_key(key)
     snippets = GEO_SCRIPT_UI_SNIPPETS.get(geo) or SCRIPT_UI_SNIPPETS
     sn = snippets.get(key, "").strip()
     if sn:
@@ -129,6 +191,8 @@ def script_verify_snippet(key: str, geo: str = "zm") -> str:
 
 
 def load_script(geo: str, key: str) -> str:
+    if geo == "cm":
+        key = resolve_cm_key(key)
     cache_key = f"{geo}/{key}"
     if cache_key in _cache:
         return _cache[cache_key]
@@ -176,6 +240,37 @@ def _step_for_outgoing_text_eg(text: str) -> int:
     return 0
 
 
+def _step_for_outgoing_text_cm(text: str) -> int:
+    t = (text or "").lower()
+    if "xtiy04zvcvw" in t or "t.me/+" in t:
+        return 9
+    if "canal telegram" in t and (
+        "privé" in t or "prive" in t or "stratégies" in t or "strategies" in t
+    ):
+        return 8
+    if "bouton vert" in t or ("déposer" in t and "mtn" in t):
+        return 7
+    if "commence par 17" in t or "numéro de joueur" in t:
+        return 6
+    if "camerun01" in t:
+        return 5
+    if "google chrome" in t and "colle" in t:
+        return 5
+    if "cash056" in t:
+        return 4
+    if "140 000 cfa" in t or "190 000 cfa" in t:
+        return 4
+    if "1 000 francs" in t or "dépôt minimum de 1 000" in t:
+        return 3
+    if "quel âge" in t or "age avez-vous" in t or "age as-tu" in t:
+        return 2
+    if "business comme un autre" in t or "gagner ensemble" in t or "mon équipe cumule" in t:
+        return 2
+    if "cameroun" in t or "tu es du cameroun" in t:
+        return 1
+    return 0
+
+
 def _step_for_outgoing_text_dj(text: str) -> int:
     t = (text or "").lower()
     if "eylddikyykg" in t or "5fwd_blxe" in t or "t.me/+" in t:
@@ -203,12 +298,12 @@ def _step_for_outgoing_text_dj(text: str) -> int:
 
 def _step_for_outgoing_text(text: str, geo: str = "zm") -> int:
     """Map one operator message to funnel step (strict markers only)."""
-    if geo == "cm":
-        geo = "zm"
     if geo == "eg":
         return _step_for_outgoing_text_eg(text)
     if geo == "dj":
         return _step_for_outgoing_text_dj(text)
+    if geo == "cm":
+        return _step_for_outgoing_text_cm(text)
     t = (text or "").lower()
     if "t.me/+" in t or "vhfjiofy" in t:
         return 9
@@ -288,6 +383,10 @@ def reg_link_sent_in_history(
     blob = "\n".join(out).lower()
     if geo == "dj":
         return "tinyurl.com/djibouti7" in blob or "bji777" in blob
+    if geo == "cm":
+        if script_sent_in_history(out, script_ui_snippet("06_link", geo)):
+            return True
+        return "camerun01" in blob or "cash056" in blob
     if geo == "eg":
         return "tinyurl.com/egypt" in blob or "egypt0011" in blob
     return "tinyurl.com/zam577" in blob or "zam577" in blob
@@ -374,6 +473,7 @@ def resolve_funnel_scripts(
     outgoing_texts: list[str] | None = None,
     attachments: list | None = None,
     geo: str = "zm",
+    message_reaction: str | None = None,
 ) -> list[str]:
     """Pick next Pager saved-reply keys from funnel step + client message."""
     from services.ai_intent import (
@@ -399,10 +499,123 @@ def resolve_funnel_scripts(
 
     def _positive_signal() -> bool:
         return is_funnel_positive_reaction(
-            t, attachments, funnel_step=effective_step
+            t,
+            attachments,
+            funnel_step=effective_step,
+            geo=geo,
+            message_reaction=message_reaction,
         )
 
     if is_deferral_reply(t) or is_refusal_reply(t) or intent == "declined":
+        return []
+
+    if geo == "cm":
+        from services.ai_intent import is_age_answer, is_deposit_tier_choice
+
+        intro_sn = script_ui_snippet("01_intro", geo)
+        intro2_sn = script_ui_snippet("01_intro_2", geo)
+        age_sn = script_ui_snippet("02_age", geo)
+        steps_sn = script_ui_snippet("03_steps", geo)
+        tier_sn = script_ui_snippet("04_tier", geo)
+        dep_key = deposit_script_key(geo)
+        gid_key = game_id_script_key(geo)
+        intro_sent = script_sent_in_history(out, intro_sn)
+        intro2_sent = script_sent_in_history(out, intro2_sn)
+        age_sent = script_sent_in_history(out, age_sn)
+        steps_sent = script_sent_in_history(out, steps_sn)
+        tier_sent = script_sent_in_history(out, tier_sn)
+        link_sent = reg_link_sent_in_history(out, geo=geo)
+
+        if effective_step < 1:
+            if not intro_sent:
+                if intent in ("interested", "positive", "ready", "question") or _positive_signal():
+                    return ["01_intro", "01_intro_2"]
+                return []
+            if intro_sent and not intro2_sent:
+                return ["01_intro_2"]
+            return []
+
+        if effective_step < 2:
+            if intro2_sent and not age_sent:
+                if (
+                    intent in ("interested", "positive", "ready", "question")
+                    or _positive_signal()
+                    or wants_details_after_intro(t)
+                ):
+                    return ["02_age"]
+            return []
+
+        if effective_step < 3:
+            if age_sent and not steps_sent:
+                if (
+                    is_age_answer(t)
+                    or intent in ("positive", "ready", "interested", "question")
+                    or _positive_signal()
+                ):
+                    return ["03_steps"]
+            return []
+
+        if effective_step < 4:
+            if steps_sent and not tier_sent:
+                if (
+                    intent in ("positive", "ready", "interested", "question")
+                    or _positive_signal()
+                    or is_ready_for_registration(t)
+                ):
+                    return ["04_tier"]
+            if tier_sent and (
+                is_deposit_tier_choice(t, geo=geo) or _positive_signal()
+            ):
+                if link_sent:
+                    return []
+                return ["05_registration", "06_link", "07_chrome"]
+            return []
+
+        if is_registration_confirmed(t) and link_sent:
+            if should_send_deposit_script(
+                t, effective_step, out, folder_step=0, geo=geo
+            ):
+                return [dep_key]
+            return []
+
+        if is_registration_pending(t) and not link_sent:
+            return ["05_registration", "06_link", "07_chrome"]
+        if is_registration_pending(t) and link_sent:
+            return []
+
+        if effective_step < 7:
+            if intent == "game_id_text":
+                return []
+            dep_sn = script_ui_snippet(dep_key, geo)
+            if link_sent and effective_step >= 4 and not script_sent_in_history(
+                out, dep_sn
+            ) and (
+                is_what_required_question(t)
+                or is_post_link_registration_question(t)
+                or intent in ("question", "positive", "interested", "ready")
+            ):
+                return [dep_key]
+            if is_registration_confirmed(t) or intent == "joined":
+                if should_send_deposit_script(
+                    t, effective_step, out, folder_step=0, geo=geo
+                ):
+                    return [dep_key]
+            if (
+                tier_sent
+                and not link_sent
+                and (
+                    is_ready_for_registration(t)
+                    or wants_registration_link(t)
+                    or intent in ("ready", "interested", "positive", "question")
+                    or _positive_signal()
+                )
+            ):
+                return ["05_registration", "06_link", "07_chrome"]
+            return []
+
+        if effective_step < 8 and intent == "game_id_text":
+            return [gid_key]
+
         return []
 
     if effective_step < 1:
@@ -581,7 +794,7 @@ def resolve_funnel_scripts(
                 return ["06_deposit"]
         if is_registration_confirmed(t) or intent == "joined":
             if should_send_deposit_script(
-                t, effective_step, out, folder_step=0
+                t, effective_step, out, folder_step=0, geo=geo
             ):
                 return ["06_deposit"]
         return []
@@ -589,6 +802,104 @@ def resolve_funnel_scripts(
     if effective_step < 8 and intent == "game_id_text":
         return ["07_game_id"]
 
+    return []
+
+
+def resolve_cm_backlog_fallback(
+    effective_step: int,
+    outgoing_texts: list[str],
+    intent: str = "unknown",
+    *,
+    text: str = "",
+) -> list[str]:
+    """CM «Без статусу» — intro → age → steps → tier → reg/link."""
+    from services.ai_intent import (
+        is_age_answer,
+        is_deposit_tier_choice,
+        is_registration_confirmed,
+        is_registration_pending,
+    )
+
+    out = outgoing_texts or []
+    t = (text or "").strip()
+    geo = "cm"
+    dep_key = deposit_script_key(geo)
+    intro_sn = script_ui_snippet("01_intro", geo)
+    intro2_sn = script_ui_snippet("01_intro_2", geo)
+    age_sn = script_ui_snippet("02_age", geo)
+    steps_sn = script_ui_snippet("03_steps", geo)
+    tier_sn = script_ui_snippet("04_tier", geo)
+    intro_sent = script_sent_in_history(out, intro_sn)
+    intro2_sent = script_sent_in_history(out, intro2_sn)
+    age_sent = script_sent_in_history(out, age_sn)
+    steps_sent = script_sent_in_history(out, steps_sn)
+    tier_sent = script_sent_in_history(out, tier_sn)
+    link_sent = reg_link_sent_in_history(out, geo=geo)
+    dep_sn = script_ui_snippet(dep_key, geo)
+
+    if link_sent:
+        if is_registration_confirmed(t):
+            if not script_sent_in_history(out, dep_sn):
+                return [dep_key]
+            return []
+        if (
+            effective_step < 8
+            and not script_sent_in_history(out, dep_sn)
+            and intent
+            in (
+                "joined",
+                "positive",
+                "ready",
+                "deposit_done",
+                "question",
+                "interested",
+            )
+        ):
+            return [dep_key]
+        return []
+
+    if not intro_sent:
+        if intent == "declined":
+            return []
+        if intent not in (
+            "interested",
+            "positive",
+            "ready",
+            "question",
+            "unknown",
+        ):
+            return []
+        return ["01_intro", "01_intro_2"]
+    if not intro2_sent:
+        return ["01_intro_2"]
+    if not age_sent and effective_step < 5:
+        if intent == "declined":
+            return []
+        return ["02_age"]
+    if not steps_sent and effective_step < 5:
+        if intent == "declined":
+            return []
+        if is_age_answer(t) or intent in (
+            "positive",
+            "ready",
+            "interested",
+            "question",
+            "unknown",
+        ):
+            return ["03_steps"]
+        return []
+    if not tier_sent and effective_step < 5:
+        if intent == "declined":
+            return []
+        return ["04_tier"]
+    if is_deposit_tier_choice(t, geo=geo):
+        return ["05_registration", "06_link", "07_chrome"]
+    if effective_step < 6:
+        if is_registration_confirmed(t):
+            return []
+        if is_registration_pending(t):
+            return ["05_registration", "06_link", "07_chrome"]
+        return ["05_registration", "06_link", "07_chrome"]
     return []
 
 
@@ -601,6 +912,10 @@ def resolve_zm_backlog_fallback(
     text: str = "",
 ) -> list[str]:
     """ZM/DJ «Без статусу» — advance funnel when intent did not match templates."""
+    if geo == "cm":
+        return resolve_cm_backlog_fallback(
+            effective_step, outgoing_texts, intent, text=text
+        )
     from services.ai_intent import is_registration_confirmed, is_registration_pending
 
     out = outgoing_texts or []
@@ -722,7 +1037,7 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
 
 
 def extract_game_id(text: str, geo: str = "zm") -> str:
-    if geo in ("eg", "dj"):
+    if geo in ("eg", "dj", "cm"):
         m = re.search(r"\b(17\d{6,})\b", text or "")
         if m:
             return m.group(1)
