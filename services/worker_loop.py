@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from aiogram import Bot
@@ -152,14 +153,30 @@ def _interleave_process_order(
     return out
 
 
+@dataclass
+class _AccountCycleCtx:
+    """Per-cycle caches — avoid thousands of SQLite round-trips per account."""
+
+    account_id: int
+    enabled: set[str]
+    allowed_folders: set[str] | None
+    state_map: dict[str, dict[str, Any]]
+
+    def conv_state(self, conv_id: str) -> dict[str, Any]:
+        st = self.state_map.get(conv_id)
+        if st:
+            return st
+        return db.default_conversation_state(self.account_id, conv_id)
+
+
 def _compute_cycle_limits(
     queue_n: int,
     no_status_n: int,
     n_enabled: int,
 ) -> dict[str, int]:
     """Scale throughput with queue size — large traffic must not wait days."""
-    base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "64")))
-    max_handle = max(64, int(os.getenv("PAGER_MAX_HANDLE", "200") or "200"))
+    base_plans = max(1, int(os.getenv("PAGER_MAX_REPLIES", "128")))
+    max_handle = max(128, int(os.getenv("PAGER_MAX_HANDLE", "400") or "400"))
     try:
         batch_chunk = int(os.getenv("PAGER_BROWSER_BATCH_SIZE") or "0")
     except ValueError:
@@ -168,35 +185,44 @@ def _compute_cycle_limits(
         browser_parallel = int(os.getenv("PAGER_BROWSER_PARALLEL") or "0")
     except ValueError:
         browser_parallel = 0
+    try:
+        plan_parallel = int(os.getenv("PAGER_PLAN_PARALLEL") or "0")
+    except ValueError:
+        plan_parallel = 0
 
     if batch_chunk < 4:
-        batch_chunk = 24 if n_enabled <= 1 else 16
+        batch_chunk = 32 if n_enabled <= 1 else 24
     if browser_parallel < 1:
-        browser_parallel = 6 if n_enabled <= 1 else 4
+        browser_parallel = 10 if n_enabled <= 1 else 8
+    if plan_parallel < 1:
+        plan_parallel = 32 if n_enabled <= 1 else 48
 
     if queue_n > 50:
-        max_handle = max(max_handle, min(2000, queue_n))
-        base_plans = max(base_plans, min(300, queue_n // 5))
-        batch_chunk = max(batch_chunk, 32)
-        browser_parallel = max(browser_parallel, 8)
+        max_handle = max(max_handle, min(3000, queue_n))
+        base_plans = max(base_plans, min(400, queue_n // 3))
+        batch_chunk = max(batch_chunk, 48)
+        browser_parallel = max(browser_parallel, 12)
+        plan_parallel = max(plan_parallel, 48)
 
     if queue_n > 500:
-        max_handle = max(max_handle, min(3000, queue_n))
-        base_plans = max(base_plans, min(500, queue_n // 4))
-        batch_chunk = max(batch_chunk, 48)
-        browser_parallel = min(max(browser_parallel, 12), 16)
+        max_handle = max(max_handle, min(5000, queue_n))
+        base_plans = max(base_plans, min(800, queue_n // 2))
+        batch_chunk = max(batch_chunk, 64)
+        browser_parallel = min(max(browser_parallel, 20), 28)
+        plan_parallel = min(max(plan_parallel, 64), 96)
 
     max_plans = base_plans
     if no_status_n > 15 and n_enabled > 1:
-        max_plans = max(max_plans, min(200, no_status_n // 3))
+        max_plans = max(max_plans, min(300, no_status_n // 2))
 
-    funnel_cap = max(max_plans, 32)
+    funnel_cap = max(max_plans, 64)
     return {
         "max_handle": max_handle,
         "max_plans": max_plans,
         "funnel_cap": funnel_cap,
         "batch_chunk": batch_chunk,
         "browser_parallel": browser_parallel,
+        "plan_parallel": plan_parallel,
     }
 
 
@@ -369,7 +395,7 @@ class _CycleSendBuffer:
         *,
         account_id: int,
         uid: str,
-        rest_parallel: int = 32,
+        rest_parallel: int = 64,
     ) -> tuple[set[str], list[tuple]]:
         """Send funnel scripts via REST (local .txt) — faster than Playwright."""
         account_geo = db.normalize_channel_geo(str(self.account.get("geo") or "zm"))
@@ -392,7 +418,9 @@ class _CycleSendBuffer:
         if not eligible:
             return set(), jobs
 
-        sem = asyncio.Semaphore(max(1, rest_parallel))
+        rest_parallel = max(1, int(os.getenv("PAGER_REST_PARALLEL", "64") or "64"))
+        script_gap = float(os.getenv("PAGER_REST_SCRIPT_GAP", "0.05") or "0.05")
+        sem = asyncio.Semaphore(rest_parallel)
         job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "45"))
 
         async def _one(job: tuple) -> str | None:
@@ -414,8 +442,8 @@ class _CycleSendBuffer:
                     if not await self.client.take_conversation(cid, uid):
                         return None
                     for i, key in enumerate(keys):
-                        if i:
-                            await asyncio.sleep(0.2)
+                        if i and script_gap > 0:
+                            await asyncio.sleep(script_gap)
                         body = load_script(geo, key)
                         result = await self.client.send_message_spa(
                             cid,
@@ -789,6 +817,7 @@ async def _handle_conversation(
     conv: dict[str, Any],
     client: PagerClient,
     send_buf: _CycleSendBuffer,
+    cycle_ctx: _AccountCycleCtx,
 ) -> bool | str:
     account_id = int(account["id"])
     conv_id = str(conv.get("id") or "")
@@ -799,20 +828,19 @@ async def _handle_conversation(
     if not conv_id:
         return False
 
+    state = cycle_ctx.conv_state(conv_id)
+
     if not _is_incoming_direction(str(conv.get("lastMessageDirection") or "")):
         if not is_no_status(conv):
             return False
-        st_peek = int((await db.get_conversation_state(account_id, conv_id)).get("step") or 0)
-        if st_peek < 1:
+        if int(state.get("step") or 0) < 1:
             return False
 
-    enabled = await _enabled_channel_ids(account_id)
-    if enabled is None:
-        return False
+    enabled = cycle_ctx.enabled
     if not enabled or channel_id not in enabled:
         return False
 
-    allowed_folders = await db.get_account_enabled_folders(account_id)
+    allowed_folders = cycle_ctx.allowed_folders
 
     if not should_process_conversation(
         conv,
@@ -835,7 +863,6 @@ async def _handle_conversation(
         )
         return False
 
-    state = await db.get_conversation_state(account_id, conv_id)
     completed_sid = str(funnel_statuses.get("completed") or "").strip()
     conv_status_id = str(conv.get("statusId") or "").strip()
     if (
@@ -851,6 +878,19 @@ async def _handle_conversation(
             state.get("send_failures"),
         )
         return "paused"
+
+    status_id = conv_status_id
+    incoming = _is_incoming_direction(str(conv.get("lastMessageDirection") or ""))
+    if (
+        state.get("pause_scripts")
+        and state.get("last_processed_msg_id")
+        and not incoming
+        and status_id not in funnel_status_ids(funnel_statuses)
+    ):
+        return "paused"
+    if state.get("human_takeover") and status_id not in active_funnel:
+        if int(state.get("step") or 0) < 4:
+            return "paused"
 
     messages = await client.list_messages(conv_id, page_size=80)
     # API returns newest first — work chronologically
@@ -2192,10 +2232,12 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 all_inbox,
             )
 
+        list_pages = 28 if len(enabled) > 1 else 22
+
         try:
             convs = await client.collect_conversations(
                 enabled,
-                max_pages=max(15, 10 if len(enabled) <= 1 else 12),
+                max_pages=list_pages,
                 geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
                 channel_geo_map=account.get("_channel_geo") or {},
                 channel_folders=channel_folders,
@@ -2222,7 +2264,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             channel_folders = await db.build_channel_folders_map(account_id, enabled)
             convs = await client.collect_conversations(
                 enabled,
-                max_pages=max(15, 10 if len(enabled) <= 1 else 12),
+                max_pages=list_pages,
                 geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
                 channel_geo_map=account.get("_channel_geo") or {},
                 channel_folders=channel_folders,
@@ -2266,6 +2308,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     merged.append(c)
             inbound_convs = merged
 
+        state_map = await db.load_conversation_states_map(account_id)
+        allowed_folders = await db.get_account_enabled_folders(account_id)
+        cycle_ctx = _AccountCycleCtx(
+            account_id=account_id,
+            enabled=enabled,
+            allowed_folders=allowed_folders,
+            state_map=state_map,
+        )
+
         def _last_msg_ts(conv: dict) -> float:
             raw = str(conv.get("lastMessageAt") or "").strip()
             if not raw:
@@ -2279,9 +2330,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             except ValueError:
                 return 0.0
 
-        async def _priority(conv: dict) -> tuple[int, float]:
+        def _priority(conv: dict) -> tuple[int, float]:
             cid = str(conv.get("id") or "")
-            st = await db.get_conversation_state(account_id, cid)
+            st = state_map.get(cid) or db.default_conversation_state(account_id, cid)
             ts = _last_msg_ts(conv)
             fails = int(st.get("send_failures") or 0)
             st_step = int(st.get("step") or 0)
@@ -2313,9 +2364,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 return (-2, ts + fails * 1e-6)
             return (1, ts)
 
-        scored: list[tuple[tuple[int, float], dict]] = []
-        for c in inbound_convs:
-            scored.append((await _priority(c), c))
+        scored: list[tuple[tuple[int, float], dict]] = [
+            (_priority(c), c) for c in inbound_convs
+        ]
         scored.sort(key=lambda x: (x[0][0], x[0][1]))
         limits = _compute_cycle_limits(
             len(inbound_convs), no_status_count, len(enabled)
@@ -2325,6 +2376,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
         funnel_cap = limits["funnel_cap"]
         batch_chunk = limits["batch_chunk"]
         browser_parallel = limits["browser_parallel"]
+        plan_parallel = limits["plan_parallel"]
         process_order = _interleave_process_order(scored, limit=max_handle)
 
         inbound = len(process_order)
@@ -2336,12 +2388,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
         )
         logger.info(
             "Worker account=%s: plan budget=%s funnel_cap=%s batch=%s parallel=%s "
-            "max_handle=%s work_queue=%s (no_status=%s)",
+            "plan_parallel=%s max_handle=%s work_queue=%s (no_status=%s)",
             account.get("id"),
             max_plans,
             funnel_cap,
             batch_chunk,
             browser_parallel,
+            plan_parallel,
             max_handle,
             inbound,
             no_status_n,
@@ -2357,7 +2410,6 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             parallel=browser_parallel,
         )
         planned = 0
-        plan_parallel = max(1, int(os.getenv("PAGER_PLAN_PARALLEL", "20") or "20"))
         plan_sem = asyncio.Semaphore(plan_parallel)
 
         async def _plan_conv(conv: dict) -> None:
@@ -2371,6 +2423,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                         conv,
                         client,
                         send_buf,
+                        cycle_ctx,
                     )
                 except PagerAPIError as exc:
                     logger.warning(
@@ -2506,10 +2559,12 @@ async def worker_loop(bot: Bot) -> None:
             logger.exception("worker tick failed")
             poll_wait = settings.poll_sec
         else:
-            if max_queue > 800:
-                poll_wait = min(settings.poll_sec, 6.0)
+            if max_queue > 1500:
+                poll_wait = min(settings.poll_sec, 2.0)
+            elif max_queue > 800:
+                poll_wait = min(settings.poll_sec, 4.0)
             elif max_queue > 200:
-                poll_wait = min(settings.poll_sec, 10.0)
+                poll_wait = min(settings.poll_sec, 6.0)
             else:
                 poll_wait = settings.poll_sec
             if max_queue > 200:

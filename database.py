@@ -705,16 +705,9 @@ async def reset_conversation_states(account_id: int) -> int:
         return cur.rowcount or 0
 
 
-async def get_conversation_state(account_id: int, conversation_id: str) -> dict[str, Any]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT * FROM conversation_states WHERE account_id = ? AND conversation_id = ?",
-            (account_id, conversation_id),
-        )
-        row = await cur.fetchone()
-        if row:
-            return dict(row)
+def default_conversation_state(
+    account_id: int, conversation_id: str = ""
+) -> dict[str, Any]:
     return {
         "account_id": account_id,
         "conversation_id": conversation_id,
@@ -726,6 +719,33 @@ async def get_conversation_state(account_id: int, conversation_id: str) -> dict[
         "last_escalation_msg_id": "",
         "send_failures": 0,
     }
+
+
+async def load_conversation_states_map(
+    account_id: int,
+) -> dict[str, dict[str, Any]]:
+    """One query per worker cycle instead of per-chat lookups."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM conversation_states WHERE account_id = ?",
+            (account_id,),
+        )
+        rows = await cur.fetchall()
+    return {str(row["conversation_id"]): dict(row) for row in rows}
+
+
+async def get_conversation_state(account_id: int, conversation_id: str) -> dict[str, Any]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM conversation_states WHERE account_id = ? AND conversation_id = ?",
+            (account_id, conversation_id),
+        )
+        row = await cur.fetchone()
+        if row:
+            return dict(row)
+    return default_conversation_state(account_id, conversation_id)
 
 
 async def save_conversation_state(
