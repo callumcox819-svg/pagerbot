@@ -1242,7 +1242,7 @@ async def _handle_conversation(
         and not is_deferral_reply(text)
         and not is_refusal_reply(text)
         and (
-            is_ready_for_registration(text)
+            is_ready_for_registration(text, geo=geo)
             or wants_registration_link(text)
             or is_funnel_positive_reaction(
                 text,

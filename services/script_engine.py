@@ -560,7 +560,7 @@ def resolve_funnel_scripts(
                 if (
                     intent in ("positive", "ready", "interested", "question")
                     or _positive_signal()
-                    or is_ready_for_registration(t)
+                    or is_ready_for_registration(t, geo=geo)
                 ):
                     return ["04_tier"]
             if tier_sent and (
@@ -604,7 +604,7 @@ def resolve_funnel_scripts(
                 tier_sent
                 and not link_sent
                 and (
-                    is_ready_for_registration(t)
+                    is_ready_for_registration(t, geo=geo)
                     or wants_registration_link(t)
                     or intent in ("ready", "interested", "positive", "question")
                     or _positive_signal()
@@ -647,7 +647,7 @@ def resolve_funnel_scripts(
         if how_sent and not link_sent:
             if (
                 wants_registration_link(t)
-                or is_ready_for_registration(t)
+                or is_ready_for_registration(t, geo=geo)
                 or is_registration_pending(t)
                 or is_funnel_positive_reaction(
                     t, attachments, funnel_step=effective_step
@@ -669,7 +669,7 @@ def resolve_funnel_scripts(
         if effective_step < 2:
             if how_sent:
                 if (
-                    is_ready_for_registration(t)
+                    is_ready_for_registration(t, geo=geo)
                     or wants_registration_link(t)
                     or is_funnel_positive_reaction(
                         t, attachments, funnel_step=effective_step
@@ -682,7 +682,7 @@ def resolve_funnel_scripts(
             if (
                 intent in ("interested", "positive", "ready", "question")
                 or wants_details_after_intro(t)
-                or is_ready_for_registration(t)
+                or is_ready_for_registration(t, geo=geo)
                 or is_funnel_positive_reaction(
                     t, attachments, funnel_step=effective_step
                 )
@@ -696,7 +696,7 @@ def resolve_funnel_scripts(
             return []
         if effective_step < 4:
             if (
-                is_ready_for_registration(t)
+                is_ready_for_registration(t, geo=geo)
                 or wants_registration_link(t)
                 or intent in ("ready", "positive", "question")
                 or is_funnel_positive_reaction(t, attachments, funnel_step=effective_step)
@@ -745,7 +745,7 @@ def resolve_funnel_scripts(
         if intent in ("interested", "positive", "ready", "question") or (
             wants_details_after_intro(t)
             or is_funnel_positive_reaction(t, attachments, funnel_step=effective_step)
-            or is_ready_for_registration(t)
+            or is_ready_for_registration(t, geo=geo)
         ):
             return ["02_how_it_works", "03_zmw_table"]
         return []
@@ -760,7 +760,7 @@ def resolve_funnel_scripts(
                 return ["06_deposit"]
             return []
         if (
-            is_ready_for_registration(t)
+            is_ready_for_registration(t, geo=geo)
             or wants_registration_link(t)
             or intent in ("ready", "interested", "positive", "question")
         ):

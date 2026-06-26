@@ -666,7 +666,7 @@ def is_app_or_browser_question(text: str) -> bool:
     )
 
 
-def is_ready_for_registration(text: str) -> bool:
+def is_ready_for_registration(text: str, *, geo: str = "zm") -> bool:
     """After 02+03 — client wants reg link (not vague okay / later)."""
     t = (text or "").strip()
     if not t or is_deferral_reply(t):
@@ -977,7 +977,7 @@ def needs_human_for_text(
         return False
     if is_registration_pending(text) and step < 6:
         return False
-    if is_ready_for_registration(text) and step < 5:
+    if is_ready_for_registration(text, geo=geo) and step < 5:
         return False
     if is_deposit_tier_choice(text, geo=geo) and step < 5:
         return False
