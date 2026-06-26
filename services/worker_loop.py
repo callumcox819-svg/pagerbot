@@ -203,6 +203,17 @@ class _AccountCycleCtx:
         return db.default_conversation_state(self.account_id, conv_id)
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _flush_browser_first() -> bool:
+    return _env_truthy("PAGER_FLUSH_BROWSER_FIRST", default=True)
+
+
 def _compute_cycle_limits(
     queue_n: int,
     no_status_n: int,
@@ -432,6 +443,31 @@ class _CycleSendBuffer:
                 return False
         return True
 
+    def _partition_send_jobs(
+        self, jobs: list[tuple]
+    ) -> tuple[list[tuple], list[tuple]]:
+        """Split outbound jobs into browser vs REST-eligible queues."""
+        account_geo = db.normalize_channel_geo(str(self.account.get("geo") or "zm"))
+        browser_jobs: list[tuple] = []
+        rest_jobs: list[tuple] = []
+        for job in jobs:
+            cid, texts, _client, _channel_hint, keys, _patches = job[:6]
+            job_geo = (
+                str(job[6]).strip().lower()
+                if len(job) > 6 and job[6]
+                else self._geos.get(cid) or account_geo
+            )
+            job_geo = db.normalize_channel_geo(job_geo, default=account_geo)
+            keys = filter_auto_script_keys(list(keys or []))
+            if job_geo in browser_first_geos():
+                browser_jobs.append((*job[:6], job_geo))
+                continue
+            if not texts and keys and self._rest_script_keys_ok(keys, job_geo):
+                rest_jobs.append((*job[:6], job_geo))
+            else:
+                browser_jobs.append((*job[:6], job_geo))
+        return browser_jobs, rest_jobs
+
     async def _flush_rest_scripts(
         self,
         jobs: list[tuple],
@@ -470,7 +506,7 @@ class _CycleSendBuffer:
         if not eligible:
             return set(), jobs
 
-        rest_parallel = max(1, int(os.getenv("PAGER_REST_PARALLEL", "64") or "64"))
+        rest_parallel = max(1, int(os.getenv("PAGER_REST_PARALLEL", "12") or "12"))
         script_gap = float(os.getenv("PAGER_REST_SCRIPT_GAP", "0.35") or "0.35")
         reg_gap = float(os.getenv("PAGER_REST_REG_GAP", "1.2") or "1.2")
         sem = asyncio.Semaphore(rest_parallel)
@@ -586,59 +622,18 @@ class _CycleSendBuffer:
         retry = [job for job in eligible if job[0] not in ok]
         return ok, browser_jobs + retry
 
-    async def flush(self) -> set[str]:
-        conv_ids_set = set(self._jobs) | set(self._script_keys)
-        if not conv_ids_set:
-            return set()
-
-        conv_ids = [c for c in self._order if c in conv_ids_set]
-        for cid in conv_ids_set:
-            if cid not in conv_ids:
-                conv_ids.append(cid)
-
-        email = str(self.account.get("email") or "").strip()
-        pwd_enc = str(self.account.get("password_enc") or "").strip()
-        password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
-        if not email or not password:
-            raise RuntimeError(
-                "Account email/password required — reconnect Pager in Telegram bot"
-            )
-
-        jobs = [
-            (
-                cid,
-                self._jobs.get(cid, []),
-                self._clients.get(cid, ""),
-                self._channels.get(cid, ""),
-                self._script_keys.get(cid, []),
-                self._status_patches.get(cid, []),
-                self._geos.get(cid)
-                or resolve_conv_geo(self.account, self._channels.get(cid, "")),
-            )
-            for cid in conv_ids
-        ]
-        ok_total: set[str] = set()
-        account_id = int(self.account["id"])
-        uid = self.pager_user_id
-
-        rest_ok, jobs = await self._flush_rest_scripts(
-            jobs, account_id=account_id, uid=uid
-        )
-        ok_total.update(rest_ok)
-
+    async def _flush_browser_batches(
+        self,
+        jobs: list[tuple],
+        *,
+        account_id: int,
+        uid: str,
+        email: str,
+        password: str,
+    ) -> set[str]:
         if not jobs:
-            self._jobs.clear()
-            self._script_keys.clear()
-            self._clients.clear()
-            self._channels.clear()
-            self._geos.clear()
-            self._commits.clear()
-            self._status_patches.clear()
-            self._order.clear()
-            return ok_total
-
-        # One Playwright login per flush — chunking re-authenticates each slice.
-        chunk_size = min(len(jobs), max(self.batch_chunk_size, 48))
+            return set()
+        chunk_size = min(len(jobs), max(4, self.batch_chunk_size))
         n_chunks = (len(jobs) + chunk_size - 1) // chunk_size
         n_keys = sum(len(job[4]) for job in jobs)
         logger.info(
@@ -649,7 +644,7 @@ class _CycleSendBuffer:
             sum(len(job[1]) for job in jobs),
             n_keys,
         )
-
+        ok_total: set[str] = set()
         for start in range(0, len(jobs), chunk_size):
             chunk = jobs[start : start + chunk_size]
             chunk_no = start // chunk_size + 1
@@ -666,7 +661,9 @@ class _CycleSendBuffer:
                         email=email,
                         password=password,
                         parallel=self.parallel,
-                        geo=db.normalize_channel_geo(str(self.account.get("geo") or "zm")),
+                        geo=db.normalize_channel_geo(
+                            str(self.account.get("geo") or "zm")
+                        ),
                     ),
                     timeout=timeout,
                 )
@@ -705,8 +702,100 @@ class _CycleSendBuffer:
                 len(ok),
                 len(chunk),
             )
+        return ok_total
 
-        ok = ok_total
+    async def flush(self) -> set[str]:
+        conv_ids_set = set(self._jobs) | set(self._script_keys)
+        if not conv_ids_set:
+            return set()
+
+        conv_ids = [c for c in self._order if c in conv_ids_set]
+        for cid in conv_ids_set:
+            if cid not in conv_ids:
+                conv_ids.append(cid)
+
+        email = str(self.account.get("email") or "").strip()
+        pwd_enc = str(self.account.get("password_enc") or "").strip()
+        password = _secrets.decrypt(pwd_enc) if pwd_enc else ""
+        if not email or not password:
+            raise RuntimeError(
+                "Account email/password required — reconnect Pager in Telegram bot"
+            )
+
+        jobs = [
+            (
+                cid,
+                self._jobs.get(cid, []),
+                self._clients.get(cid, ""),
+                self._channels.get(cid, ""),
+                self._script_keys.get(cid, []),
+                self._status_patches.get(cid, []),
+                self._geos.get(cid)
+                or resolve_conv_geo(self.account, self._channels.get(cid, "")),
+            )
+            for cid in conv_ids
+        ]
+        try:
+            max_send = int(os.getenv("PAGER_MAX_SEND_JOBS", "240") or "240")
+        except ValueError:
+            max_send = 240
+        if max_send > 0 and len(jobs) > max_send:
+            logger.info(
+                "send cap account=%s jobs=%s -> %s (next cycle continues)",
+                self.account.get("id"),
+                len(jobs),
+                max_send,
+            )
+            jobs = jobs[:max_send]
+        ok_total: set[str] = set()
+        account_id = int(self.account["id"])
+        uid = self.pager_user_id
+
+        if _flush_browser_first():
+            browser_jobs, rest_jobs = self._partition_send_jobs(jobs)
+            logger.info(
+                "send flush browser-first browser=%s rest=%s",
+                len(browser_jobs),
+                len(rest_jobs),
+            )
+            ok_total.update(
+                await self._flush_browser_batches(
+                    browser_jobs,
+                    account_id=account_id,
+                    uid=uid,
+                    email=email,
+                    password=password,
+                )
+            )
+            rest_ok, leftover = await self._flush_rest_scripts(
+                rest_jobs, account_id=account_id, uid=uid
+            )
+            ok_total.update(rest_ok)
+            if leftover:
+                ok_total.update(
+                    await self._flush_browser_batches(
+                        leftover,
+                        account_id=account_id,
+                        uid=uid,
+                        email=email,
+                        password=password,
+                    )
+                )
+        else:
+            rest_ok, browser_jobs = await self._flush_rest_scripts(
+                jobs, account_id=account_id, uid=uid
+            )
+            ok_total.update(rest_ok)
+            if browser_jobs:
+                ok_total.update(
+                    await self._flush_browser_batches(
+                        browser_jobs,
+                        account_id=account_id,
+                        uid=uid,
+                        email=email,
+                        password=password,
+                    )
+                )
 
         self._jobs.clear()
         self._script_keys.clear()
@@ -716,7 +805,7 @@ class _CycleSendBuffer:
         self._commits.clear()
         self._status_patches.clear()
         self._order.clear()
-        return ok
+        return ok_total
 
 
 def _cookies(account: dict[str, Any]) -> dict[str, str]:

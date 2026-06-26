@@ -416,7 +416,8 @@ _DEFERRAL = re.compile(
     re.I,
 )
 _FR_DEFERRAL = re.compile(
-    r"\b(pas (maintenant|encore) d['']?argent|pas l['']?argent|"
+    r"\b(pas (maintenant|encore) d['']?argent|pas d['']?argent|pas l['']?argent|"
+    r"n['']?ai pas d['']?argent|j'ai pas d['']?argent|"
     r"pas de connexion|connexion (n['']?est pas|ne marche)|"
     r"internet (est )?faible|pas la connexion|"
     r"pour le moment|plus tard|demain|"
