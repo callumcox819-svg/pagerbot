@@ -79,6 +79,8 @@ from services.script_engine import (
     resolve_eg_backlog_fallback,
     resolve_zm_backlog_fallback,
     reg_link_sent_in_history,
+    reg_link_script_key,
+    reg_bundle_pending_link,
     reg_script_keys_set,
     deposit_script_key,
     game_id_script_key,
@@ -1516,6 +1518,32 @@ async def _handle_conversation(
             conv_id[:8],
             reg_keys,
             (text or "")[:40],
+        )
+        return True
+
+    pending_link = reg_bundle_pending_link(
+        list(dict.fromkeys(thread_out_early + op_texts_early)),
+        geo=geo,
+    )
+    if needs_reply and pending_link and geo in ("cm", "eg", "zm", "dj"):
+        link_key = reg_link_script_key(geo)
+        send_buf.queue_script_send(
+            conv_id,
+            [link_key],
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        send_buf.queue_commit(
+            conv_id,
+            step=max(step, 5),
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        logger.info(
+            "conv=%s reg link retry key=%s",
+            conv_id[:8],
+            link_key,
         )
         return True
 

@@ -475,7 +475,31 @@ def filter_auto_script_keys(keys: list[str]) -> list[str]:
 CM_REG_SEND_KEYS = frozenset({"05_registration", "06_link", "07_chrome"})
 CM_INTRO_SEND_KEYS = frozenset({"01_intro", "01_intro_2"})
 ZM_REG_SEND_KEYS = frozenset({"04_registration", "05_link"})
+EG_REG_SEND_KEYS = frozenset({"04_registration", "05_link"})
 ZM_EXPLAIN_SEND_KEYS = frozenset({"02_how_it_works", "03_zmw_table"})
+
+
+def reg_link_script_key(geo: str = "zm") -> str:
+    return "06_link" if geo == "cm" else "05_link"
+
+
+def reg_registration_script_key(geo: str = "zm") -> str:
+    return "05_registration" if geo == "cm" else "04_registration"
+
+
+def reg_bundle_pending_link(outgoing_texts: list[str], *, geo: str) -> bool:
+    """Registration text went out but the URL message never arrived."""
+    out = outgoing_texts or []
+    if reg_link_sent_in_history(out, geo=geo):
+        return False
+    if geo == "cm":
+        reg_sn = script_ui_snippet("05_registration", geo)
+        chrome_sn = script_ui_snippet("07_chrome", geo)
+        return script_sent_in_history(out, reg_sn) or script_sent_in_history(
+            out, chrome_sn
+        )
+    reg_sn = script_ui_snippet("04_registration", geo)
+    return script_sent_in_history(out, reg_sn)
 
 
 def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
@@ -487,7 +511,9 @@ def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
     if geo == "cm" and CM_INTRO_SEND_KEYS.issubset(keyset):
         return [load_script(geo, k) for k in ("01_intro", "01_intro_2")]
     if geo == "cm" and CM_REG_SEND_KEYS.issubset(keyset):
-        return [load_script(geo, k) for k in ("05_registration", "07_chrome", "06_link")]
+        return [load_script(geo, k) for k in ("05_registration", "06_link", "07_chrome")]
+    if geo == "eg" and EG_REG_SEND_KEYS.issubset(keyset):
+        return [load_script(geo, k) for k in ("04_registration", "05_link")]
     if geo in ("zm", "dj") and ZM_EXPLAIN_SEND_KEYS.issubset(keyset):
         return [load_script(geo, k) for k in ("02_how_it_works", "03_zmw_table")]
     if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(keyset):
@@ -506,6 +532,8 @@ def uses_combined_script_bundle(geo: str, keys: list[str]) -> bool:
 def uses_combined_reg_bundle(geo: str, keys: list[str]) -> bool:
     keys = filter_auto_script_keys(list(keys or []))
     if geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys)):
+        return True
+    if geo == "eg" and EG_REG_SEND_KEYS.issubset(set(keys)):
         return True
     if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(set(keys)):
         return True
