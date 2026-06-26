@@ -902,6 +902,28 @@ def is_affirmative_to_deposit_check(
     return False
 
 
+def is_deposit_acknowledgment(text: str) -> bool:
+    """«C'est bon» / payment SMS quote after client deposited."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(
+        r"(c'?est bon|cest bon|c bon|cbien|c'?est fait|cest fait|"
+        r"c'?est ok|cest ok|voil[àa]|tien|tiens|"
+        r"paiement réussi|paiement reussi)\.?",
+        t,
+        re.I,
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(paiement|payment|recharg).{0,24}(réussi|reussi|successful|fait)\b",
+            t,
+            re.I,
+        )
+    )
+
+
 def is_deposit_confirmation(text: str) -> bool:
     """Client says they deposited — never resend registration scripts."""
     t = (text or "").strip()
@@ -1098,6 +1120,8 @@ def classify(
     if _COMPLAINT.search(t):
         return Intent.COMPLAINT
     if is_deposit_confirmation(t):
+        return Intent.DEPOSIT_DONE
+    if is_deposit_acknowledgment(t):
         return Intent.DEPOSIT_DONE
     if is_registration_confirmed(t):
         return Intent.POSITIVE
