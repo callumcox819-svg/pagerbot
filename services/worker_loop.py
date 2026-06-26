@@ -1402,21 +1402,29 @@ async def _handle_conversation(
     funnel_active = auto_funnel or script_funnel
 
     if needs_reply and intent == Intent.MONEY_REQUEST:
-        body = money_refusal_reply(text, geo=geo)
-        send_buf.queue_send(
-            conv_id,
-            [body],
-            client_name=client_name,
-            channel_id=channel_id,
-            geo=geo,
-        )
-        send_buf.queue_commit(
-            conv_id,
-            step=max(step, 1),
-            last_processed_msg_id=msg_id,
-            pause_scripts=0,
-        )
-        return True
+        if geo in ("cm", "dj") and effective_step < 6:
+            logger.info(
+                "conv=%s ignore money_request at funnel step=%s text=%r",
+                conv_id[:8],
+                effective_step,
+                (text or "")[:40],
+            )
+        else:
+            body = money_refusal_reply(text, geo=geo)
+            send_buf.queue_send(
+                conv_id,
+                [body],
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 1),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            return True
 
     if is_deferral_reply(text) and needs_reply and effective_step < 6:
         logger.info(

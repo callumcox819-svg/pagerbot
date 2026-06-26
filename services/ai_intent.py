@@ -45,8 +45,16 @@ _AR_MONEY_REQUEST = re.compile(
     r"ساعدني\s*بفلوس|اديني\s*فلوس|اعطني\s*فلوس"
 )
 _FR_MONEY_REQUEST = re.compile(
-    r"\b(argent|francs?|prête|prêt|donne.*argent|envoyer.*argent|"
-    r"envoie.*argent|besoin d'argent|besoin d argent)\b",
+    r"\b("
+    r"prête[- ]moi|pret[- ]moi|"
+    r"donne[- ](moi )?(de l')?argent|"
+    r"envoy\w*[- ](moi )?(de l')?argent|"
+    r"besoin d['']?argent|besoin d argent"
+    r")\b",
+    re.I,
+)
+_FR_LINK_ASK = re.compile(
+    r"\benvoy\w*.*\blien\b|\blien\b.*\benvoy\w*\b",
     re.I,
 )
 _FR_WHAT_REQUIRED = re.compile(
@@ -91,12 +99,13 @@ _EN_REFUSAL = re.compile(
 _FR_READY = re.compile(
     r"\b(je suis prêt|je suis pret|prêt à commencer|pret a commencer|"
     r"on commence|commençons|commencons|vas-y|vas y|"
-    r"allez-y|allez y|allons-y|allons y|ok c'est bon)\b",
+    r"allez-y|allez y|allons-y|allons y|ok c'est bon|"
+    r"prêt à continuer|pret a continuer|oui prêt|oui pret)\b",
     re.I,
 )
 _FR_REG = re.compile(
     r"\b(inscription|inscrit|lien|enregistrer|créer un compte|creer un compte|"
-    r"envoie.*lien|envoyer.*lien)\b",
+    r"envoy\w*.*lien|lien.*envoy\w*)\b",
     re.I,
 )
 _FRENCH_LATIN = re.compile(r"[\u00C0-\u024F]")
@@ -511,10 +520,14 @@ def is_post_link_registration_question(text: str) -> bool:
 
 
 def wants_registration_link(text: str) -> bool:
-    """Client asks where/how to register — send 04+05, not 02 again."""
+    """Client asks where/how to register — send reg+link, not intro again."""
     t = (text or "").strip()
     if not t:
         return False
+    if _FR_LINK_ASK.search(t):
+        return True
+    if _FR_REG.search(t) and "lien" in t.lower():
+        return True
     return bool(_AR_REG_LINK.search(t)) or wants_registration_followup(t)
 
 
@@ -833,7 +846,9 @@ def _classify_arabic(t: str) -> Intent | None:
 def _classify_french(t: str) -> Intent | None:
     if is_refusal_reply(t):
         return Intent.DECLINED
-    if re.search(r"envoie.*lien|envoyer.*lien", t, re.I):
+    if is_age_answer(t):
+        return Intent.POSITIVE
+    if _FR_LINK_ASK.search(t):
         return Intent.READY
     if _FR_REG.search(t) and ("?" in t or "comment" in t.lower()):
         return Intent.INTERESTED

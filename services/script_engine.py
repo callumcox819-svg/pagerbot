@@ -631,6 +631,10 @@ def resolve_funnel_scripts(
             return []
 
         if effective_step < 4:
+            if wants_registration_link(t) and steps_sent and not link_sent:
+                if tier_sent:
+                    return ["05_registration", "06_link", "07_chrome"]
+                return ["04_tier"]
             if steps_sent and not tier_sent:
                 if (
                     intent in ("positive", "ready", "interested", "question")
@@ -893,6 +897,7 @@ def resolve_cm_backlog_fallback(
         is_deposit_tier_choice,
         is_registration_confirmed,
         is_registration_pending,
+        wants_registration_link,
     )
 
     out = outgoing_texts or []
@@ -963,6 +968,10 @@ def resolve_cm_backlog_fallback(
         ):
             return ["03_steps"]
         return []
+    if wants_registration_link(t) and steps_sent and not link_sent:
+        if tier_sent:
+            return ["05_registration", "06_link", "07_chrome"]
+        return ["04_tier"]
     if not tier_sent and effective_step < 5:
         if intent == "declined":
             return []
