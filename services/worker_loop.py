@@ -128,6 +128,27 @@ def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
     return default
 
 
+def _stored_game_id(state: dict[str, Any]) -> str:
+    return str(state.get("extracted_game_id") or "").strip()
+
+
+def _is_deposit_screenshot_without_gid(
+    *,
+    has_real_image: bool,
+    extracted: str,
+    stored_gid: str,
+    geo: str,
+) -> bool:
+    """Balance/profile screenshot without a recognizable game ID."""
+    if not has_real_image:
+        return False
+    if stored_gid:
+        return False
+    if extracted and looks_like_game_id(extracted, geo=geo):
+        return False
+    return True
+
+
 def _round_robin_by_channel(convs: list[dict]) -> list[dict]:
     """Fair merge — EG/CM backlog must not starve DJ (or any) channel."""
     if len(convs) <= 1:
@@ -1243,6 +1264,14 @@ async def _handle_conversation(
         return "done"
 
     needs_reply = not _has_operator_reply_after(last_in_ts)
+    ready_broadcast_reply = (
+        needs_reply
+        and geo in ("cm", "dj")
+        and reg_link_sent_in_history(op_texts_early, geo=geo)
+        and client_replied_to_ready_broadcast(
+            msg_only, last_in, text, geo=geo
+        )
+    )
     is_retry = False
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         if not needs_reply:
@@ -1368,6 +1397,7 @@ async def _handle_conversation(
         needs_reply
         and is_registration_confirmed(text)
         and reg_link_sent_in_history(op_texts_early, geo=geo)
+        and not ready_broadcast_reply
     ):
         reg_done_keys: list[str] = []
         if should_send_deposit_script(
@@ -1420,6 +1450,72 @@ async def _handle_conversation(
 
     if (
         needs_reply
+        and geo in ("cm", "dj", "zm")
+        and is_deposit_tier_choice(text, geo=geo)
+        and not reg_link_sent_in_history(op_texts_early, geo=geo)
+    ):
+        tier_sn = script_ui_snippet(
+            "04_tier" if geo == "cm" else "03_zmw_table", geo
+        )
+        tier_seen = script_sent_in_history(
+            op_texts_early, tier_sn
+        ) or script_sent_in_history(thread_out_early, tier_sn)
+        if tier_seen or geo == "cm":
+            reg_keys = (
+                ["05_registration", "06_link", "07_chrome"]
+                if geo == "cm"
+                else ["04_registration", "05_link"]
+            )
+            send_buf.queue_script_send(
+                conv_id,
+                reg_keys,
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 5),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s tier-choice reg keys=%s text=%r",
+                conv_id[:8],
+                reg_keys,
+                (text or "")[:20],
+            )
+            return True
+
+    if needs_reply and ready_broadcast_reply:
+        nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
+        if not script_sent_in_history(thread_out_early, nudge_sn) and not (
+            script_sent_in_history(op_texts_early, nudge_sn)
+        ):
+            body = deposit_screenshot_nudge_reply(geo=geo)
+            send_buf.queue_send(
+                conv_id,
+                [body],
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 5),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s ready-broadcast nudge folder=%r text=%r",
+                conv_id[:8],
+                (folder[:20] if folder else ""),
+                (text or "")[:40],
+            )
+            return True
+
+    if (
+        needs_reply
         and is_deposit_question(text)
         and 4 <= effective_step < 9
         and reg_link_sent_in_history(op_texts_early, geo=geo)
@@ -1466,6 +1562,10 @@ async def _handle_conversation(
     )
     has_real_image = has_image and not is_messenger_reaction_attachment(attachments)
 
+    dep_sn_early = script_ui_snippet(deposit_script_key(geo), geo)
+    dep_script_sent = script_sent_in_history(op_texts_early, dep_sn_early)
+    reg_link_sent = reg_link_sent_in_history(op_texts_early, geo=geo)
+
     deposit_signal = (
         not is_reaction_only
         and not is_deposit_question(text)
@@ -1476,7 +1576,18 @@ async def _handle_conversation(
             or is_affirmative_to_deposit_check(
                 text, op_texts_early, geo=geo
             )
-            or (has_real_image and effective_step >= 6)
+            or (
+                has_real_image
+                and reg_link_sent
+                and (
+                    effective_step >= 6
+                    or dep_script_sent
+                    or script_sent_in_history(
+                        op_texts_early,
+                        script_ui_snippet(game_id_script_key(geo), geo),
+                    )
+                )
+            )
         )
     )
 
@@ -1530,14 +1641,17 @@ async def _handle_conversation(
         folder_step=folder_step,
         geo=geo,
     )
-    ready_broadcast_reply = needs_reply and geo in ("cm", "dj") and (
-        client_replied_to_ready_broadcast(
+    ready_broadcast_reply = (
+        needs_reply
+        and geo in ("cm", "dj")
+        and reg_link_sent_in_history(op_texts_early, geo=geo)
+        and client_replied_to_ready_broadcast(
             msg_only, last_in, text, geo=geo
         )
     )
     xbet_site_reply = needs_reply and is_xbet_site_question(text) and (
         reg_link_sent_in_history(op_texts_early, geo=geo)
-        or effective_step >= 3
+        or "?" in (text or "")
     )
 
     auto_funnel = (
@@ -1605,33 +1719,6 @@ async def _handle_conversation(
             (text or "")[:50],
         )
         return True
-
-    if needs_reply and ready_broadcast_reply and not deposit_signal:
-        nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
-        if not script_sent_in_history(thread_out_early, nudge_sn) and not (
-            script_sent_in_history(op_texts_early, nudge_sn)
-        ):
-            body = deposit_screenshot_nudge_reply(geo=geo)
-            send_buf.queue_send(
-                conv_id,
-                [body],
-                client_name=client_name,
-                channel_id=channel_id,
-                geo=geo,
-            )
-            send_buf.queue_commit(
-                conv_id,
-                step=max(step, 5),
-                last_processed_msg_id=msg_id,
-                pause_scripts=0,
-            )
-            logger.info(
-                "conv=%s ready-broadcast nudge folder=%r text=%r",
-                conv_id[:8],
-                (folder[:20] if folder else ""),
-                (text or "")[:40],
-            )
-            return True
 
     if needs_reply and intent == Intent.MONEY_REQUEST:
         if geo in ("cm", "dj") and effective_step < 6:
@@ -1826,8 +1913,15 @@ async def _handle_conversation(
             )
             return True
 
-        if payment_proof and geo != "eg":
-            if not script_sent_in_history(op_outgoing, gid_sn):
+        if payment_proof:
+            stored_gid = _stored_game_id(state)
+            deposit_screenshot = _is_deposit_screenshot_without_gid(
+                has_real_image=has_real_image,
+                extracted=gid,
+                stored_gid=stored_gid,
+                geo=geo,
+            )
+            if not script_sent_in_history(op_outgoing, gid_sn) or deposit_screenshot:
                 send_buf.queue_script_send(
                     conv_id,
                     [gid_key],
@@ -2064,13 +2158,65 @@ async def _handle_conversation(
             )
             return True
 
+        op_out_img = [
+            (m.get("text") or "")
+            for m in msg_only
+            if _valid_outgoing_reply(m)
+        ]
+        if (
+            4 <= step < 7
+            and reg_link_sent_in_history(op_out_img, geo=geo)
+            and _is_deposit_screenshot_without_gid(
+                has_real_image=has_real_image,
+                extracted=extracted,
+                stored_gid=_stored_game_id(state),
+                geo=geo,
+            )
+        ):
+            gid_key = game_id_script_key(geo)
+            send_buf.queue_script_send(
+                conv_id,
+                [gid_key],
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            if pager_user_id:
+                send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 6),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s deposit screenshot step=%s — request game_id keys=%s",
+                conv_id[:8],
+                step,
+                [gid_key],
+            )
+            return True
+
         # In «В процесі» / registration — random photos are not game-ID screenshots.
-        if step < 6 and has_image and not extracted:
+        if (
+            step < 6
+            and has_image
+            and not extracted
+            and not reg_link_sent_in_history(
+                [
+                    (m.get("text") or "")
+                    for m in msg_only
+                    if _valid_outgoing_reply(m)
+                ],
+                geo=geo,
+            )
+        ):
             has_image = False
 
         if step >= 7:
             gid_key = game_id_script_key(geo)
             gid_sn = script_ui_snippet(gid_key, geo)
+            stored_gid = _stored_game_id(state)
             if extracted and looks_like_game_id(extracted, geo=geo):
                 await _outbound_send([EXCELLENT], script_keys=[deposit_script_key(geo)])
                 if pager_user_id:
@@ -2127,8 +2273,36 @@ async def _handle_conversation(
                     last_processed_msg_id=msg_id,
                 )
                 return True
+            if _is_deposit_screenshot_without_gid(
+                has_real_image=has_real_image,
+                extracted=extracted,
+                stored_gid=stored_gid,
+                geo=geo,
+            ):
+                send_buf.queue_script_send(
+                    conv_id,
+                    [gid_key],
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+                if pager_user_id:
+                    send_buf.queue_status_patch(
+                        conv_id, funnel_statuses["wait_id"]
+                    )
+                send_buf.queue_commit(
+                    conv_id,
+                    step=max(step, 6),
+                    last_processed_msg_id=msg_id,
+                )
+                logger.info(
+                    "conv=%s deposit screenshot — re-request game_id keys=%s",
+                    conv_id[:8],
+                    [gid_key],
+                )
+                return True
             tg_sn = script_ui_snippet("09_tg_link", geo)
-            if geo != "eg" and not script_sent_in_history(
+            if not script_sent_in_history(
                 [
                     (m.get("text") or "")
                     for m in msg_only

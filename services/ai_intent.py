@@ -619,9 +619,13 @@ def is_xbet_site_question(text: str) -> bool:
     if _XBET_BRAND.search(t):
         if "?" in t or _XBET_SITE_QUESTION.search(t):
             return True
-        if re.search(r"\b(sur|vers|to|on|loin)\b", t, re.I):
+        if re.search(
+            r"\b(sur|vers|to|on|loin|envoie|envoy|redir|redirect|mène|mene)\b",
+            t,
+            re.I,
+        ) and len(t.split()) >= 4:
             return True
-        return is_on_registration_site(t)
+        return False
     if _XBET_SITE_QUESTION.search(t) and re.search(
         r"\b(bet|inscri|register|promo|code|site|lien|link)\b", t, re.I
     ):
@@ -907,19 +911,15 @@ def is_operator_ready_broadcast(text: str) -> bool:
 
 
 def is_broadcast_positive_reply(text: str, *, geo: str = "cm") -> bool:
-    """Client reply to operator broadcast — Oui, Je suis intéressé, etc."""
+    """Short consent right after Pager mass-mail — not generic funnel interest."""
     t = (text or "").strip()
     if not t:
+        return False
+    if len(t.split()) > 10 and not _BROADCAST_POSITIVE_REPLY.search(t):
         return False
     if is_short_affirmative(t):
         return True
     if _BROADCAST_POSITIVE_REPLY.search(t):
-        return True
-    if is_ready_for_registration(t, geo=geo):
-        return True
-    if _FR_POSITIVE.search(t) and len(t.split()) <= 6:
-        return True
-    if _FR_INTERESTED.search(t):
         return True
     return False
 
@@ -943,20 +943,10 @@ def outgoing_has_ready_continue_broadcast(
     return False
 
 
-def client_replied_to_ready_broadcast(
-    messages: list[dict],
-    client_msg: dict,
-    client_text: str,
-    *,
-    geo: str = "cm",
-) -> bool:
-    """True when client answered AFTER operator mass-mail (not old thread noise)."""
-    if not is_broadcast_positive_reply(client_text, geo=geo):
-        return False
-    client_ts = str(client_msg.get("createdAt") or "")
-    if not client_ts:
-        return False
-    broadcast_ts = ""
+def _last_operator_body_before(messages: list[dict], before_ts: str) -> str:
+    """Last non-system operator text strictly before client timestamp."""
+    last_body = ""
+    last_ts = ""
     for m in messages:
         direction = str(m.get("messageDirection") or "").strip().lower()
         if direction not in ("outgoing", "out"):
@@ -964,12 +954,36 @@ def client_replied_to_ready_broadcast(
         if "oldStatusId" in m or "oldResponsibleId" in m:
             continue
         body = (m.get("text") or "").strip()
-        if not is_operator_ready_broadcast(body):
+        if not body:
             continue
         ts = str(m.get("createdAt") or "")
-        if ts and ts <= client_ts and ts > broadcast_ts:
-            broadcast_ts = ts
-    return bool(broadcast_ts)
+        if not ts or not before_ts or ts > before_ts:
+            continue
+        if ts >= last_ts:
+            last_ts = ts
+            last_body = body
+    return last_body
+
+
+def client_replied_to_ready_broadcast(
+    messages: list[dict],
+    client_msg: dict,
+    client_text: str,
+    *,
+    geo: str = "cm",
+) -> bool:
+    """True when client answered directly after operator mass-mail."""
+    if is_deposit_tier_choice(client_text, geo=geo):
+        return False
+    if not is_broadcast_positive_reply(client_text, geo=geo):
+        return False
+    client_ts = str(client_msg.get("createdAt") or "")
+    if not client_ts:
+        return False
+    last_op = _last_operator_body_before(messages, client_ts)
+    if not is_operator_ready_broadcast(last_op):
+        return False
+    return True
 
 
 def is_affirmative_to_ready_broadcast(
@@ -1025,8 +1039,6 @@ def is_affirmative_to_deposit_check(
             continue
         if _DEPOSIT_CHECK_OUT.search(t):
             return True
-        if _READY_CONTINUE_BROADCAST.search(t):
-            return is_short_affirmative(text)
     return False
 
 

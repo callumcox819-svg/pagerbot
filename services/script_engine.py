@@ -52,7 +52,20 @@ EG_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "06_deposit": "+ الأخضر",
     "07_game_id": "يبدأ ب 17",
     "08_app_or_browser": "ينفع الاتنين",
+    "09_tg_invite": "الاستراتيجيات والتكتيكات",
+    "10_tg_link": "t7iYS46b2Ls2YWRk",
+    "08_tg_invite": "الاستراتيجيات والتكتيكات",
+    "09_tg_link": "t7iYS46b2Ls2YWRk",
 }
+
+_EG_KEY_ALIASES: dict[str, str] = {
+    "08_tg_invite": "09_tg_invite",
+    "09_tg_link": "10_tg_link",
+}
+
+
+def resolve_eg_key(key: str) -> str:
+    return _EG_KEY_ALIASES.get(key, key)
 
 # Djibouti — French saved replies folder in Pager (create manually).
 DJ_SAVED_REPLY_FOLDER_NAMES = ("Djibouti", "DJIBOUTI", "Djibouti FR", "DJ")
@@ -170,6 +183,8 @@ def script_ui_snippet(key: str, geo: str = "zm") -> str:
     """Text needle for locating a saved reply in Pager UI."""
     if geo == "cm":
         key = resolve_cm_key(key)
+    elif geo == "eg":
+        key = resolve_eg_key(key)
     snippets = GEO_SCRIPT_UI_SNIPPETS.get(geo) or SCRIPT_UI_SNIPPETS
     sn = snippets.get(key, "").strip()
     if sn:
@@ -184,6 +199,8 @@ def script_verify_snippet(key: str, geo: str = "zm") -> str:
     """Substring used to verify delivery in message history."""
     if geo == "cm":
         key = resolve_cm_key(key)
+    elif geo == "eg":
+        key = resolve_eg_key(key)
     snippets = GEO_SCRIPT_UI_SNIPPETS.get(geo) or SCRIPT_UI_SNIPPETS
     sn = snippets.get(key, "").strip()
     if sn:
@@ -194,6 +211,8 @@ def script_verify_snippet(key: str, geo: str = "zm") -> str:
 def load_script(geo: str, key: str) -> str:
     if geo == "cm":
         key = resolve_cm_key(key)
+    elif geo == "eg":
+        key = resolve_eg_key(key)
     cache_key = f"{geo}/{key}"
     if cache_key in _cache:
         return _cache[cache_key]
@@ -238,6 +257,10 @@ def _step_for_outgoing_text_eg(text: str) -> int:
             return 1
     if "حابب تفاصيل" in t or "تفاصيل" in t and "قولي" in t:
         return 1
+    if "t7iys46b2ls2ywrd" in t or "t.me/+" in t:
+        return 9
+    if "الاستراتيجيات والتكتيكات" in text or "استراتيجيات" in t:
+        return 8
     return 0
 
 
@@ -572,6 +595,9 @@ def resolve_funnel_scripts(
         tier_sent = script_sent_in_history(out, tier_sn)
         link_sent = reg_link_sent_in_history(out, geo=geo)
 
+        if tier_sent and is_deposit_tier_choice(t, geo=geo) and not link_sent:
+            return ["05_registration", "06_link", "07_chrome"]
+
         if effective_step < 1:
             if not intro_sent:
                 if intent in ("interested", "positive", "ready", "question") or _positive_signal():
@@ -637,12 +663,16 @@ def resolve_funnel_scripts(
             if intent == "game_id_text":
                 return []
             dep_sn = script_ui_snippet(dep_key, geo)
-            if link_sent and effective_step >= 4 and not script_sent_in_history(
-                out, dep_sn
-            ) and (
-                is_what_required_question(t)
-                or is_post_link_registration_question(t)
-                or intent in ("question", "positive", "interested", "ready")
+            if (
+                link_sent
+                and effective_step >= 4
+                and not is_deposit_tier_choice(t, geo=geo)
+                and not script_sent_in_history(out, dep_sn)
+                and (
+                    is_what_required_question(t)
+                    or is_post_link_registration_question(t)
+                    or intent in ("question", "positive", "interested", "ready")
+                )
             ):
                 return [dep_key]
             if is_registration_confirmed(t) or intent == "joined":
@@ -782,6 +812,12 @@ def resolve_funnel_scripts(
             return []
         if effective_step < 8 and intent == "game_id_text":
             return ["07_game_id"]
+        if effective_step < 9:
+            tg_sn = script_ui_snippet("09_tg_link", geo)
+            if not script_sent_in_history(out, tg_sn):
+                gid_sn = script_ui_snippet("07_game_id", geo)
+                if script_sent_in_history(out, gid_sn) and effective_step >= 7:
+                    return ["08_tg_invite", "09_tg_link"]
         if effective_step < 4 and (
             intent in ("positive", "interested", "ready") or _positive_signal()
         ):
@@ -1092,7 +1128,13 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
 
 
 def extract_game_id(text: str, geo: str = "zm") -> str:
-    if geo in ("eg", "dj", "cm"):
+    if geo == "eg":
+        m = re.search(r"\b(10\d{8,})\b", text or "") or re.search(
+            r"\b(17\d{6,})\b", text or ""
+        )
+        if m:
+            return m.group(1)
+    elif geo in ("dj", "cm"):
         m = re.search(r"\b(17\d{6,})\b", text or "")
         if m:
             return m.group(1)
