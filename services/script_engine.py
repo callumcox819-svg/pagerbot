@@ -486,7 +486,9 @@ def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
                 load_script(geo, k) for k in ("02_how_it_works", "03_zmw_table")
             )
         ]
-    if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(keyset):
+    if geo == "zm" and ZM_REG_SEND_KEYS.issubset(keyset):
+        return [load_script(geo, "04_registration"), load_script(geo, "05_link")]
+    if geo == "dj" and ZM_REG_SEND_KEYS.issubset(keyset):
         reg = load_script(geo, "04_registration")
         link = load_script(geo, "05_link")
         reg_text = reg.rstrip()
