@@ -879,21 +879,28 @@ _READY_CONTINUE_BROADCAST = re.compile(
     r"prêt à continuer|pret a continuer|prêt à commencer|pret a commencer|"
     r"notre stratégie|notre strategie|bons résultats|bons resultats|"
     r"stratégie donne|strategie donne|tu es prêt|tu es pret|"
-    r"êtes-vous prêt|etes-vous pret|ready to continue"
+    r"êtes-vous prêt|etes-vous pret|ready to continue|"
+    r"good results today|our strategy"
     r")\b",
     re.I,
 )
 
 
-def outgoing_has_ready_continue_broadcast(outgoing_texts: list[str]) -> bool:
+def outgoing_has_ready_continue_broadcast(
+    outgoing_texts: list[str],
+    *,
+    limit: int = 16,
+) -> bool:
     """Operator mass-message: «Prêt à continuer?» / strategy pitch."""
+    checked = 0
     for raw in reversed(outgoing_texts or []):
         t = (raw or "").strip()
         if not t:
             continue
         if _READY_CONTINUE_BROADCAST.search(t):
             return True
-        if len(t) > 40:
+        checked += 1
+        if checked >= limit:
             break
     return False
 

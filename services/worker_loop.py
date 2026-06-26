@@ -842,6 +842,20 @@ def _is_outgoing_direction(value: str) -> bool:
     return (value or "").strip().lower() in ("outgoing", "out")
 
 
+def _thread_outgoing_texts(msg_only: list[dict[str, Any]]) -> list[str]:
+    """All operator/bot text in thread — includes manual broadcasts (no author filter)."""
+    out: list[str] = []
+    for m in msg_only:
+        if not _is_outgoing_direction(str(m.get("messageDirection") or "")):
+            continue
+        if "oldStatusId" in m or "oldResponsibleId" in m:
+            continue
+        t = (m.get("text") or "").strip()
+        if t:
+            out.append(t)
+    return out
+
+
 def _recent_incoming_messages(
     msg_only: list[dict[str, Any]], *, limit: int = 10
 ) -> list[dict[str, Any]]:
@@ -1169,6 +1183,7 @@ async def _handle_conversation(
         and (m.get("text") or "").strip()
         and (m.get("isDelivered") or m.get("facebookMessageId"))
     ]
+    thread_out_early = _thread_outgoing_texts(msg_only)
     folder_step = infer_step_from_status(conv, funnel_statuses)
     if folder_step > hist_step and not reg_link_sent_in_history(
         op_texts_early, geo=geo
@@ -1518,13 +1533,13 @@ async def _handle_conversation(
     )
     ready_broadcast_reply = needs_reply and geo in ("cm", "dj") and (
         is_affirmative_to_ready_broadcast(
-            text, op_texts_early, geo=geo
+            text, thread_out_early, geo=geo
         )
         or (
             is_short_affirmative(text)
-            and outgoing_has_ready_continue_broadcast(op_texts_early)
+            and outgoing_has_ready_continue_broadcast(thread_out_early)
         )
-        or is_affirmative_to_deposit_check(text, op_texts_early, geo=geo)
+        or is_affirmative_to_deposit_check(text, thread_out_early, geo=geo)
     )
     xbet_site_reply = needs_reply and is_xbet_site_question(text) and (
         reg_link_sent_in_history(op_texts_early, geo=geo)
@@ -1596,6 +1611,33 @@ async def _handle_conversation(
             (text or "")[:50],
         )
         return True
+
+    if needs_reply and ready_broadcast_reply and not deposit_signal:
+        nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
+        if not script_sent_in_history(thread_out_early, nudge_sn) and not (
+            script_sent_in_history(op_texts_early, nudge_sn)
+        ):
+            body = deposit_screenshot_nudge_reply(geo=geo)
+            send_buf.queue_send(
+                conv_id,
+                [body],
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 5),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s ready-broadcast nudge folder=%r text=%r",
+                conv_id[:8],
+                (folder[:20] if folder else ""),
+                (text or "")[:40],
+            )
+            return True
 
     if needs_reply and intent == Intent.MONEY_REQUEST:
         if geo in ("cm", "dj") and effective_step < 6:
@@ -2347,31 +2389,6 @@ async def _handle_conversation(
                     tier_text[:20],
                 )
                 break
-
-    if needs_reply and ready_broadcast_reply and not deposit_signal and not keys:
-        nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
-        if not script_sent_in_history(op_outgoing, nudge_sn):
-            body = deposit_screenshot_nudge_reply(geo=geo)
-            send_buf.queue_send(
-                conv_id,
-                [body],
-                client_name=client_name,
-                channel_id=channel_id,
-                geo=geo,
-            )
-            send_buf.queue_commit(
-                conv_id,
-                step=max(step, 5),
-                last_processed_msg_id=msg_id,
-                pause_scripts=0,
-            )
-            logger.info(
-                "conv=%s ready-broadcast nudge folder=%r text=%r",
-                conv_id[:8],
-                (folder[:20] if folder else ""),
-                (text or "")[:40],
-            )
-            return True
 
     if needs_reply and not deposit_signal and not keys:
         if (
