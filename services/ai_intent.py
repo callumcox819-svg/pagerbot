@@ -89,7 +89,8 @@ _FR_REFUSAL = re.compile(
     r"je veux pas|j veux pas|j' veux pas|veux pas|"
     r"non merci|nn merci|merci non|"
     r"ça m'intéresse pas|ca m'interesse pas|"
-    r"je ne veux pas|je veux plus)\b",
+    r"je ne veux pas|je veux plus|"
+    r"ne m['']?écrivez pas|ne me écrivez pas)\b",
     re.I,
 )
 _EN_REFUSAL = re.compile(
@@ -414,6 +415,15 @@ _DEFERRAL = re.compile(
     r"give me time|need time|only have)\b",
     re.I,
 )
+_FR_DEFERRAL = re.compile(
+    r"\b(pas (maintenant|encore) d['']?argent|pas l['']?argent|"
+    r"pas de connexion|connexion (n['']?est pas|ne marche)|"
+    r"internet (est )?faible|pas la connexion|"
+    r"pour le moment|plus tard|demain|"
+    r"je peux rien|je ne peux pas|trop de pression)\b|"
+    r"\bdéjà fait\b",
+    re.I,
+)
 _REG_COMPLETE = re.compile(
     r"\b(registered|registration done|done registering|done with registration|"
     r"i registered|have registered|finished registering|signed up|account created|"
@@ -607,6 +617,8 @@ def is_deferral_reply(text: str) -> bool:
     if re.fullmatch(r"no\.?", t, re.I):
         return True
     if _AR_DEFERRAL.search(t):
+        return True
+    if _FR_DEFERRAL.search(t):
         return True
     return bool(_DEFERRAL.search(t))
 

@@ -2061,10 +2061,10 @@ async def _handle_conversation(
     if needs_reply and not deposit_signal and not keys:
         if (
             intent in (Intent.QUESTION, Intent.UNKNOWN)
-            and step >= 4
             and not funnel_active
-            and not (geo == "eg" and is_no_status(conv))
-            and not (geo in ("zm", "dj", "cm") and is_no_status(conv))
+            and needs_human_for_text(
+                intent, step, text, no_status=no_status, geo=geo
+            )
         ):
             escalated = await _escalate_once(
                 bot,
