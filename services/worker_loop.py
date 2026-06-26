@@ -1525,7 +1525,17 @@ async def _handle_conversation(
         list(dict.fromkeys(thread_out_early + op_texts_early)),
         geo=geo,
     )
-    if needs_reply and pending_link and geo in ("cm", "eg", "zm", "dj"):
+    client_prompted_link_retry = (
+        is_short_affirmative(text)
+        or wants_registration_link(text)
+        or is_deposit_tier_choice(text, geo=geo)
+    )
+    if (
+        needs_reply
+        and pending_link
+        and client_prompted_link_retry
+        and geo in ("cm", "eg", "zm", "dj")
+    ):
         link_key = reg_link_script_key(geo)
         send_buf.queue_script_send(
             conv_id,
@@ -1541,9 +1551,10 @@ async def _handle_conversation(
             pause_scripts=0,
         )
         logger.info(
-            "conv=%s reg link retry key=%s",
+            "conv=%s reg link retry key=%s text=%r",
             conv_id[:8],
             link_key,
+            (text or "")[:30],
         )
         return True
 
