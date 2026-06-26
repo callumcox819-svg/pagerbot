@@ -66,14 +66,17 @@ def channels_kb(channels: list[dict], *, account_geo: str = "zm") -> InlineKeybo
 
 
 def folders_kb(folder_rows: list[dict]) -> InlineKeyboardMarkup:
+    from services.status_ids import folder_callback_token
+
     rows = []
-    for i, folder in enumerate(folder_rows):
+    for folder in folder_rows:
         mark = "✅" if folder.get("enabled") else "⬜"
+        sid = str(folder.get("status_id", ""))
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"{mark} {folder.get('name')}",
-                    callback_data=f"fld:t:{i}",
+                    callback_data=f"fld:t:{folder_callback_token(sid)}",
                 )
             ]
         )

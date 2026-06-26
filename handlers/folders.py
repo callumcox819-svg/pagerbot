@@ -13,7 +13,11 @@ from config import load_settings
 from handlers.pager_account import _pager_client, _secrets
 from keyboards.main_menu import folders_kb
 from services.pager_api import PagerAPIError
-from services.status_ids import ALL_INBOX_FOLDER_ID, normalize_enabled_folders
+from services.status_ids import (
+    ALL_INBOX_FOLDER_ID,
+    folder_callback_decode,
+    normalize_enabled_folders,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -145,21 +149,19 @@ async def cb_folder_toggle(cb: CallbackQuery) -> None:
     if not acc:
         await cb.answer("Нет сессии")
         return
-    try:
-        folder_idx = int(cb.data.split(":")[2])
-    except (IndexError, ValueError):
-        await cb.answer("Ошибка")
-        return
+    token = cb.data.split(":", 2)[2] if cb.data.count(":") >= 2 else ""
+    status_id = folder_callback_decode(token)
     account_id = int(acc["id"])
     folder_rows = await _folder_rows(acc)
-    if folder_idx < 0 or folder_idx >= len(folder_rows):
-        await cb.answer("Папка не найдена")
-        return
-    row = folder_rows[folder_idx]
-    new_state = not bool(row.get("enabled"))
-    await db.toggle_account_folder(
-        account_id, str(row["status_id"]), new_state
+    row = next(
+        (r for r in folder_rows if str(r.get("status_id", "")) == status_id),
+        None,
     )
+    if not row:
+        await cb.answer("Папка не найдена — нажмите 🔄 Обновить папки")
+        return
+    new_state = not bool(row.get("enabled"))
+    await db.toggle_account_folder(account_id, str(row["status_id"]), new_state)
     folder_rows = await _folder_rows(acc)
     await cb.message.edit_text(
         _folders_text(folder_rows),

@@ -15,7 +15,7 @@ ZM_STATUSES = {
 _STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "in_progress": ("процесі", "процесс", "in progress", "реєстрації"),
     "wait_id": ("чекаю id", "чекаю ід", "wait id", "wait_id"),
-    "registration": ("реєстрація", "регистрация", "registration"),
+    "registration": ("рега", "реєстрація", "регистрация", "registration"),
     "deps_pending": ("депи не", "депы не", "deps pending", "deps"),
     "completed": ("заверш", "completed", "finish", "terminé", "termine"),
 }
@@ -151,6 +151,26 @@ def process_funnel_folders() -> bool:
     )
 
 
+def folder_callback_token(status_id: str) -> str:
+    """Encode folder id for Telegram callback_data (fld:t:…)."""
+    sid = status_id if status_id is not None else ""
+    if sid == NO_STATUS_FOLDER_ID:
+        return "ns"
+    if sid == ALL_INBOX_FOLDER_ID:
+        return "all"
+    return sid
+
+
+def folder_callback_decode(token: str) -> str:
+    """Decode fld:t: callback token back to folder status_id."""
+    t = (token or "").strip()
+    if t == "ns":
+        return NO_STATUS_FOLDER_ID
+    if t == "all":
+        return ALL_INBOX_FOLDER_ID
+    return t
+
+
 def should_process_conversation(
     conv: dict,
     *,
@@ -163,8 +183,15 @@ def should_process_conversation(
         return False
     if is_no_status(conv):
         return True
-    active = funnel_status_ids(funnel_statuses)
     status_id = str(conv.get("statusId") or "").strip()
+    if allowed_folders is not None:
+        specific, all_inbox = normalize_enabled_folders(allowed_folders)
+        if not all_inbox:
+            if specific == {NO_STATUS_FOLDER_ID}:
+                return False
+            if status_id and status_id in specific:
+                return True
+    active = funnel_status_ids(funnel_statuses)
     completed_sid = str((funnel_statuses or ZM_STATUSES).get("completed") or "").strip()
     if completed_sid and status_id == completed_sid:
         if allowed_folders is not None:

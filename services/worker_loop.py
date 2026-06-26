@@ -890,18 +890,24 @@ async def _handle_conversation(
         return False
 
     state = cycle_ctx.conv_state(conv_id)
+    allowed_folders = cycle_ctx.allowed_folders
 
     if not _is_incoming_direction(str(conv.get("lastMessageDirection") or "")):
-        if not is_no_status(conv):
-            return False
-        if int(state.get("step") or 0) < 1:
-            return False
+        if is_no_status(conv):
+            if int(state.get("step") or 0) < 1:
+                return False
+        else:
+            status_id_early = str(conv.get("statusId") or "").strip()
+            in_funnel = status_id_early in active_funnel
+            in_picker = allowed_folders is not None and conv_allowed_in_folders(
+                conv, allowed_folders
+            )
+            if not in_funnel and not in_picker:
+                return False
 
     enabled = cycle_ctx.enabled
     if not enabled or channel_id not in enabled:
         return False
-
-    allowed_folders = cycle_ctx.allowed_folders
 
     if not should_process_conversation(
         conv,
@@ -2303,6 +2309,19 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 )
         funnel_statuses = resolve_funnel_statuses(status_rows)
         account["_funnel_statuses"] = funnel_statuses
+        name_by_id: dict[str, str] = {}
+        if status_rows:
+            name_by_id = {
+                str(s.get("status_id") or ""): str(s.get("name") or "")
+                for s in status_rows
+            }
+            logger.info(
+                "Worker account=%s: funnel map in_progress=%r registration=%r wait_id=%r",
+                account_id,
+                name_by_id.get(str(funnel_statuses.get("in_progress") or ""), "?"),
+                name_by_id.get(str(funnel_statuses.get("registration") or ""), "?"),
+                name_by_id.get(str(funnel_statuses.get("wait_id") or ""), "?"),
+            )
         account["_channel_geo"] = await db.get_channel_geo_map(
             account_id, account_geo=str(account.get("geo") or "zm")
         )
@@ -2310,11 +2329,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             sample = next(iter(channel_folders.values()), set()) or set()
             specific, all_inbox = normalize_enabled_folders(sample)
             logger.info(
-                "Worker account=%s: enabled folders raw=%s effective=%s all_inbox=%s",
+                "Worker account=%s: enabled folders raw=%s effective=%s all_inbox=%s names=%s",
                 account.get("id"),
                 sorted(sample)[:8],
                 sorted(specific)[:8],
                 all_inbox,
+                [
+                    name_by_id.get(s, "Без статусу" if s == "" else s[:8])
+                    for s in sorted(specific)
+                ],
             )
 
         list_pages = 22 + min(16, 6 * len(enabled))
