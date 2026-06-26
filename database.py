@@ -280,21 +280,40 @@ def next_channel_geo(current: str) -> str:
 
 
 def infer_channel_geo_from_name(name: str, *, default: str = "zm") -> str:
-    """Guess geo from Pager channel title (Moses Zulu → dj, Ndzié → cm, …)."""
+    """Guess geo from Pager channel title (Ndzié/Brice → cm, Moses Zulu → dj, …)."""
     n = (name or "").lower()
     if any(
         x in n
-        for x in ("moses", "zulu", "djibouti", "moukoko", "brice")
-    ):
-        return "dj"
-    if any(
-        x in n
-        for x in ("ndzié", "ndzie", "mvondo", "cameroun", "cameroon", "камерун")
+        for x in (
+            "ndzié",
+            "ndzie",
+            "mvondo",
+            "brice",
+            "moukoko",
+            "cameroun",
+            "cameroon",
+            "камерун",
+        )
     ):
         return "cm"
+    if any(x in n for x in ("moses", "zulu", "djibouti")):
+        return "dj"
     if any(x in n for x in ("mahmoud", "fathy", "egypt")):
         return "eg"
     return normalize_channel_geo(default)
+
+
+def _should_apply_inferred_geo(stored: str, inferred: str, *, account_geo: str) -> bool:
+    """Apply name-based geo when unset or clearly mis-tagged (e.g. Brice was dj → cm)."""
+    if inferred == stored:
+        return False
+    if stored == account_geo:
+        return inferred != account_geo
+    if stored == "dj" and inferred == "cm":
+        return True
+    if stored == "zm" and inferred in ("cm", "dj", "eg"):
+        return True
+    return False
 
 
 async def sync_channels(
@@ -337,7 +356,9 @@ async def sync_channels(
             if cid in existing:
                 stored = existing_geos.get(cid, account_geo)
                 geo = stored
-                if stored == account_geo and inferred != account_geo:
+                if _should_apply_inferred_geo(
+                    stored, inferred, account_geo=account_geo
+                ):
                     geo = inferred
                 await db.execute(
                     """
