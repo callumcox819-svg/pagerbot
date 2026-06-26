@@ -223,5 +223,6 @@ def infer_step_from_status(
     if status_id == fs.get("wait_id"):
         return 6
     if status_id == fs.get("registration"):
-        return 7
+        # CRM «рега» = registration stage (link / promo), not post-deposit step 7.
+        return 5
     return 0

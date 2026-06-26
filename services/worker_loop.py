@@ -28,6 +28,7 @@ from services.ai_intent import (
     classify,
     is_commitment_reply,
     is_deposit_confirmation,
+    is_affirmative_to_deposit_check,
     is_deposit_question,
     is_already_registered_before_funnel,
     is_age_answer,
@@ -167,9 +168,10 @@ def _interleave_process_order(
     other = _round_robin_by_channel(other)
     out: list[dict] = []
     fi = bi = oi = 0
+    fresh_burst = 1 if len(backlog) > 400 else 2
     while len(out) < limit:
         progressed = False
-        for _ in range(2):
+        for _ in range(fresh_burst):
             if fi < len(fresh) and len(out) < limit:
                 out.append(fresh[fi])
                 fi += 1
@@ -250,8 +252,8 @@ def _compute_cycle_limits(
         plan_parallel = max(plan_parallel, 40)
 
     if queue_n > 300:
-        max_handle = min(max_handle, 120)
-        base_plans = min(base_plans, 72)
+        max_handle = min(max_handle, 160)
+        base_plans = min(base_plans, 80)
         batch_chunk = min(max(batch_chunk, 16), 20)
         browser_parallel = min(max(browser_parallel, 6), 8)
         plan_parallel = min(max(plan_parallel, 40), 64)
@@ -1150,10 +1152,6 @@ async def _handle_conversation(
         infer_step_from_history(msg_only, pager_user_id, geo=geo),
         infer_step_from_thread(msg_only, geo=geo),
     )
-    folder_step = infer_step_from_status(conv, funnel_statuses)
-    stored_step = int(state.get("step") or 0)
-    effective_step_early = max(hist_step, stored_step, folder_step)
-
     op_texts_early = [
         (m.get("text") or "")
         for m in msg_only
@@ -1161,6 +1159,14 @@ async def _handle_conversation(
         and (m.get("text") or "").strip()
         and (m.get("isDelivered") or m.get("facebookMessageId"))
     ]
+    folder_step = infer_step_from_status(conv, funnel_statuses)
+    if folder_step > hist_step and not reg_link_sent_in_history(
+        op_texts_early, geo=geo
+    ):
+        folder_step = hist_step
+    stored_step = int(state.get("step") or 0)
+    effective_step_early = max(hist_step, stored_step, folder_step)
+
     last_in = _pick_client_turn_message(
         msg_only,
         state,
@@ -1437,6 +1443,9 @@ async def _handle_conversation(
         and (
             intent == Intent.DEPOSIT_DONE
             or is_deposit_confirmation(text)
+            or is_affirmative_to_deposit_check(
+                text, op_texts_early, geo=geo
+            )
             or (has_real_image and effective_step >= 6)
         )
     )
@@ -2060,11 +2069,14 @@ async def _handle_conversation(
                 )
         elif (
             geo in ("zm", "dj", "cm")
-            and 4 <= effective_step < 7
+            and 4 <= effective_step <= 7
             and intent in (Intent.POSITIVE, Intent.READY)
             and (
                 is_short_affirmative(text)
                 or is_registration_confirmed(text)
+                or is_affirmative_to_deposit_check(
+                    text, op_outgoing, geo=geo
+                )
             )
             and reg_link_sent_in_history(op_outgoing, geo=geo)
             and not script_sent_in_history(
@@ -2633,13 +2645,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             if status_id == funnel_statuses.get("in_progress") and (
                 st.get("pause_scripts") or st.get("last_escalation_msg_id")
             ):
-                return (-3, ts)
+                return (-3, -ts + fails * 1e-9)
+            if status_id == funnel_statuses.get("registration") and incoming:
+                return (-4, -ts + fails * 1e-9)
             if status_id in (
                 funnel_statuses.get("wait_id"),
                 funnel_statuses.get("registration"),
                 funnel_statuses.get("in_progress"),
             ):
-                return (-3, ts)
+                return (-3, -ts + fails * 1e-9)
             if st.get("human_takeover"):
                 return (4, ts)
             if st.get("pause_scripts") and st_step < 4:

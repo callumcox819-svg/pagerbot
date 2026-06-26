@@ -816,6 +816,36 @@ def is_deposit_question(text: str) -> bool:
     )
 
 
+_DEPOSIT_CHECK_OUT = re.compile(
+    r"\b("
+    r"tu as fait le d[ée]p[oô]t|vous avez fait le d[ée]p[oô]t|"
+    r"as[- ]tu fait le d[ée]p[oô]t|avez[- ]vous fait le d[ée]p[oô]t|"
+    r"have you (made|done) (a |the |your )?deposit|did you deposit|"
+    r"deposit\s*\?"
+    r")\b",
+    re.I,
+)
+
+
+def is_affirmative_to_deposit_check(
+    text: str,
+    outgoing_texts: list[str],
+    *,
+    geo: str = "zm",
+) -> bool:
+    """Short «Oui» after operator asked «Tu as fait le dépôt ?»."""
+    if not is_short_affirmative(text):
+        return False
+    for raw in reversed(outgoing_texts or []):
+        t = (raw or "").strip()
+        if not t:
+            continue
+        if _DEPOSIT_CHECK_OUT.search(t):
+            return True
+        break
+    return False
+
+
 def is_deposit_confirmation(text: str) -> bool:
     """Client says they deposited — never resend registration scripts."""
     t = (text or "").strip()
