@@ -448,6 +448,35 @@ def filter_auto_script_keys(keys: list[str]) -> list[str]:
     return [k for k in keys if k not in AUTO_SKIP_SCRIPT_KEYS]
 
 
+CM_REG_SEND_KEYS = frozenset({"05_registration", "06_link", "07_chrome"})
+
+
+def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
+    """Outbound message bodies — CM reg+link+chrome as one block (link-only ghosts on FB)."""
+    keys = filter_auto_script_keys(list(keys or []))
+    if not keys:
+        return []
+    if geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys)):
+        reg = load_script(geo, "05_registration")
+        link = load_script(geo, "06_link")
+        chrome = load_script(geo, "07_chrome")
+        reg_text = reg.rstrip()
+        if reg_text.endswith("Voici le lien :"):
+            reg_text = reg_text[: -len("Voici le lien :")].rstrip()
+        parts = [reg_text]
+        if chrome and chrome.lower() not in reg_text.lower():
+            parts.append(chrome)
+        if link and link not in reg_text:
+            parts.append(link)
+        return ["\n\n".join(p for p in parts if p)]
+    return [load_script(geo, k) for k in keys]
+
+
+def uses_combined_reg_bundle(geo: str, keys: list[str]) -> bool:
+    keys = filter_auto_script_keys(list(keys or []))
+    return geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys))
+
+
 def scripts_to_resend_for_step(hist_step: int) -> list[str]:
     """Resend scripts when a prior attempt was marked processed but never delivered."""
     if hist_step < 1:

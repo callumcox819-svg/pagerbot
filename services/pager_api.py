@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -815,6 +816,46 @@ class PagerClient:
             await self.warm_session()
             data = await self._request("GET", "/api/message", params=params)
         return data if isinstance(data, list) else []
+
+    async def wait_message_delivered(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        user_id: str = "",
+        timeout: float = 30.0,
+        poll_interval: float = 0.7,
+    ) -> bool:
+        """Poll until Messenger assigns facebookMessageId (not optimistic ghost)."""
+        uid = self.operator_user_id(user_id)
+        needle = (text or "").strip().lower()[:72]
+        if not needle:
+            return False
+        deadline = time.monotonic() + max(3.0, timeout)
+        while time.monotonic() < deadline:
+            try:
+                messages = await self.list_messages(conv_id, page_size=15)
+            except PagerAPIError:
+                await asyncio.sleep(poll_interval)
+                continue
+            for msg in messages:
+                if str(msg.get("messageDirection") or "").lower() not in (
+                    "outgoing",
+                    "out",
+                ):
+                    continue
+                author = str(msg.get("authorId") or "").strip()
+                if uid and author and author != uid:
+                    continue
+                body = (msg.get("text") or "").strip().lower()
+                if needle[:40] not in body and body[:40] not in needle:
+                    continue
+                if msg.get("isDelivered") or msg.get("facebookMessageId"):
+                    return True
+                if msg.get("optimistic") and not msg.get("facebookMessageId"):
+                    break
+            await asyncio.sleep(poll_interval)
+        return False
 
     async def resolve_session_user_id(self) -> str:
         """Logged-in Pager operator id (Clerk user_…)."""

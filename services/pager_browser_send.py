@@ -13,12 +13,14 @@ from services.playwright_lock import chromium_session
 
 from services.script_engine import (
     SAVED_REPLY_FOLDER_NAMES,
+    bodies_for_script_keys,
     filter_auto_script_keys,
     load_script,
     saved_reply_folder_names,
     script_exclude_snippets,
     script_ui_snippet,
     script_verify_snippet,
+    uses_combined_reg_bundle,
 )
 
 logger = logging.getLogger(__name__)
@@ -1409,7 +1411,9 @@ async def _batch_send_one_conv(
     oid = (org_id or "").strip()
     slug = (org_slug or "").strip()
     ch = (channel_hint or "").strip()
-    keys = [k.strip() for k in (script_keys or []) if (k or "").strip()]
+    keys = filter_auto_script_keys(
+        [k.strip() for k in (script_keys or []) if (k or "").strip()]
+    )
     bodies = [t.strip() for t in texts if (t or "").strip()]
     if not keys and not bodies:
         return
@@ -1486,44 +1490,60 @@ async def _batch_send_one_conv(
     except Exception as exc:
         logger.warning("prepare outbound conv=%s: %s", conv_id[:8], exc)
 
-    for i, key in enumerate(keys):
-        if i:
-            await asyncio.sleep(1.0)
-        try:
-            await _send_via_saved_reply(
+    if keys and uses_combined_reg_bundle(geo, keys):
+        for i, body in enumerate(bodies_for_script_keys(geo, keys)):
+            if i:
+                await asyncio.sleep(1.2)
+            await _send_from_open_chat(
                 page,
-                script_key=key,
                 conv_id=conv_id,
                 org_id=oid,
                 user_id=uid,
+                text=body,
                 locale=locale,
                 org_slug=slug,
+                skip_ui=False,
                 channel_hint=ch,
-                geo=geo,
             )
-        except Exception as exc:
-            logger.warning(
-                "saved-reply failed key=%s conv=%s: %s",
-                key,
-                conv_id[:8],
-                exc,
+    elif keys:
+        for i, key in enumerate(keys):
+            if i:
+                await asyncio.sleep(1.0)
+            try:
+                await _send_via_saved_reply(
+                    page,
+                    script_key=key,
+                    conv_id=conv_id,
+                    org_id=oid,
+                    user_id=uid,
+                    locale=locale,
+                    org_slug=slug,
+                    channel_hint=ch,
+                    geo=geo,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "saved-reply failed key=%s conv=%s: %s",
+                    key,
+                    conv_id[:8],
+                    exc,
+                )
+                raise
+    else:
+        for i, body in enumerate(bodies):
+            if i:
+                await asyncio.sleep(0.8)
+            await _send_from_open_chat(
+                page,
+                conv_id=conv_id,
+                org_id=oid,
+                user_id=uid,
+                text=body,
+                locale=locale,
+                org_slug=slug,
+                skip_ui=True,
+                channel_hint=ch,
             )
-            raise
-
-    for i, body in enumerate(bodies):
-        if i:
-            await asyncio.sleep(0.8)
-        await _send_from_open_chat(
-            page,
-            conv_id=conv_id,
-            org_id=oid,
-            user_id=uid,
-            text=body,
-            locale=locale,
-            org_slug=slug,
-            skip_ui=True,
-            channel_hint=ch,
-        )
 
     for sid in status_patches or []:
         await _browser_patch_status(

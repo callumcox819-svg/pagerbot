@@ -56,6 +56,7 @@ from services.pager_api import (
     is_org_id_error,
     is_session_error,
     message_accepted,
+    message_delivered,
 )
 from services.pager_browser_send import send_batch_via_browser
 from services.session_refresh import refresh_pager_session
@@ -77,6 +78,7 @@ from services.script_engine import (
     script_ui_snippet,
     scripts_to_send_after_intent,
     filter_auto_script_keys,
+    bodies_for_script_keys,
     should_send_deposit_script,
 )
 from services.status_ids import (
@@ -419,9 +421,10 @@ class _CycleSendBuffer:
             return set(), jobs
 
         rest_parallel = max(1, int(os.getenv("PAGER_REST_PARALLEL", "64") or "64"))
-        script_gap = float(os.getenv("PAGER_REST_SCRIPT_GAP", "0.05") or "0.05")
+        script_gap = float(os.getenv("PAGER_REST_SCRIPT_GAP", "0.35") or "0.35")
+        reg_gap = float(os.getenv("PAGER_REST_REG_GAP", "1.2") or "1.2")
         sem = asyncio.Semaphore(rest_parallel)
-        job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "45"))
+        job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "90"))
 
         async def _one(job: tuple) -> str | None:
             cid, _texts, _client, channel_hint, keys, patches, geo = job
@@ -430,41 +433,102 @@ class _CycleSendBuffer:
 
             async def _run() -> str | None:
                 try:
-                    conv = await self.client.open_conversation(cid)
+                    conv: dict[str, Any] = {}
+                    try:
+                        uid_send, conv = await self.client.prepare_outbound(
+                            cid, author_id=uid
+                        )
+                    except PagerAPIError as exc:
+                        logger.warning(
+                            "REST prepare outbound conv=%s: %s",
+                            cid[:8],
+                            exc.body[:120],
+                        )
+                        return None
                     ch = (channel_hint or "").strip()
-                    if not ch and conv:
+                    if not ch:
                         ch = str(conv.get("channelId") or "").strip()
                         nested = conv.get("channel")
                         if not ch and isinstance(nested, dict):
                             ch = str(nested.get("id") or "").strip()
                     if not ch:
                         return None
-                    if not await self.client.take_conversation(cid, uid):
-                        return None
-                    for i, key in enumerate(keys):
-                        if i and script_gap > 0:
-                            await asyncio.sleep(script_gap)
-                        body = load_script(geo, key)
-                        result = await self.client.send_message_spa(
-                            cid,
-                            body,
-                            user_id=uid,
-                            channel_id=ch,
-                            conv=conv,
-                        )
-                        if not message_accepted(result, uid):
+                    bodies = bodies_for_script_keys(geo, keys)
+                    multi = len(bodies) > 1
+                    for i, body in enumerate(bodies):
+                        if i:
+                            gap = reg_gap if multi else script_gap
+                            if gap > 0:
+                                await asyncio.sleep(gap)
+                        delivered = False
+                        for attempt, send_fn in enumerate(
+                            ("spa", "minimal")
+                        ):
+                            try:
+                                if send_fn == "spa":
+                                    result = await self.client.send_message_spa(
+                                        cid,
+                                        body,
+                                        user_id=uid_send,
+                                        channel_id=ch,
+                                        conv=conv,
+                                    )
+                                    if not message_delivered(result):
+                                        raise PagerAPIError(
+                                            502,
+                                            '{"error":"SPA not delivered"}',
+                                        )
+                                else:
+                                    result = await self.client.post_message_after_take(
+                                        cid,
+                                        body,
+                                        user_id=uid_send,
+                                        channel_id=ch,
+                                    )
+                                    if not message_delivered(result):
+                                        raise PagerAPIError(
+                                            502,
+                                            '{"error":"minimal not delivered"}',
+                                        )
+                            except PagerAPIError as exc:
+                                logger.warning(
+                                    "REST send %s conv=%s attempt=%s: %s",
+                                    send_fn,
+                                    cid[:8],
+                                    attempt + 1,
+                                    exc.body[:100],
+                                )
+                                continue
+                            if await self.client.wait_message_delivered(
+                                cid,
+                                body,
+                                user_id=uid_send,
+                                timeout=35.0,
+                            ):
+                                delivered = True
+                                logger.info(
+                                    "REST body ok conv=%s chars=%s fb=%s",
+                                    cid[:8],
+                                    len(body),
+                                    str(result.get("facebookMessageId") or "")[
+                                        :12
+                                    ],
+                                )
+                                break
+                        if not delivered:
                             logger.warning(
-                                "REST script not accepted conv=%s key=%s author=%s fb=%s",
+                                "REST ghost conv=%s keys=%s body=%r",
                                 cid[:8],
-                                key,
-                                str(result.get("authorId") or "")[:16],
-                                str(result.get("facebookMessageId") or "")[:12],
+                                keys,
+                                body[:48],
                             )
                             return None
                     if status_patches:
                         sid = status_patches[-1]
                         try:
-                            await self.client.patch_status(cid, sid, user_id=uid)
+                            await self.client.patch_status(
+                                cid, sid, user_id=uid_send
+                            )
                             logger.info(
                                 "REST status patch conv=%s status=%s",
                                 cid[:8],
@@ -476,7 +540,9 @@ class _CycleSendBuffer:
                                 cid[:8],
                                 exc,
                             )
-                    await self.client.mark_conversation_read(cid, user_id=uid)
+                    await self.client.mark_conversation_read(
+                        cid, user_id=uid_send
+                    )
                     logger.info(
                         "REST script ok conv=%s keys=%s",
                         cid[:8],
