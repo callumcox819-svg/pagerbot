@@ -1324,6 +1324,8 @@ async def _handle_conversation(
             except Exception:
                 pass
         return "done"
+
+    thread_has_ad = has_ad or any(
         bool(m.get("adId") or m.get("adUrl")) for m in msg_only
     )
     if (
