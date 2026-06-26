@@ -852,10 +852,65 @@ class PagerClient:
                     continue
                 if msg.get("isDelivered") or msg.get("facebookMessageId"):
                     return True
-                if msg.get("optimistic") and not msg.get("facebookMessageId"):
-                    break
             await asyncio.sleep(poll_interval)
         return False
+
+    async def send_body_reliable(
+        self,
+        conv_id: str,
+        text: str,
+        *,
+        user_id: str = "",
+        channel_id: str = "",
+        conv: dict[str, Any] | None = None,
+    ) -> bool:
+        """SPA → minimal POST → poll until Messenger confirms (no optimistic ghosts)."""
+        uid = self.operator_user_id(user_id)
+        ch = (channel_id or "").strip()
+        conv_data: dict[str, Any] = dict(conv or {})
+        attempts: list[tuple[str, Any]] = [
+            (
+                "spa",
+                lambda: self.send_message_spa(
+                    conv_id,
+                    text,
+                    user_id=uid,
+                    channel_id=ch,
+                    conv=conv_data,
+                ),
+            ),
+            (
+                "minimal",
+                lambda: self.post_message_after_take(
+                    conv_id, text, user_id=uid, channel_id=ch
+                ),
+            ),
+        ]
+        for label, fn in attempts:
+            try:
+                result = await fn()
+            except PagerAPIError as exc:
+                logger.warning(
+                    "send %s conv=%s: %s",
+                    label,
+                    conv_id[:8],
+                    exc.body[:100],
+                )
+                continue
+            if not isinstance(result, dict):
+                continue
+            fb = str(result.get("facebookMessageId") or "").strip()
+            if fb or result.get("isDelivered") is True:
+                logger.info(
+                    "send ok %s conv=%s fb=%s",
+                    label,
+                    conv_id[:8],
+                    fb[:12],
+                )
+                return True
+        return await self.wait_message_delivered(
+            conv_id, text, user_id=uid, timeout=45.0
+        )
 
     async def resolve_session_user_id(self) -> str:
         """Logged-in Pager operator id (Clerk user_…)."""

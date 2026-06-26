@@ -14,13 +14,14 @@ from services.playwright_lock import chromium_session
 from services.script_engine import (
     SAVED_REPLY_FOLDER_NAMES,
     bodies_for_script_keys,
+    browser_first_geos,
     filter_auto_script_keys,
     load_script,
     saved_reply_folder_names,
     script_exclude_snippets,
     script_ui_snippet,
     script_verify_snippet,
-    uses_combined_reg_bundle,
+    uses_combined_script_bundle,
 )
 
 logger = logging.getLogger(__name__)
@@ -1490,7 +1491,10 @@ async def _batch_send_one_conv(
     except Exception as exc:
         logger.warning("prepare outbound conv=%s: %s", conv_id[:8], exc)
 
-    if keys and uses_combined_reg_bundle(geo, keys):
+    if keys and (
+        geo in browser_first_geos()
+        or uses_combined_script_bundle(geo, keys)
+    ):
         for i, body in enumerate(bodies_for_script_keys(geo, keys)):
             if i:
                 await asyncio.sleep(1.2)

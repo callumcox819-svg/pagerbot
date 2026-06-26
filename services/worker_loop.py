@@ -56,8 +56,6 @@ from services.pager_api import (
     PagerClient,
     is_org_id_error,
     is_session_error,
-    message_accepted,
-    message_delivered,
 )
 from services.pager_browser_send import send_batch_via_browser
 from services.session_refresh import refresh_pager_session
@@ -80,6 +78,7 @@ from services.script_engine import (
     scripts_to_send_after_intent,
     filter_auto_script_keys,
     bodies_for_script_keys,
+    browser_first_geos,
     should_send_deposit_script,
 )
 from services.status_ids import (
@@ -444,6 +443,15 @@ class _CycleSendBuffer:
             )
             job_geo = db.normalize_channel_geo(job_geo, default=account_geo)
             keys = filter_auto_script_keys(list(keys or []))
+            if job_geo in browser_first_geos():
+                logger.debug(
+                    "REST skip browser-first geo=%s conv=%s keys=%s",
+                    job_geo,
+                    cid[:8],
+                    keys,
+                )
+                browser_jobs.append((*job[:6], job_geo))
+                continue
             if not texts and keys and self._rest_script_keys_ok(keys, job_geo):
                 eligible.append((*job[:6], job_geo))
             else:
@@ -486,68 +494,18 @@ class _CycleSendBuffer:
                     if not ch:
                         return None
                     bodies = bodies_for_script_keys(geo, keys)
-                    multi = len(bodies) > 1
                     for i, body in enumerate(bodies):
                         if i:
-                            gap = reg_gap if multi else script_gap
+                            gap = reg_gap if len(bodies) > 1 else script_gap
                             if gap > 0:
                                 await asyncio.sleep(gap)
-                        delivered = False
-                        for attempt, send_fn in enumerate(
-                            ("spa", "minimal")
+                        if not await self.client.send_body_reliable(
+                            cid,
+                            body,
+                            user_id=uid_send,
+                            channel_id=ch,
+                            conv=conv,
                         ):
-                            try:
-                                if send_fn == "spa":
-                                    result = await self.client.send_message_spa(
-                                        cid,
-                                        body,
-                                        user_id=uid_send,
-                                        channel_id=ch,
-                                        conv=conv,
-                                    )
-                                    if not message_delivered(result):
-                                        raise PagerAPIError(
-                                            502,
-                                            '{"error":"SPA not delivered"}',
-                                        )
-                                else:
-                                    result = await self.client.post_message_after_take(
-                                        cid,
-                                        body,
-                                        user_id=uid_send,
-                                        channel_id=ch,
-                                    )
-                                    if not message_delivered(result):
-                                        raise PagerAPIError(
-                                            502,
-                                            '{"error":"minimal not delivered"}',
-                                        )
-                            except PagerAPIError as exc:
-                                logger.warning(
-                                    "REST send %s conv=%s attempt=%s: %s",
-                                    send_fn,
-                                    cid[:8],
-                                    attempt + 1,
-                                    exc.body[:100],
-                                )
-                                continue
-                            if await self.client.wait_message_delivered(
-                                cid,
-                                body,
-                                user_id=uid_send,
-                                timeout=35.0,
-                            ):
-                                delivered = True
-                                logger.info(
-                                    "REST body ok conv=%s chars=%s fb=%s",
-                                    cid[:8],
-                                    len(body),
-                                    str(result.get("facebookMessageId") or "")[
-                                        :12
-                                    ],
-                                )
-                                break
-                        if not delivered:
                             logger.warning(
                                 "REST ghost conv=%s keys=%s body=%r",
                                 cid[:8],
@@ -555,6 +513,11 @@ class _CycleSendBuffer:
                                 body[:48],
                             )
                             return None
+                        logger.info(
+                            "REST body ok conv=%s chars=%s",
+                            cid[:8],
+                            len(body),
+                        )
                     if status_patches:
                         sid = status_patches[-1]
                         try:

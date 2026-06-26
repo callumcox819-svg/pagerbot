@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -449,15 +450,24 @@ def filter_auto_script_keys(keys: list[str]) -> list[str]:
 
 
 CM_REG_SEND_KEYS = frozenset({"05_registration", "06_link", "07_chrome"})
+CM_INTRO_SEND_KEYS = frozenset({"01_intro", "01_intro_2"})
 ZM_REG_SEND_KEYS = frozenset({"04_registration", "05_link"})
+ZM_EXPLAIN_SEND_KEYS = frozenset({"02_how_it_works", "03_zmw_table"})
 
 
 def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
-    """Outbound message bodies — reg+link as one block (link-only ghosts on FB)."""
+    """Outbound bodies — merge multi-part templates (FB rejects link-only / rapid bursts)."""
     keys = filter_auto_script_keys(list(keys or []))
     if not keys:
         return []
-    if geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys)):
+    keyset = set(keys)
+    if geo == "cm" and CM_INTRO_SEND_KEYS.issubset(keyset):
+        return [
+            "\n\n".join(
+                load_script(geo, k) for k in ("01_intro", "01_intro_2")
+            )
+        ]
+    if geo == "cm" and CM_REG_SEND_KEYS.issubset(keyset):
         reg = load_script(geo, "05_registration")
         link = load_script(geo, "06_link")
         chrome = load_script(geo, "07_chrome")
@@ -470,7 +480,13 @@ def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
         if link and link not in reg_text:
             parts.append(link)
         return ["\n\n".join(p for p in parts if p)]
-    if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(set(keys)):
+    if geo in ("zm", "dj") and ZM_EXPLAIN_SEND_KEYS.issubset(keyset):
+        return [
+            "\n\n".join(
+                load_script(geo, k) for k in ("02_how_it_works", "03_zmw_table")
+            )
+        ]
+    if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(keyset):
         reg = load_script(geo, "04_registration")
         link = load_script(geo, "05_link")
         reg_text = reg.rstrip()
@@ -485,6 +501,14 @@ def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
     return [load_script(geo, k) for k in keys]
 
 
+def uses_combined_script_bundle(geo: str, keys: list[str]) -> bool:
+    """True when several script keys collapse into fewer outbound messages."""
+    keys = filter_auto_script_keys(list(keys or []))
+    if not keys:
+        return False
+    return len(bodies_for_script_keys(geo, keys)) < len(keys)
+
+
 def uses_combined_reg_bundle(geo: str, keys: list[str]) -> bool:
     keys = filter_auto_script_keys(list(keys or []))
     if geo == "cm" and CM_REG_SEND_KEYS.issubset(set(keys)):
@@ -492,6 +516,11 @@ def uses_combined_reg_bundle(geo: str, keys: list[str]) -> bool:
     if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(set(keys)):
         return True
     return False
+
+
+def browser_first_geos() -> frozenset[str]:
+    raw = (os.getenv("PAGER_BROWSER_FIRST_GEOS") or "cm,dj").strip().lower()
+    return frozenset(g.strip() for g in raw.split(",") if g.strip())
 
 
 def scripts_to_resend_for_step(hist_step: int) -> list[str]:
