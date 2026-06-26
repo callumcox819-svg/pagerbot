@@ -233,15 +233,15 @@ def _compute_cycle_limits(
     if queue_n > 50:
         max_handle = max(max_handle, min(3000, queue_n))
         base_plans = max(base_plans, min(400, queue_n // 3))
-        batch_chunk = max(batch_chunk, 48)
-        browser_parallel = max(browser_parallel, 12)
+        batch_chunk = max(batch_chunk, 20)
+        browser_parallel = max(browser_parallel, 8)
         plan_parallel = max(plan_parallel, 48)
 
     if queue_n > 500:
         max_handle = max(max_handle, min(5000, queue_n))
         base_plans = max(base_plans, min(800, queue_n // 2))
-        batch_chunk = max(batch_chunk, 64)
-        browser_parallel = min(max(browser_parallel, 20), 28)
+        batch_chunk = min(max(batch_chunk, 20), 24)
+        browser_parallel = min(max(browser_parallel, 6), 8)
         plan_parallel = min(max(plan_parallel, 64), 96)
 
     max_plans = base_plans
@@ -369,6 +369,7 @@ class _CycleSendBuffer:
         if self.pager_user_id:
             merged["_pager_user_id"] = self.pager_user_id
         self.client.cookies = merged
+        self._pin_org_on_client()
         _session_cache[account_id] = (time.time(), dict(merged))
         try:
             await db.upsert_account(
@@ -378,6 +379,14 @@ class _CycleSendBuffer:
             )
         except Exception:
             pass
+
+    def _pin_org_on_client(self) -> None:
+        """Keep org id on client after browser batches — avoids «Organization ID required»."""
+        if not self.org_id:
+            return
+        self.client.org_id = self.org_id
+        self.client.org_id_fallback = self.org_id
+        self.client.cookies["_pager_org_id"] = self.org_id
 
     async def _commit_delivered_async(
         self,
@@ -644,7 +653,7 @@ class _CycleSendBuffer:
             chunk = jobs[start : start + chunk_size]
             chunk_no = start // chunk_size + 1
             waves = (len(chunk) + self.parallel - 1) // self.parallel
-            timeout = min(1200.0, 120.0 + 55.0 * waves)
+            timeout = min(2400.0, 180.0 + 90.0 * waves)
             try:
                 ok, fresh_cookies = await asyncio.wait_for(
                     send_batch_via_browser(
@@ -678,6 +687,8 @@ class _CycleSendBuffer:
                 )
                 ok = set()
                 fresh_cookies = {}
+            finally:
+                self._pin_org_on_client()
 
             await self._apply_fresh_cookies(fresh_cookies, account_id)
 
@@ -1683,7 +1694,12 @@ async def _handle_conversation(
                 img_url, _settings.openai_api_key, geo=geo
             )
 
-        if step >= 5 and step < 7:
+        wait_id_sid = str(funnel_statuses.get("wait_id") or "").strip()
+        waiting_for_game_id = step >= 6 or (
+            wait_id_sid and conv_status_id == wait_id_sid
+        )
+
+        if waiting_for_game_id and step < 7:
             if extracted:
                 await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
                 if pager_user_id:
@@ -1733,6 +1749,42 @@ async def _handle_conversation(
                 pause=True,
             )
             return True
+
+        if step >= 5 and step < 7 and extracted:
+            await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
+            if pager_user_id:
+                send_buf.queue_status_patch(
+                    conv_id, funnel_statuses["wait_id"]
+                )
+            send_buf.queue_commit(
+                conv_id,
+                step=7,
+                extracted_game_id=extracted,
+                last_processed_msg_id=msg_id,
+            )
+            await _escalate_once(
+                bot,
+                esc_chat,
+                account_id=account_id,
+                conv_id=conv_id,
+                msg_id=msg_id,
+                state=state,
+                account=account,
+                channel_id=channel_id,
+                title="Game ID распознан",
+                client_name=client_name,
+                channel_name=channel_name,
+                folder=folder,
+                reason="Проверьте депозит при необходимости",
+                last_message=text or "(photo)",
+                extra=f"ID: {extracted}",
+                pause=False,
+            )
+            return True
+
+        # In «В процесі» / registration — random photos are not game-ID screenshots.
+        if step < 6 and has_image and not extracted:
+            has_image = False
 
         if step >= 7:
             await _escalate_once(
