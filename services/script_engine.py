@@ -456,50 +456,19 @@ ZM_EXPLAIN_SEND_KEYS = frozenset({"02_how_it_works", "03_zmw_table"})
 
 
 def bodies_for_script_keys(geo: str, keys: list[str]) -> list[str]:
-    """Outbound bodies — merge multi-part templates (FB rejects link-only / rapid bursts)."""
+    """One script key → one outbound message (text and link never merged)."""
     keys = filter_auto_script_keys(list(keys or []))
     if not keys:
         return []
     keyset = set(keys)
     if geo == "cm" and CM_INTRO_SEND_KEYS.issubset(keyset):
-        return [
-            "\n\n".join(
-                load_script(geo, k) for k in ("01_intro", "01_intro_2")
-            )
-        ]
+        return [load_script(geo, k) for k in ("01_intro", "01_intro_2")]
     if geo == "cm" and CM_REG_SEND_KEYS.issubset(keyset):
-        reg = load_script(geo, "05_registration")
-        link = load_script(geo, "06_link")
-        chrome = load_script(geo, "07_chrome")
-        reg_text = reg.rstrip()
-        if reg_text.endswith("Voici le lien :"):
-            reg_text = reg_text[: -len("Voici le lien :")].rstrip()
-        parts = [reg_text]
-        if chrome and chrome.lower() not in reg_text.lower():
-            parts.append(chrome)
-        if link and link not in reg_text:
-            parts.append(link)
-        return ["\n\n".join(p for p in parts if p)]
+        return [load_script(geo, k) for k in ("05_registration", "07_chrome", "06_link")]
     if geo in ("zm", "dj") and ZM_EXPLAIN_SEND_KEYS.issubset(keyset):
-        return [
-            "\n\n".join(
-                load_script(geo, k) for k in ("02_how_it_works", "03_zmw_table")
-            )
-        ]
-    if geo == "zm" and ZM_REG_SEND_KEYS.issubset(keyset):
-        return [load_script(geo, "04_registration"), load_script(geo, "05_link")]
-    if geo == "dj" and ZM_REG_SEND_KEYS.issubset(keyset):
-        reg = load_script(geo, "04_registration")
-        link = load_script(geo, "05_link")
-        reg_text = reg.rstrip()
-        if reg_text.endswith("Here is the link:"):
-            reg_text = reg_text[: -len("Here is the link:")].rstrip()
-        if reg_text.endswith("Voici le lien :"):
-            reg_text = reg_text[: -len("Voici le lien :")].rstrip()
-        parts = [reg_text]
-        if link and link not in reg_text:
-            parts.append(link)
-        return ["\n\n".join(p for p in parts if p)]
+        return [load_script(geo, k) for k in ("02_how_it_works", "03_zmw_table")]
+    if geo in ("zm", "dj") and ZM_REG_SEND_KEYS.issubset(keyset):
+        return [load_script(geo, k) for k in ("04_registration", "05_link")]
     return [load_script(geo, k) for k in keys]
 
 
