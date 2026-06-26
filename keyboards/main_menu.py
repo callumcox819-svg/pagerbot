@@ -28,6 +28,7 @@ GEO_BUTTON_LABELS = {
     "zm": "🇿🇲 ZM",
     "eg": "🇪🇬 EG",
     "dj": "🇩🇯 DJ",
+    "cm": "🇨🇲 CM",
 }
 
 

@@ -262,7 +262,7 @@ async def deactivate_other_accounts(*, email: str = "", keep_id: int) -> None:
         await db.commit()
 
 
-VALID_CHANNEL_GEOS = ("zm", "eg", "dj")
+VALID_CHANNEL_GEOS = ("zm", "eg", "dj", "cm")
 
 
 def normalize_channel_geo(geo: str, *, default: str = "zm") -> str:

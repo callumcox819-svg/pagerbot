@@ -2711,7 +2711,7 @@ async def send_batch_via_browser(
             if len(job) > 6 and job[6]
             else default_geo
         )
-        if job_geo not in ("zm", "eg", "dj"):
+        if job_geo not in ("zm", "eg", "dj", "cm"):
             job_geo = default_geo
         keys = filter_auto_script_keys(
             [k.strip() for k in script_keys if (k or "").strip()]

@@ -93,7 +93,7 @@ async def pager_menu(message: Message) -> None:
             f"Авто-ответ: {'вкл' if acc.get('auto_reply') else 'выкл'}\n"
             f"Пауза: {'да' if acc.get('paused') else 'нет'}\n\n"
             f"Страна на канал: 📡 Каналы → кнопка 🇿🇲/🇪🇬/🇩🇯\n"
-            f"Geo по умолчанию: /set_geo zm | eg | dj"
+            f"Geo по умолчанию: /set_geo zm | eg | dj | cm"
         )
     else:
         err = (acc or {}).get("last_error") or ""
@@ -104,8 +104,8 @@ async def pager_menu(message: Message) -> None:
 @router.message(Command("set_geo"))
 async def cmd_set_geo(message: Message) -> None:
     parts = (message.text or "").strip().split()
-    if len(parts) < 2 or parts[1].lower() not in ("zm", "eg", "dj"):
-        await message.answer("Использование: /set_geo zm  |  /set_geo eg  |  /set_geo dj")
+    if len(parts) < 2 or parts[1].lower() not in ("zm", "eg", "dj", "cm"):
+        await message.answer("Использование: /set_geo zm  |  /set_geo eg  |  /set_geo dj  |  /set_geo cm")
         return
     acc = await db.get_account_by_tg(message.from_user.id)
     if not acc or not acc.get("session_ok"):
@@ -113,7 +113,7 @@ async def cmd_set_geo(message: Message) -> None:
         return
     geo = parts[1].lower()
     await db.set_account_flags(message.from_user.id, geo=geo)
-    label = {"zm": "Замбия", "eg": "Египет", "dj": "Джибути"}.get(geo, geo)
+    label = {"zm": "Замбия", "eg": "Египет", "dj": "Джибути", "cm": "Камерун"}.get(geo, geo)
     cleared = 0
     uid = ""
     try:
@@ -306,7 +306,7 @@ async def cb_channel_geo(cb: CallbackQuery) -> None:
     chs = await db.list_channels(int(acc["id"]))
     acc_geo = str(acc.get("geo") or "zm")
     await cb.message.edit_reply_markup(reply_markup=channels_kb(chs, account_geo=acc_geo))
-    names = {"zm": "Замбия", "eg": "Египет", "dj": "Джибути"}
+    names = {"zm": "Замбия", "eg": "Египет", "dj": "Джибути", "cm": "Камерун"}
     await cb.answer(f"Страна: {names.get(new_geo, new_geo)}")
 
 

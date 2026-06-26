@@ -869,7 +869,7 @@ def needs_human_for_text(
     if geo == "eg" and step < 6 and intent in (Intent.UNKNOWN, Intent.QUESTION):
         return False
     if (
-        geo in ("zm", "dj")
+        geo in ("zm", "dj", "cm")
         and no_status
         and step < 6
         and intent in (Intent.UNKNOWN, Intent.QUESTION)

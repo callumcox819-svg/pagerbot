@@ -560,7 +560,7 @@ class PagerClient:
         def _conv_geo(channel_id: str) -> str:
             ch = (channel_id or "").strip()
             raw = str(cmap.get(ch) or "").strip().lower()
-            if raw in ("zm", "eg", "dj"):
+            if raw in ("zm", "eg", "dj", "cm"):
                 return raw
             return default_geo
 

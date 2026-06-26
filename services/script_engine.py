@@ -69,10 +69,18 @@ DJ_SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "10_reg_screenshot": "Problème à l'inscription",
 }
 
+# Cameroon — saved replies folder in Pager (create manually; scripts TBD).
+CM_SAVED_REPLY_FOLDER_NAMES = ("Cameroon", "CAMEROON", "Cameroun", "CM")
+
+CM_SCRIPT_UI_SNIPPETS: dict[str, str] = {
+    **SCRIPT_UI_SNIPPETS,
+}
+
 GEO_SCRIPT_UI_SNIPPETS: dict[str, dict[str, str]] = {
     "zm": SCRIPT_UI_SNIPPETS,
     "eg": EG_SCRIPT_UI_SNIPPETS,
     "dj": DJ_SCRIPT_UI_SNIPPETS,
+    "cm": CM_SCRIPT_UI_SNIPPETS,
 }
 
 # When needle is a substring of another template, exclude those bodies.
@@ -88,6 +96,8 @@ def saved_reply_folder_names(geo: str = "zm") -> tuple[str, ...]:
         return EG_SAVED_REPLY_FOLDER_NAMES
     if geo == "dj":
         return DJ_SAVED_REPLY_FOLDER_NAMES
+    if geo == "cm":
+        return CM_SAVED_REPLY_FOLDER_NAMES
     return SAVED_REPLY_FOLDER_NAMES
 
 
@@ -193,6 +203,8 @@ def _step_for_outgoing_text_dj(text: str) -> int:
 
 def _step_for_outgoing_text(text: str, geo: str = "zm") -> int:
     """Map one operator message to funnel step (strict markers only)."""
+    if geo == "cm":
+        geo = "zm"
     if geo == "eg":
         return _step_for_outgoing_text_eg(text)
     if geo == "dj":

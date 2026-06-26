@@ -1670,7 +1670,7 @@ async def _handle_conversation(
                 (folder[:20] if folder else ""),
             )
         elif (
-            geo in ("zm", "dj")
+            geo in ("zm", "dj", "cm")
             and effective_step < 4
             and intent in (Intent.POSITIVE, Intent.READY, Intent.INTERESTED)
             and (
@@ -1692,7 +1692,7 @@ async def _handle_conversation(
                     keys,
                 )
         elif (
-            geo in ("zm", "dj")
+            geo in ("zm", "dj", "cm")
             and 4 <= effective_step < 7
             and intent in (Intent.POSITIVE, Intent.READY)
             and (
@@ -1712,7 +1712,7 @@ async def _handle_conversation(
                 (text or "")[:40],
             )
         elif (
-            geo in ("zm", "dj")
+            geo in ("zm", "dj", "cm")
             and 2 <= effective_step < 6
             and is_deposit_tier_choice(text)
             and not reg_link_sent_in_history(op_outgoing, geo=geo)
@@ -1735,7 +1735,7 @@ async def _handle_conversation(
                 effective_step,
                 keys,
             )
-    if not keys and geo in ("zm", "dj") and is_no_status(conv):
+    if not keys and geo in ("zm", "dj", "cm") and is_no_status(conv):
         keys = resolve_zm_backlog_fallback(
             effective_step, op_outgoing, intent.value, geo=geo, text=text
         )
@@ -1750,7 +1750,7 @@ async def _handle_conversation(
     if (
         not keys
         and needs_reply
-        and geo in ("zm", "dj")
+        and geo in ("zm", "dj", "cm")
         and 2 <= effective_step < 6
         and not reg_link_sent_in_history(op_outgoing, geo=geo)
     ):
@@ -1773,7 +1773,7 @@ async def _handle_conversation(
             and step >= 4
             and not funnel_active
             and not (geo == "eg" and is_no_status(conv))
-            and not (geo in ("zm", "dj") and is_no_status(conv))
+            and not (geo in ("zm", "dj", "cm") and is_no_status(conv))
         ):
             escalated = await _escalate_once(
                 bot,
@@ -1806,7 +1806,7 @@ async def _handle_conversation(
             keys = resolve_eg_backlog_fallback(
                 effective_step, op_outgoing, intent.value
             )
-        elif geo in ("zm", "dj") and is_no_status(conv):
+        elif geo in ("zm", "dj", "cm") and is_no_status(conv):
             keys = resolve_zm_backlog_fallback(
                 effective_step, op_outgoing, intent.value, geo=geo, text=text
             )
@@ -1862,7 +1862,7 @@ async def _handle_conversation(
     new_step = step
     reg_keys = {"04_registration", "05_link"}
     explain_keys = {"02_how_it_works", "03_zmw_table"}
-    reg_handoff = geo in ("zm", "eg", "dj") and bool(reg_keys.intersection(keys))
+    reg_handoff = geo in ("zm", "eg", "dj", "cm") and bool(reg_keys.intersection(keys))
     if reg_handoff:
         new_step = 4
         if pager_user_id:

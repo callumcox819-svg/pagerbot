@@ -20,7 +20,7 @@ _STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "completed": ("заверш", "completed", "finish", "terminé", "termine"),
 }
 
-FUNNEL_GEOS = frozenset({"zm", "eg"})
+FUNNEL_GEOS = frozenset({"zm", "eg", "dj", "cm"})
 
 # Funnel folders where bot continues scripts (after «Без статусу»).
 ACTIVE_FUNNEL_STATUS_IDS: frozenset[str] = frozenset(
