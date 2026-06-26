@@ -243,22 +243,22 @@ def _compute_cycle_limits(
         plan_parallel = 32 if n_enabled <= 1 else 48
 
     if queue_n > 50:
-        max_handle = max(max_handle, min(3000, queue_n))
-        base_plans = max(base_plans, min(400, queue_n // 3))
-        batch_chunk = max(batch_chunk, 20)
-        browser_parallel = max(browser_parallel, 8)
-        plan_parallel = max(plan_parallel, 48)
+        max_handle = min(max_handle, 160)
+        base_plans = min(max(base_plans, 64), 96)
+        batch_chunk = max(min(batch_chunk, 20), 16)
+        browser_parallel = max(browser_parallel, 6)
+        plan_parallel = max(plan_parallel, 40)
 
-    if queue_n > 500:
-        max_handle = max(max_handle, min(5000, queue_n))
-        base_plans = max(base_plans, min(800, queue_n // 2))
-        batch_chunk = min(max(batch_chunk, 20), 24)
+    if queue_n > 300:
+        max_handle = min(max_handle, 120)
+        base_plans = min(base_plans, 72)
+        batch_chunk = min(max(batch_chunk, 16), 20)
         browser_parallel = min(max(browser_parallel, 6), 8)
-        plan_parallel = min(max(plan_parallel, 64), 96)
+        plan_parallel = min(max(plan_parallel, 40), 64)
 
-    max_plans = base_plans
+    max_plans = min(base_plans, max_handle)
     if no_status_n > 15 and n_enabled > 1:
-        max_plans = max(max_plans, min(300, no_status_n // 2))
+        max_plans = min(max(max_plans, no_status_n // 4), 96)
 
     funnel_cap = max(max_plans, 64)
     return {
@@ -736,9 +736,9 @@ class _CycleSendBuffer:
             for cid in conv_ids
         ]
         try:
-            max_send = int(os.getenv("PAGER_MAX_SEND_JOBS", "240") or "240")
+            max_send = int(os.getenv("PAGER_MAX_SEND_JOBS", "80") or "80")
         except ValueError:
-            max_send = 240
+            max_send = 80
         if max_send > 0 and len(jobs) > max_send:
             logger.info(
                 "send cap account=%s jobs=%s -> %s (next cycle continues)",
