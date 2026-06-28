@@ -36,7 +36,7 @@ async def extract_id_from_image_url(
 def _game_id_geo(geo: str) -> str:
     if geo == "eg":
         return "10 or 17"
-    return "17" if geo in ("dj", "cm", "zm") else "16"
+    return "17"
 
 
 async def _vision_openai(url: str, api_key: str, *, geo: str = "zm") -> str:
@@ -80,12 +80,10 @@ async def _vision_openai(url: str, api_key: str, *, geo: str = "zm") -> str:
         return ""
     if geo == "eg":
         m = _ID10_EG_RE.search(text) or _ID17_RE.search(text)
-    elif geo in ("dj", "cm", "zm"):
-        m = _ID17_RE.search(text)
     else:
-        m = _ID16_RE.search(text)
+        m = _ID17_RE.search(text)
     if not m:
-        m = _ID16_RE.search(text) or _ID17_RE.search(text) or _ID10_EG_RE.search(text)
+        m = _ID17_RE.search(text) or _ID16_RE.search(text) or _ID10_EG_RE.search(text)
     return m.group(1) if m else ""
 
 
@@ -95,9 +93,7 @@ def looks_like_game_id(gid: str, *, geo: str = "zm") -> bool:
         return False
     if geo == "eg":
         return g.startswith("17") or (g.startswith("10") and len(g) >= 10)
-    if geo in ("dj", "cm", "zm"):
-        return g.startswith("17")
-    return g.startswith("16")
+    return g.startswith("17")
 
 
 def extract_id_from_text(text: str, *, geo: str = "zm") -> str:
@@ -105,10 +101,9 @@ def extract_id_from_text(text: str, *, geo: str = "zm") -> str:
         m = _ID10_EG_RE.search(text or "") or _ID17_RE.search(text or "")
         if m:
             return m.group(1)
-    elif geo in ("dj", "cm", "zm"):
-        m = _ID17_RE.search(text or "")
-        if m:
-            return m.group(1)
+    m = _ID17_RE.search(text or "")
+    if m:
+        return m.group(1)
     m = _ID16_RE.search(text or "")
     if m:
         return m.group(1)

@@ -1163,10 +1163,9 @@ def extract_game_id(text: str, geo: str = "zm") -> str:
         )
         if m:
             return m.group(1)
-    elif geo in ("dj", "cm", "zm"):
-        m = re.search(r"\b(17\d{6,})\b", text or "")
-        if m:
-            return m.group(1)
+    m = re.search(r"\b(17\d{6,})\b", text or "")
+    if m:
+        return m.group(1)
     m = re.search(r"\b(16\d{6,})\b", text or "")
     if m:
         return m.group(1)

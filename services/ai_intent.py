@@ -1294,8 +1294,10 @@ def classify(
         if funnel_step >= 1 and funnel_step < 4:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY
-    game_re = _GAME_ID_EG if geo in ("eg", "dj", "cm", "zm") else _GAME_ID_LEGACY
+    game_re = _GAME_ID
     if game_re.search(t):
+        return Intent.GAME_ID_TEXT
+    if geo != "eg" and _GAME_ID_LEGACY.search(t):
         return Intent.GAME_ID_TEXT
     if geo == "eg" or _ARABIC.search(t):
         ar = _classify_arabic(t)
