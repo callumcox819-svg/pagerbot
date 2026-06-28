@@ -31,6 +31,7 @@ from services.ai_intent import (
     is_deposit_confirmation,
     is_affirmative_to_deposit_check,
     client_replied_to_ready_broadcast,
+    client_replied_to_operator_broadcast,
     is_deposit_question,
     deposit_screenshot_nudge_reply,
     is_already_registered_before_funnel,
@@ -1672,6 +1673,58 @@ async def _handle_conversation(
             )
             return True
 
+    broadcast_funnel_reply = (
+        needs_reply
+        and geo == "eg"
+        and client_replied_to_operator_broadcast(
+            msg_only,
+            last_in,
+            text,
+            geo=geo,
+            message_reaction=message_reaction,
+        )
+    )
+    if broadcast_funnel_reply:
+        op_out_bc = [
+            (m.get("text") or "")
+            for m in msg_only
+            if _valid_outgoing_reply(m)
+        ]
+        keys = resolve_eg_backlog_fallback(
+            effective_step, op_out_bc, "positive"
+        )
+        if not keys:
+            keys = resolve_funnel_scripts(
+                effective_step,
+                text,
+                Intent.POSITIVE.value,
+                outgoing_texts=op_out_bc,
+                attachments=attachments,
+                geo=geo,
+                message_reaction=message_reaction,
+            )
+        keys = [k for k in keys if k != game_id_script_key(geo)]
+        if keys:
+            send_buf.queue_script_send(
+                conv_id,
+                keys,
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, effective_step),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s EG broadcast-like reply keys=%s",
+                conv_id[:8],
+                keys,
+            )
+            return True
+
     if (
         needs_reply
         and is_deposit_question(text)
@@ -2007,6 +2060,46 @@ async def _handle_conversation(
             conv_id[:8],
             effective_step,
         )
+        if geo == "eg" and effective_step < 8:
+            op_out_rx = [
+                (m.get("text") or "")
+                for m in msg_only
+                if _valid_outgoing_reply(m)
+            ]
+            rx_keys = resolve_eg_backlog_fallback(
+                effective_step, op_out_rx, "positive"
+            )
+            if not rx_keys:
+                rx_keys = resolve_funnel_scripts(
+                    effective_step,
+                    text,
+                    Intent.POSITIVE.value,
+                    outgoing_texts=op_out_rx,
+                    attachments=attachments,
+                    geo=geo,
+                    message_reaction=message_reaction,
+                )
+            rx_keys = [k for k in rx_keys if k != game_id_script_key(geo)]
+            if rx_keys:
+                send_buf.queue_script_send(
+                    conv_id,
+                    rx_keys,
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+                send_buf.queue_commit(
+                    conv_id,
+                    step=max(step, effective_step),
+                    last_processed_msg_id=msg_id,
+                    pause_scripts=0,
+                )
+                logger.info(
+                    "conv=%s reaction-only funnel keys=%s",
+                    conv_id[:8],
+                    rx_keys,
+                )
+                return True
         return "no_script"
 
     # --- Deposit done / deposit screenshot (never resend 04+05) ---
@@ -2079,7 +2172,9 @@ async def _handle_conversation(
                 stored_gid=stored_gid,
                 geo=geo,
             )
-            if not script_sent_in_history(op_outgoing, gid_sn) or deposit_screenshot:
+            if dep_script_sent and (
+                not script_sent_in_history(op_outgoing, gid_sn) or deposit_screenshot
+            ):
                 send_buf.queue_script_send(
                     conv_id,
                     [gid_key],
@@ -2216,7 +2311,9 @@ async def _handle_conversation(
     actions_sent = False
 
     # --- Image: account ID or deposit screenshot ---
-    if has_image:
+    if has_image and not is_reaction_only_message(
+        text, attachments, message_reaction=message_reaction
+    ):
         img_url = ""
         for att in attachments:
             if att.get("type") == "image":
@@ -2324,6 +2421,7 @@ async def _handle_conversation(
         if (
             4 <= step < 7
             and reg_link_sent_in_history(op_out_img, geo=geo)
+            and dep_script_sent
             and _is_deposit_screenshot_without_gid(
                 has_real_image=has_real_image,
                 extracted=extracted,

@@ -841,7 +841,10 @@ def resolve_funnel_scripts(
                 return _eg_reg_scripts()
             return []
         if effective_step < 8 and intent == "game_id_text":
-            return ["07_game_id"]
+            dep_sn = script_ui_snippet("06_deposit", geo)
+            if script_sent_in_history(out, dep_sn) or effective_step >= 7:
+                return ["07_game_id"]
+            return []
         if effective_step < 9:
             tg_sn = script_ui_snippet("09_tg_link", geo)
             if not script_sent_in_history(out, tg_sn):
@@ -1145,11 +1148,11 @@ def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> lis
     if intent in ("interested", "positive", "ready") and 3 <= step < 4:
         return ["04_registration", "05_link"]
     if intent in ("deposit_done",) or (
-        intent == "image_only" and step >= 4
+        intent == "image_only" and step >= 6
     ):
         if step < 6:
             return ["07_game_id"]
-    if intent == "game_id_text" or (intent == "image_only" and step >= 5):
+    if intent == "game_id_text" or (intent == "image_only" and step >= 7):
         if step < 7 and step >= 4:
             return ["07_game_id"] if step < 6 else []
     if step >= 8 and intent != "joined":

@@ -281,13 +281,15 @@ def is_messenger_reaction_attachment(attachments: list) -> bool:
                     "like_thumb",
                     "thumbs",
                     "emoji.php",
+                    "/images/emoji",
+                    "static.xx.fbcdn.net/images/emoji",
                 )
             ):
                 return True
             w = payload.get("width") or att.get("width")
             h = payload.get("height") or att.get("height")
             try:
-                if w and h and int(w) <= 160 and int(h) <= 160:
+                if w and h and int(w) <= 200 and int(h) <= 200:
                     return True
             except (TypeError, ValueError):
                 pass
@@ -351,17 +353,17 @@ def is_funnel_positive_reaction(
     message_reaction: str | None = None,
 ) -> bool:
     """Early funnel — emoji / FB like / short oui means «yes, continue»."""
+    if not (text or "").strip():
+        if is_messenger_reaction_attachment(attachments or []):
+            return True
+        if is_positive_message_reaction(message_reaction):
+            return True
     if funnel_step >= _funnel_positive_max_step(geo):
         return False
     if is_short_affirmative(text):
         return True
     if contains_positive_emoji(text):
         return True
-    if not (text or "").strip():
-        if is_messenger_reaction_attachment(attachments or []):
-            return True
-        if is_positive_message_reaction(message_reaction):
-            return True
     return False
 
 
@@ -922,6 +924,11 @@ _BROADCAST_RESULTS = re.compile(
     r"bons résultats|bons resultats|prêt à continuer|pret a continuer",
     re.I,
 )
+_CHANNEL_INVITE_BROADCAST = re.compile(
+    r"50\s+spots|spots left|ready to join|private channel|join us|"
+    r"strateg(y|ies)|rejoindre|channel where we post",
+    re.I,
+)
 _BROADCAST_POSITIVE_REPLY = re.compile(
     r"\b("
     r"je suis intéressé|je suis interesse|je suis partant|"
@@ -939,7 +946,55 @@ def is_operator_ready_broadcast(text: str) -> bool:
         return False
     if _READY_CONTINUE_BROADCAST.search(t):
         return True
+    if _CHANNEL_INVITE_BROADCAST.search(t):
+        return True
     return bool(_BROADCAST_PITCH.search(t) and _BROADCAST_RESULTS.search(t))
+
+
+def is_operator_channel_invite_broadcast(text: str) -> bool:
+    """English/FR follow-up: «50 spots left… Ready to join us?»"""
+    t = (text or "").strip()
+    return bool(t and _CHANNEL_INVITE_BROADCAST.search(t))
+
+
+def is_broadcast_like_reply(
+    text: str,
+    attachments: list | None = None,
+    *,
+    message_reaction: str | None = None,
+) -> bool:
+    """Thumbs-up / like after operator broadcast — not a deposit screenshot."""
+    if is_reaction_only_message(text, attachments, message_reaction=message_reaction):
+        return True
+    return is_short_affirmative(text) or is_positive_emoji_only(text)
+
+
+def client_replied_to_operator_broadcast(
+    messages: list[dict],
+    last_in: dict,
+    client_text: str,
+    *,
+    geo: str = "eg",
+    message_reaction: str | None = None,
+) -> bool:
+    """Like / 👍 after Pager mass-mail or channel invite — continue funnel, not game ID."""
+    if not is_broadcast_like_reply(
+        client_text,
+        last_in.get("attachments"),
+        message_reaction=message_reaction,
+    ):
+        return False
+    before_ts = str(last_in.get("createdAt") or "")
+    last_op = _last_operator_body_before(messages, before_ts)
+    if not last_op:
+        return False
+    if is_operator_ready_broadcast(last_op) or is_operator_channel_invite_broadcast(
+        last_op
+    ):
+        return True
+    return geo == "eg" and bool(
+        re.search(r"spots|join|channel|strateg", last_op, re.I)
+    )
 
 
 def is_broadcast_positive_reply(text: str, *, geo: str = "cm") -> bool:
@@ -1291,7 +1346,9 @@ def classify(
     if has_image and not t:
         if is_messenger_reaction_attachment(attachments or []):
             return Intent.POSITIVE
-        if funnel_step >= 1 and funnel_step < 4:
+        if is_positive_message_reaction(message_reaction):
+            return Intent.POSITIVE
+        if funnel_step < 6:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY
     game_re = _GAME_ID
