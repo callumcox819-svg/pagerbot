@@ -30,7 +30,7 @@ SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "04_registration": "promo code ZAM577",
     "05_link": "tinyurl.com/ZAM577",
     "06_deposit": "click \"Deposit\"",
-    "07_game_id": "begins with 16",
+    "07_game_id": "begins with 17",
     "08_tg_invite": "private Telegram channel",
     "09_tg_link": "t.me/+",
     "10_reg_screenshot": "ibb.co",
@@ -335,7 +335,7 @@ def _step_for_outgoing_text(text: str, geo: str = "zm") -> int:
         return 8
     if 'click "deposit"' in t or "minimum deposit amount" in t:
         return 7
-    if "begins with 16" in t or "send me your game id" in t:
+    if "begins with 17" in t or "begins with 16" in t or "send me your game id" in t:
         return 6
     if "ibb.co" in t or "скрин реги" in t:
         return 5
@@ -1163,7 +1163,7 @@ def extract_game_id(text: str, geo: str = "zm") -> str:
         )
         if m:
             return m.group(1)
-    elif geo in ("dj", "cm"):
+    elif geo in ("dj", "cm", "zm"):
         m = re.search(r"\b(17\d{6,})\b", text or "")
         if m:
             return m.group(1)

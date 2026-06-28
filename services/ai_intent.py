@@ -35,8 +35,7 @@ MONEY_REFUSAL_FR = (
 _MONEY_REQUEST = re.compile(
     r"\b(send(ing)?\s+me\s+(money|cash|funds)|give\s+me\s+(money|cash|funds)|"
     r"lend\s+me|loan\s+me|need\s+money|want\s+money|"
-    r"skick.*(money|cash)|"
-    r"\bk\s?\d{1,4}\b|ka\s*\d{1,4})\b",
+    r"skick.*(money|cash))\b",
     re.I,
 )
 _AR_MONEY_REQUEST = re.compile(
@@ -132,7 +131,7 @@ _INTERESTED = re.compile(
     r"your help|help me|go ahead|hi go ahead|interested please|"
     r"i'm serious|i am serious|very interested|yess?\s+sir|"
     r"would like to join|would love to join|wanna join|want to join|"
-    r"like to join|count me in)\b",
+    r"like to join|count me in|want to learn|i want to learn|learn how)\b",
     re.I,
 )
 _GREETING = re.compile(
@@ -156,7 +155,8 @@ _COMPLAINT = re.compile(
     r"\b(lost|losed|didn'?t win|scam|taking my money|stop|refund|nothing happened|lied)\b",
     re.I,
 )
-_GAME_ID = re.compile(r"\b16\d{6,}\b")
+_GAME_ID = re.compile(r"\b17\d{6,}\b")
+_GAME_ID_LEGACY = re.compile(r"\b16\d{6,}\b")
 _GAME_ID_EG = re.compile(r"\b17\d{6,}\b")
 _ARABIC = re.compile(r"[\u0600-\u06FF]")
 _AR_INTERESTED = re.compile(
@@ -461,6 +461,7 @@ _TIER_TYPO = {
     5000: 500,
     10000: 1000,
     20000: 2000,
+    370: 300,
 }
 _TIER_AMOUNT = re.compile(
     r"\b(2000|1000|500|300|200|100|50|30)\s*(?:djf|zmw|fr|f)?\b",
@@ -496,11 +497,32 @@ def is_money_request(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if is_funnel_earning_interest(t):
+        return False
     if _AR_MONEY_REQUEST.search(t):
         return True
     if _FR_MONEY_REQUEST.search(t):
         return True
     return bool(_MONEY_REQUEST.search(t))
+
+
+def is_funnel_earning_interest(text: str) -> bool:
+    """«I want to learn how to make $1000» — funnel interest, not a loan request."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if re.fullmatch(r"money\??", t, re.I):
+        return True
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"learn how|want to learn|i want to learn|how to (make|earn|start)|"
+            r"make.{0,16}(per day|a day)|interested|need help|"
+            r"earn.{0,16}money|help me understand"
+            r")\b",
+            t,
+        )
+    )
 
 
 def is_phone_number_request(text: str) -> bool:
@@ -1242,6 +1264,8 @@ def classify(
     message_reaction: str | None = None,
 ) -> Intent:
     t = (text or "").strip()
+    if is_funnel_earning_interest(t):
+        return Intent.INTERESTED
     if is_phone_number_request(t):
         return Intent.PHONE_REQUEST
     if is_money_request(t):
@@ -1270,7 +1294,7 @@ def classify(
         if funnel_step >= 1 and funnel_step < 4:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY
-    game_re = _GAME_ID_EG if geo in ("eg", "dj", "cm") else _GAME_ID
+    game_re = _GAME_ID_EG if geo in ("eg", "dj", "cm", "zm") else _GAME_ID_LEGACY
     if game_re.search(t):
         return Intent.GAME_ID_TEXT
     if geo == "eg" or _ARABIC.search(t):

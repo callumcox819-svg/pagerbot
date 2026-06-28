@@ -1792,7 +1792,7 @@ async def _handle_conversation(
         return True
 
     if needs_reply and intent == Intent.MONEY_REQUEST:
-        if geo in ("cm", "dj") and effective_step < 6:
+        if effective_step < 6:
             logger.info(
                 "conv=%s ignore money_request at funnel step=%s text=%r",
                 conv_id[:8],
