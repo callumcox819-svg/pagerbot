@@ -541,7 +541,8 @@ def uses_combined_reg_bundle(geo: str, keys: list[str]) -> bool:
 
 
 def browser_first_geos() -> frozenset[str]:
-    raw = (os.getenv("PAGER_BROWSER_FIRST_GEOS") or "cm,dj").strip().lower()
+    """Geos forced through Playwright before REST. Empty = REST first for all."""
+    raw = (os.getenv("PAGER_BROWSER_FIRST_GEOS") or "").strip().lower()
     return frozenset(g.strip() for g in raw.split(",") if g.strip())
 
 

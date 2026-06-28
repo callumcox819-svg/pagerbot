@@ -200,7 +200,12 @@ def _interleave_process_order(
     other = _round_robin_by_channel(other)
     out: list[dict] = []
     fi = bi = oi = 0
-    fresh_burst = 1 if len(backlog) > 400 else 2
+    if len(backlog) > 400:
+        fresh_burst = 4
+    elif len(backlog) > 100:
+        fresh_burst = 3
+    else:
+        fresh_burst = 2
     while len(out) < limit:
         progressed = False
         for _ in range(fresh_burst):
@@ -219,6 +224,30 @@ def _interleave_process_order(
         if not progressed:
             break
     return out
+
+
+def _build_process_order(
+    scored: list[tuple[tuple[int, float], dict]],
+    *,
+    limit: int,
+    no_status_n: int,
+    queue_n: int,
+) -> list[dict]:
+    """Prefer fresh «Без статусу» when the queue is huge — funnel backlog can wait."""
+    if (
+        _env_truthy("PAGER_NO_STATUS_FIRST", default=True)
+        and no_status_n > 0
+        and queue_n > 150
+    ):
+        hot: list[dict] = []
+        for (prio, _), conv in scored:
+            if prio <= -4 or is_no_status(conv):
+                hot.append(conv)
+        if hot:
+            hot = _round_robin_by_channel(hot)
+            if len(hot) >= min(limit, max(24, no_status_n // 2)):
+                return hot[:limit]
+    return _interleave_process_order(scored, limit=limit)
 
 
 @dataclass
@@ -245,7 +274,7 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 
 
 def _flush_browser_first() -> bool:
-    return _env_truthy("PAGER_FLUSH_BROWSER_FIRST", default=True)
+    return _env_truthy("PAGER_FLUSH_BROWSER_FIRST", default=False)
 
 
 def _compute_cycle_limits(
@@ -284,15 +313,15 @@ def _compute_cycle_limits(
         plan_parallel = max(plan_parallel, 40)
 
     if queue_n > 300:
-        max_handle = min(max_handle, 160)
-        base_plans = min(base_plans, 80)
-        batch_chunk = min(max(batch_chunk, 16), 20)
+        max_handle = min(max_handle, 120)
+        base_plans = min(base_plans, 96)
+        batch_chunk = min(max(batch_chunk, 12), 16)
         browser_parallel = min(max(browser_parallel, 6), 8)
-        plan_parallel = min(max(plan_parallel, 40), 64)
+        plan_parallel = min(max(plan_parallel, 48), 64)
 
     max_plans = min(base_plans, max_handle)
     if no_status_n > 15 and n_enabled > 1:
-        max_plans = min(max(max_plans, no_status_n // 4), 96)
+        max_plans = min(max(max_plans, no_status_n // 3), 112)
 
     funnel_cap = max(max_plans, 64)
     return {
@@ -502,6 +531,59 @@ class _CycleSendBuffer:
                 browser_jobs.append((*job[:6], job_geo))
         return browser_jobs, rest_jobs
 
+    def _order_jobs_for_flush(self, jobs: list[tuple]) -> list[tuple]:
+        """REST-eligible jobs first so a cycle cap still delivers most replies quickly."""
+        browser_jobs, rest_jobs = self._partition_send_jobs(jobs)
+        try:
+            max_browser = int(os.getenv("PAGER_MAX_BROWSER_JOBS", "12") or "12")
+        except ValueError:
+            max_browser = 12
+        if max_browser > 0 and len(browser_jobs) > max_browser:
+            logger.info(
+                "browser job cap account=%s jobs=%s -> %s (rest=%s)",
+                self.account.get("id"),
+                len(browser_jobs),
+                max_browser,
+                len(rest_jobs),
+            )
+            browser_jobs = browser_jobs[:max_browser]
+        return rest_jobs + browser_jobs
+
+    async def _flush_browser_capped(
+        self,
+        jobs: list[tuple],
+        *,
+        account_id: int,
+        uid: str,
+        email: str,
+        password: str,
+    ) -> set[str]:
+        if not jobs:
+            return set()
+        try:
+            timeout = float(os.getenv("PAGER_BROWSER_CYCLE_TIMEOUT", "240") or "240")
+        except ValueError:
+            timeout = 240.0
+        try:
+            return await asyncio.wait_for(
+                self._flush_browser_batches(
+                    jobs,
+                    account_id=account_id,
+                    uid=uid,
+                    email=email,
+                    password=password,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "browser cycle timeout account=%s jobs=%s limit=%ss",
+                account_id,
+                len(jobs),
+                int(timeout),
+            )
+            return set()
+
     async def _flush_rest_scripts(
         self,
         jobs: list[tuple],
@@ -540,9 +622,9 @@ class _CycleSendBuffer:
         if not eligible:
             return set(), jobs
 
-        rest_parallel = max(1, int(os.getenv("PAGER_REST_PARALLEL", "12") or "12"))
-        script_gap = float(os.getenv("PAGER_REST_SCRIPT_GAP", "0.35") or "0.35")
-        reg_gap = float(os.getenv("PAGER_REST_REG_GAP", "1.2") or "1.2")
+        rest_parallel = max(1, int(os.getenv("PAGER_REST_PARALLEL", "20") or "20"))
+        script_gap = float(os.getenv("PAGER_REST_SCRIPT_GAP", "0.25") or "0.25")
+        reg_gap = float(os.getenv("PAGER_REST_REG_GAP", "0.9") or "0.9")
         sem = asyncio.Semaphore(rest_parallel)
         job_timeout = float(os.getenv("PAGER_REST_JOB_TIMEOUT", "90"))
 
@@ -769,10 +851,11 @@ class _CycleSendBuffer:
             )
             for cid in conv_ids
         ]
+        jobs = self._order_jobs_for_flush(jobs)
         try:
-            max_send = int(os.getenv("PAGER_MAX_SEND_JOBS", "80") or "80")
+            max_send = int(os.getenv("PAGER_MAX_SEND_JOBS", "120") or "120")
         except ValueError:
-            max_send = 80
+            max_send = 120
         if max_send > 0 and len(jobs) > max_send:
             logger.info(
                 "send cap account=%s jobs=%s -> %s (next cycle continues)",
@@ -793,7 +876,7 @@ class _CycleSendBuffer:
                 len(rest_jobs),
             )
             ok_total.update(
-                await self._flush_browser_batches(
+                await self._flush_browser_capped(
                     browser_jobs,
                     account_id=account_id,
                     uid=uid,
@@ -807,7 +890,7 @@ class _CycleSendBuffer:
             ok_total.update(rest_ok)
             if leftover:
                 ok_total.update(
-                    await self._flush_browser_batches(
+                    await self._flush_browser_capped(
                         leftover,
                         account_id=account_id,
                         uid=uid,
@@ -821,8 +904,12 @@ class _CycleSendBuffer:
             )
             ok_total.update(rest_ok)
             if browser_jobs:
+                logger.info(
+                    "send flush REST-first browser_fallback=%s",
+                    len(browser_jobs),
+                )
                 ok_total.update(
-                    await self._flush_browser_batches(
+                    await self._flush_browser_capped(
                         browser_jobs,
                         account_id=account_id,
                         uid=uid,
@@ -3133,8 +3220,8 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             if is_no_status(conv) or status_id in funnel_status_ids(
                 funnel_statuses
             ):
-                if incoming and st_step < 4:
-                    return (-5, -ts + fails * 1e-9)
+                if incoming:
+                    return (-6, -ts + fails * 1e-9)
                 return (-2, ts + fails * 1e-6)
             return (1, ts)
 
@@ -3151,7 +3238,12 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
         batch_chunk = limits["batch_chunk"]
         browser_parallel = limits["browser_parallel"]
         plan_parallel = limits["plan_parallel"]
-        process_order = _interleave_process_order(scored, limit=max_handle)
+        process_order = _build_process_order(
+            scored,
+            limit=max_handle,
+            no_status_n=no_status_count,
+            queue_n=len(inbound_convs),
+        )
 
         inbound = len(process_order)
         skipped = {"paused": 0, "done": 0, "no_script": 0}
@@ -3316,19 +3408,33 @@ async def worker_loop(bot: Bot) -> None:
                 )
             else:
                 logger.info("Worker tick: accounts=%s", len(accounts))
-            max_queue = 0
-            for acc in accounts:
+
+            async def _run_account(acc: dict[str, Any]) -> int:
                 try:
-                    q = await asyncio.wait_for(
-                        _process_account(bot, acc),
-                        timeout=1200.0,
+                    return int(
+                        await asyncio.wait_for(
+                            _process_account(bot, acc),
+                            timeout=900.0,
+                        )
+                        or 0
                     )
-                    max_queue = max(max_queue, int(q or 0))
                 except asyncio.TimeoutError:
                     logger.error(
-                        "Worker account=%s: cycle timeout 1200s",
+                        "Worker account=%s: cycle timeout 900s",
                         acc.get("id"),
                     )
+                    return 0
+                except Exception:
+                    logger.exception(
+                        "Worker account=%s failed",
+                        acc.get("id"),
+                    )
+                    return 0
+
+            results = await asyncio.gather(
+                *(_run_account(acc) for acc in accounts)
+            )
+            max_queue = max(results, default=0)
         except Exception:
             logger.exception("worker tick failed")
             poll_wait = settings.poll_sec
