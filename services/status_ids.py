@@ -127,6 +127,19 @@ def is_no_status(conv: dict) -> bool:
     return "без статус" in name or name in ("", "—", "-")
 
 
+def is_completed_conv(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
+    """«Завершено» — successful / closed chats for learning."""
+    fs = funnel_statuses or ZM_STATUSES
+    status_id = str(conv.get("statusId") or "").strip()
+    completed_sid = str(fs.get("completed") or "").strip()
+    if completed_sid and status_id == completed_sid:
+        return True
+    name = ((conv.get("status") or {}).get("name") or "").strip().lower()
+    return any(h in name for h in _STATUS_NAME_HINTS.get("completed", ()))
+
+
 def should_skip_processing(
     conv: dict, funnel_statuses: dict[str, str] | None = None
 ) -> bool:

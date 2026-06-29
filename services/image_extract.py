@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 import aiohttp
 
@@ -23,34 +24,48 @@ async def download_image(url: str) -> bytes:
 
 
 async def classify_screenshot_kind(url: str, api_key: str = "") -> str:
-    """Classify client screenshot: link_error, deposit, game_id, registration, other."""
+    data = await analyze_success_screenshot(url, api_key)
+    return str(data.get("kind") or "other").lower().replace("deposit_profile", "deposit")
+
+
+async def analyze_success_screenshot(
+    url: str, api_key: str = "", *, geo: str = "zm"
+) -> dict[str, Any]:
+    """Vision: deposit profile (balance), payment receipt, game ID, link errors."""
     if not api_key or not url:
-        return "other"
+        return {"is_success": False, "kind": "other", "balance": "", "game_id": ""}
     import base64
+
+    from services.llm_client import chat_completion_json
 
     try:
         data = await download_image(url)
     except Exception:
         logger.warning("screenshot download failed")
-        return "other"
+        return {"is_success": False, "kind": "other", "balance": "", "game_id": ""}
     b64 = base64.standard_b64encode(data).decode("ascii")
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
+    raw = await chat_completion_json(
+        [
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
                         "text": (
-                            "Classify this phone screenshot from a betting funnel chat. "
-                            "Reply with exactly one word:\n"
-                            "LINK_ERROR — browser shows site inaccessible, connection error, "
-                            "ERR_QUIC, DNS error, blank page, or tinyurl/link failed to open\n"
-                            "DEPOSIT — payment receipt, deposit confirmation, mobile money transfer\n"
-                            "GAME_ID — casino app account/profile showing numeric game ID\n"
-                            "REGISTRATION — 1xBet registration form or successful signup screen\n"
-                            "OTHER — anything else"
+                            "Analyze this phone screenshot from a 1xBet betting funnel. "
+                            f"GEO context: {geo}. Reply JSON only:\n"
+                            '{"is_success":true|false,'
+                            '"kind":"deposit_profile|payment_receipt|game_id|'
+                            'link_error|registration|other",'
+                            '"balance":"e.g. 1000 XAF or empty",'
+                            '"game_id":"digits only or empty",'
+                            '"note":"short"}\n'
+                            "is_success=true when:\n"
+                            "- 1xBet profile/account shows balance (XAF, ZMW, EGP, FCFA)\n"
+                            "- OR payment/deposit receipt visible\n"
+                            "- OR numeric account/game ID visible (often starts with 17)\n"
+                            "deposit_profile = 1xBet screen with name + balance + "
+                            "deposit / Mes paris / Faire un dépôt button."
                         ),
                     },
                     {
@@ -60,26 +75,22 @@ async def classify_screenshot_kind(url: str, api_key: str = "") -> str:
                 ],
             }
         ],
-        "max_tokens": 20,
+        api_key=api_key,
+        max_tokens=120,
+    )
+    if not raw:
+        return {"is_success": False, "kind": "other", "balance": "", "game_id": ""}
+    parsed = raw
+    gid = re.sub(r"\D", "", str(parsed.get("game_id") or ""))
+    if gid and not looks_like_game_id(gid, geo=geo) and len(gid) < 8:
+        gid = ""
+    return {
+        "is_success": bool(parsed.get("is_success")),
+        "kind": str(parsed.get("kind") or "other").strip().lower(),
+        "balance": str(parsed.get("balance") or "").strip(),
+        "game_id": gid,
+        "note": str(parsed.get("note") or "").strip(),
     }
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=45),
-            ) as resp:
-                resp.raise_for_status()
-                body = await resp.json()
-        raw = (body["choices"][0]["message"]["content"] or "").strip().upper()
-        for label in ("LINK_ERROR", "DEPOSIT", "GAME_ID", "REGISTRATION", "OTHER"):
-            if label in raw:
-                return label.lower()
-    except Exception:
-        logger.exception("screenshot classify vision failed")
-    return "other"
 
 
 async def extract_id_from_image_url(

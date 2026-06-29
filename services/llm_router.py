@@ -205,6 +205,8 @@ async def route_funnel_message(
         confidence = float(raw.get("confidence") or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
+    if confidence <= 0 and action in ("send_scripts", "link_help") and script_keys:
+        confidence = 0.75
     note = str(raw.get("note") or "").strip()
 
     if action == "link_help":

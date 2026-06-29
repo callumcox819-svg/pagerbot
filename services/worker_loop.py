@@ -63,7 +63,9 @@ from services.llm_client import (
     llm_router_may_send,
     llm_router_mode,
     llm_router_strict,
+    resolve_llm_api_key,
 )
+from services.llm_learn import learn_scan_completed_chats
 from services.llm_router import route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
@@ -1856,7 +1858,7 @@ async def _handle_conversation(
         shot_kind = "other"
         if img_url and _settings.openai_api_key:
             shot_kind = await classify_screenshot_kind(
-                img_url, _settings.openai_api_key
+                img_url, resolve_llm_api_key() or _settings.openai_api_key
             )
         if shot_kind in ("link_error", "registration", "other"):
             help_keys = link_help_script_keys(geo)
@@ -3571,6 +3573,24 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     seen_ids.add(cid)
                     merged.append(c)
             inbound_convs = merged
+
+        if llm_router_mode() == "learn":
+            try:
+                await learn_scan_completed_chats(
+                    account_id=account_id,
+                    client=client,
+                    enabled_channels=set(enabled),
+                    convs=convs,
+                    funnel_statuses=funnel_statuses,
+                    resolve_geo=lambda ch: resolve_conv_geo(account, ch),
+                    max_per_cycle=int(
+                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "12") or "12"
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Worker account=%s: learn scan failed", account_id
+                )
 
         state_map = await db.load_conversation_states_map(account_id)
         allowed_folders = await db.get_account_enabled_folders(account_id)

@@ -83,6 +83,22 @@ async def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_channel_folders
                 ON pager_channel_folders(account_id, channel_id);
+
+            CREATE TABLE IF NOT EXISTS funnel_learn_success (
+                account_id INTEGER NOT NULL,
+                conversation_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                geo TEXT NOT NULL DEFAULT '',
+                game_id TEXT NOT NULL DEFAULT '',
+                balance_text TEXT NOT NULL DEFAULT '',
+                screenshot_kind TEXT NOT NULL DEFAULT '',
+                client_name TEXT NOT NULL DEFAULT '',
+                folder TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                learned_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (account_id, conversation_id, message_id),
+                FOREIGN KEY (account_id) REFERENCES pager_accounts(id) ON DELETE CASCADE
+            );
             """
         )
         for stmt in (
@@ -838,6 +854,79 @@ async def save_conversation_state(
             ),
         )
         await db.commit()
+
+
+async def learn_success_exists(
+    account_id: int, conversation_id: str, message_id: str
+) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT 1 FROM funnel_learn_success
+            WHERE account_id = ? AND conversation_id = ? AND message_id = ?
+            """,
+            (account_id, conversation_id, message_id),
+        )
+        return await cur.fetchone() is not None
+
+
+async def save_learn_success(
+    account_id: int,
+    conversation_id: str,
+    *,
+    message_id: str,
+    geo: str = "",
+    game_id: str = "",
+    balance_text: str = "",
+    screenshot_kind: str = "",
+    client_name: str = "",
+    folder: str = "",
+    note: str = "",
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO funnel_learn_success (
+                account_id, conversation_id, message_id, geo, game_id,
+                balance_text, screenshot_kind, client_name, folder, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET
+                geo = excluded.geo,
+                game_id = excluded.game_id,
+                balance_text = excluded.balance_text,
+                screenshot_kind = excluded.screenshot_kind,
+                client_name = excluded.client_name,
+                folder = excluded.folder,
+                note = excluded.note,
+                learned_at = datetime('now')
+            """,
+            (
+                account_id,
+                conversation_id,
+                message_id,
+                (geo or "").strip(),
+                (game_id or "").strip(),
+                (balance_text or "").strip()[:64],
+                (screenshot_kind or "").strip()[:32],
+                (client_name or "").strip()[:64],
+                (folder or "").strip()[:48],
+                (note or "").strip()[:200],
+            ),
+        )
+        await db.commit()
+
+
+async def count_learn_successes(account_id: int | None = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if account_id is not None:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM funnel_learn_success WHERE account_id = ?",
+                (account_id,),
+            )
+        else:
+            cur = await db.execute("SELECT COUNT(*) FROM funnel_learn_success")
+        row = await cur.fetchone()
+        return int(row[0] if row else 0)
 
 
 def session_cookies_from_encrypted(session_enc: str, secrets_decrypt) -> dict[str, str]:
