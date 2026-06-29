@@ -1856,9 +1856,11 @@ async def _handle_conversation(
                 img_url = (att.get("payload") or {}).get("url") or ""
                 break
         shot_kind = "other"
-        if img_url and _settings.openai_api_key:
+        if img_url and resolve_llm_api_key():
             shot_kind = await classify_screenshot_kind(
-                img_url, resolve_llm_api_key() or _settings.openai_api_key
+                img_url,
+                resolve_llm_api_key(),
+                cookies=client.cookies,
             )
         if shot_kind in ("link_error", "registration", "other"):
             help_keys = link_help_script_keys(geo)
@@ -2335,9 +2337,12 @@ async def _handle_conversation(
                 if att.get("type") == "image":
                     img_url = (att.get("payload") or {}).get("url") or ""
                     break
-            if not gid and img_url:
+            if not gid and img_url and resolve_llm_api_key():
                 maybe_gid = await extract_id_from_image_url(
-                    img_url, _settings.openai_api_key, geo=geo
+                    img_url,
+                    resolve_llm_api_key(),
+                    geo=geo,
+                    cookies=client.cookies,
                 )
                 if looks_like_game_id(maybe_gid, geo=geo):
                     gid = maybe_gid
@@ -2537,9 +2542,12 @@ async def _handle_conversation(
                 img_url = (att.get("payload") or {}).get("url") or ""
                 break
         extracted = extract_id_from_text(text, geo=geo)
-        if not extracted and img_url:
+        if not extracted and img_url and resolve_llm_api_key():
             extracted = await extract_id_from_image_url(
-                img_url, _settings.openai_api_key, geo=geo
+                img_url,
+                resolve_llm_api_key(),
+                geo=geo,
+                cookies=client.cookies,
             )
 
         wait_id_sid = str(funnel_statuses.get("wait_id") or "").strip()

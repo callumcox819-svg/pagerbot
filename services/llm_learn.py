@@ -146,10 +146,15 @@ async def _scan_conv_for_success(
             continue
 
         for url in urls:
-            analysis = await analyze_success_screenshot(url, api_key, geo=geo)
+            cookies = getattr(client, "cookies", None)
+            analysis = await analyze_success_screenshot(
+                url, api_key, geo=geo, cookies=cookies
+            )
             gid = str(analysis.get("game_id") or "").strip()
             if not gid:
-                gid = await extract_id_from_image_url(url, api_key, geo=geo)
+                gid = await extract_id_from_image_url(
+                    url, api_key, geo=geo, cookies=cookies
+                )
             if not _success_from_analysis(analysis, gid=gid, geo=geo):
                 continue
 
