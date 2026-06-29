@@ -155,7 +155,10 @@ async def format_learn_feedback(
         chs = await db.list_channels(account_id)
         enabled_n = sum(1 for c in chs if c.get("enabled"))
         lines.append("<b>Почему пока 0:</b>")
-        lines.append(f"• Каналов включено: <b>{enabled_n}/{len(chs)}</b>")
+        lines.append(
+            f"• Каналов в Pager-аккаунте (для обучения): <b>{len(chs)}</b>"
+        )
+        lines.append(f"• Каналов для автоответа: {enabled_n}/{len(chs)}")
         meta = account_meta or {}
         if meta:
             lines.append(
@@ -165,19 +168,18 @@ async def format_learn_feedback(
             )
         if not resolve_llm_api_key():
             lines.append("• ⚠️ <code>OPENROUTER_API_KEY</code> не задан на Railway")
-        if enabled_n == 0 and chs:
+        if len(chs) == 0:
             lines.append(
-                "• ⚠️ <b>Все каналы выключены</b> — 📡 Каналы → «✅ Вкл все» "
-                "или перелогиньтесь в 🔐 Pager"
+                "• ⚠️ Нет каналов — перелогиньтесь в 🔐 Pager или 📡 Каналы → 🔄"
             )
-        elif enabled_n > 0:
+        elif mode == "learn":
             lines.append(
-                "• Каналы вкл — подождите 10–15 мин, воркер сканирует "
-                "«Завершено» и «Депи не дошли»"
+                "• Обучение идёт по <b>всем</b> каналам аккаунта — "
+                "📂 Выбор папок и вкл/выкл каналов не нужны"
             )
+            lines.append("• Подождите 10–15 мин после деплоя")
         lines.append(
-            "<i>Примеры привязаны к этому Pager-аккаунту "
-            "(старые с других логинов сюда не попадают).</i>"
+            "<i>Примеры привязаны к этому Pager-аккаунту.</i>"
         )
 
     lines.append("")
@@ -343,13 +345,13 @@ async def learn_scan_completed_chats(
     *,
     account_id: int,
     client: PagerClient,
-    enabled_channels: set[str],
+    scan_channels: set[str],
     convs: list[dict],
     funnel_statuses: dict[str, str],
     resolve_geo: Callable[[str], str],
     max_per_cycle: int = 24,
 ) -> int:
-    """Scan learn folders per channel/geo — read-only learning."""
+    """Scan learn folders on all account channels — independent of auto-reply toggles."""
     if llm_router_mode() != "learn":
         return 0
     api_key = resolve_llm_api_key()
@@ -363,7 +365,7 @@ async def learn_scan_completed_chats(
             if cid:
                 seen[cid] = c
 
-    for ch in sorted(enabled_channels):
+    for ch in sorted(scan_channels):
         for folder_key in _LEARN_FOLDER_KEYS:
             sid = str(funnel_statuses.get(folder_key) or "").strip()
             if not sid:

@@ -3417,19 +3417,34 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             _session_cache[account_id] = (time.time(), dict(client.cookies))
 
         enabled = await _ensure_enabled_channels(account_id, client)
-        if enabled is None:
+        ch_rows = await db.list_channels(account_id)
+        all_channel_ids = {
+            str(c.get("channel_id") or "").strip()
+            for c in ch_rows
+            if c.get("channel_id")
+        }
+        learn_active = llm_router_mode() == "learn" and bool(resolve_llm_api_key())
+
+        if enabled is None and not all_channel_ids:
             logger.warning(
                 "Worker account=%s: no channels — refresh in Telegram bot",
                 account_id,
             )
             return 0
-        if not enabled:
+        if not enabled and not learn_active:
             logger.warning(
                 "Worker account=%s: no enabled channels",
                 account_id,
             )
             return 0
-        ch_rows = await db.list_channels(account_id)
+        if not enabled and learn_active:
+            logger.info(
+                "Worker account=%s: learn-only — %s channel(s), "
+                "auto-reply off, scanning Завершено/Депи не дошли",
+                account_id,
+                len(all_channel_ids),
+            )
+
         ch_names = {
             str(c.get("channel_id") or ""): str(c.get("name") or "")
             for c in ch_rows
@@ -3437,10 +3452,12 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
         cmap = account.get("_channel_geo") or await db.get_channel_geo_map(
             account_id, account_geo=str(account.get("geo") or "zm")
         )
-        for cid in sorted(enabled):
+        for cid in sorted(enabled or all_channel_ids):
+            tag = "enabled" if enabled and cid in enabled else "learn"
             logger.info(
-                "Worker account=%s: enabled channel %s name=%r geo=%s",
+                "Worker account=%s: %s channel %s name=%r geo=%s",
                 account_id,
+                tag,
                 cid[:8],
                 ch_names.get(cid, "?")[:32],
                 resolve_conv_geo({**account, "_channel_geo": cmap}, cid),
@@ -3451,7 +3468,9 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             if not uid and _settings.pager_user_id:
                 client.session_user_id = _settings.pager_user_id
 
-        channel_folders = await db.build_channel_folders_map(account_id, enabled)
+        channel_folders: dict[str, set[str]] = {}
+        if enabled:
+            channel_folders = await db.build_channel_folders_map(account_id, enabled)
         status_rows = await db.list_statuses(account_id)
         if not status_rows:
             try:
@@ -3474,10 +3493,10 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 for s in status_rows
             }
             logger.info(
-                "Worker account=%s: funnel map in_progress=%r registration=%r wait_id=%r",
+                "Worker account=%s: funnel map completed=%r deps_pending=%r wait_id=%r",
                 account_id,
-                name_by_id.get(str(funnel_statuses.get("in_progress") or ""), "?"),
-                name_by_id.get(str(funnel_statuses.get("registration") or ""), "?"),
+                name_by_id.get(str(funnel_statuses.get("completed") or ""), "?"),
+                name_by_id.get(str(funnel_statuses.get("deps_pending") or ""), "?"),
                 name_by_id.get(str(funnel_statuses.get("wait_id") or ""), "?"),
             )
         account["_channel_geo"] = await db.get_channel_geo_map(
@@ -3498,59 +3517,102 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 ],
             )
 
-        list_pages = min(16, 10 + 3 * len(enabled))
+        convs: list[dict] = []
+        if enabled:
+            list_pages = min(16, 10 + 3 * len(enabled))
+            try:
+                convs = await client.collect_conversations(
+                    enabled,
+                    max_pages=list_pages,
+                    geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
+                    channel_geo_map=account.get("_channel_geo") or {},
+                    channel_folders=channel_folders,
+                    funnel_statuses=funnel_statuses,
+                )
+                collected_by_ch = Counter(
+                    str(c.get("channelId") or "") for c in convs
+                )
+                for cid in sorted(enabled):
+                    geo = resolve_conv_geo(account, cid)
+                    n = collected_by_ch.get(cid, 0)
+                    level = logger.warning if n == 0 else logger.info
+                    level(
+                        "Worker account=%s: collected channel=%s name=%r geo=%s convs=%s",
+                        account_id,
+                        cid[:8],
+                        ch_names.get(cid, "?")[:32],
+                        geo,
+                        n,
+                    )
+            except PagerAPIError as exc:
+                if not is_session_error(exc):
+                    raise
+                logger.warning(
+                    "Session stale account=%s, refreshing…",
+                    account.get("id"),
+                )
+                fresh = await refresh_pager_session(account)
+                if not fresh:
+                    return 0
+                acc = await db.get_account_by_tg(int(account["tg_user_id"]))
+                if acc:
+                    account.update(acc)
+                    account["_channel_geo"] = await db.get_channel_geo_map(
+                        account_id, account_geo=str(account.get("geo") or "zm")
+                    )
+                client = _make_client(fresh)
+                await client.warm_session()
+                channel_folders = await db.build_channel_folders_map(
+                    account_id, enabled
+                )
+                convs = await client.collect_conversations(
+                    enabled,
+                    max_pages=list_pages,
+                    geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
+                    channel_geo_map=account.get("_channel_geo") or {},
+                    channel_folders=channel_folders,
+                    funnel_statuses=funnel_statuses,
+                )
 
-        try:
-            convs = await client.collect_conversations(
-                enabled,
-                max_pages=list_pages,
-                geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
-                channel_geo_map=account.get("_channel_geo") or {},
-                channel_folders=channel_folders,
-                funnel_statuses=funnel_statuses,
-            )
-            collected_by_ch = Counter(
-                str(c.get("channelId") or "") for c in convs
-            )
-            for cid in sorted(enabled):
-                geo = resolve_conv_geo(account, cid)
-                n = collected_by_ch.get(cid, 0)
-                level = logger.warning if n == 0 else logger.info
-                level(
-                    "Worker account=%s: collected channel=%s name=%r geo=%s convs=%s",
-                    account_id,
-                    cid[:8],
-                    ch_names.get(cid, "?")[:32],
-                    geo,
-                    n,
+        if learn_active and all_channel_ids:
+            try:
+                recorded = await learn_scan_completed_chats(
+                    account_id=account_id,
+                    client=client,
+                    scan_channels=all_channel_ids,
+                    convs=convs,
+                    funnel_statuses=funnel_statuses,
+                    resolve_geo=lambda ch: resolve_conv_geo(account, ch),
+                    max_per_cycle=int(
+                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "24") or "24"
+                    ),
                 )
-        except PagerAPIError as exc:
-            if not is_session_error(exc):
-                raise
-            logger.warning(
-                "Session stale account=%s, refreshing…",
-                account.get("id"),
-            )
-            fresh = await refresh_pager_session(account)
-            if not fresh:
-                return 0
-            acc = await db.get_account_by_tg(int(account["tg_user_id"]))
-            if acc:
-                account.update(acc)
-                account["_channel_geo"] = await db.get_channel_geo_map(
-                    account_id, account_geo=str(account.get("geo") or "zm")
+                if recorded > 0 and learn_notify_enabled():
+                    esc = _escalation_chat(account)
+                    if esc:
+                        try:
+                            body = await format_learn_feedback(
+                                account_id,
+                                email=str(account.get("email") or ""),
+                            )
+                            await bot.send_message(
+                                esc,
+                                f"📚 <b>+{recorded}</b> новых примеров за цикл\n\n{body}",
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Worker account=%s: learn notify failed",
+                                account_id,
+                            )
+            except Exception:
+                logger.exception(
+                    "Worker account=%s: learn scan failed", account_id
                 )
-            client = _make_client(fresh)
-            await client.warm_session()
-            channel_folders = await db.build_channel_folders_map(account_id, enabled)
-            convs = await client.collect_conversations(
-                enabled,
-                max_pages=list_pages,
-                geo=db.normalize_channel_geo(str(account.get("geo") or "zm")),
-                channel_geo_map=account.get("_channel_geo") or {},
-                channel_folders=channel_folders,
-                funnel_statuses=funnel_statuses,
-            )
+
+        if not enabled:
+            return 0
+
         completed_sid = str(funnel_statuses.get("completed") or "").strip()
         inbound_convs = [
             c
@@ -3588,42 +3650,6 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     seen_ids.add(cid)
                     merged.append(c)
             inbound_convs = merged
-
-        if llm_router_mode() == "learn":
-            try:
-                recorded = await learn_scan_completed_chats(
-                    account_id=account_id,
-                    client=client,
-                    enabled_channels=set(enabled),
-                    convs=convs,
-                    funnel_statuses=funnel_statuses,
-                    resolve_geo=lambda ch: resolve_conv_geo(account, ch),
-                    max_per_cycle=int(
-                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "24") or "24"
-                    ),
-                )
-                if recorded > 0 and learn_notify_enabled():
-                    esc = _escalation_chat(account)
-                    if esc:
-                        try:
-                            body = await format_learn_feedback(
-                                account_id,
-                                email=str(account.get("email") or ""),
-                            )
-                            await bot.send_message(
-                                esc,
-                                f"📚 <b>+{recorded}</b> новых примеров за цикл\n\n{body}",
-                                parse_mode="HTML",
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Worker account=%s: learn notify failed",
-                                account_id,
-                            )
-            except Exception:
-                logger.exception(
-                    "Worker account=%s: learn scan failed", account_id
-                )
 
         state_map = await db.load_conversation_states_map(account_id)
         allowed_folders = await db.get_account_enabled_folders(account_id)
