@@ -79,6 +79,7 @@ from services.script_engine import (
     resolve_funnel_scripts,
     resolve_eg_backlog_fallback,
     resolve_zm_backlog_fallback,
+    funnel_step_from_script_gaps,
     reg_link_sent_in_history,
     reg_link_script_key,
     reg_bundle_pending_link,
@@ -1300,7 +1301,16 @@ async def _handle_conversation(
     ):
         folder_step = hist_step
     stored_step = int(state.get("step") or 0)
-    effective_step_early = max(hist_step, stored_step, folder_step)
+    if is_no_status(conv) and not reg_link_sent_in_history(
+        op_texts_early, geo=geo
+    ):
+        effective_step_early = funnel_step_from_script_gaps(
+            thread_out_early,
+            geo=geo,
+            stored_step=stored_step,
+        )
+    else:
+        effective_step_early = max(hist_step, stored_step, folder_step)
 
     last_in = _pick_client_turn_message(
         msg_only,
@@ -3172,7 +3182,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 ],
             )
 
-        list_pages = 22 + min(16, 6 * len(enabled))
+        list_pages = min(16, 10 + 3 * len(enabled))
 
         try:
             convs = await client.collect_conversations(
@@ -3507,32 +3517,27 @@ async def worker_loop(bot: Bot) -> None:
             else:
                 logger.info("Worker tick: accounts=%s", len(accounts))
 
-            async def _run_account(acc: dict[str, Any]) -> int:
+            max_queue = 0
+            for acc in accounts:
                 try:
-                    return int(
+                    q = int(
                         await asyncio.wait_for(
                             _process_account(bot, acc),
                             timeout=900.0,
                         )
                         or 0
                     )
+                    max_queue = max(max_queue, q)
                 except asyncio.TimeoutError:
                     logger.error(
                         "Worker account=%s: cycle timeout 900s",
                         acc.get("id"),
                     )
-                    return 0
                 except Exception:
                     logger.exception(
                         "Worker account=%s failed",
                         acc.get("id"),
                     )
-                    return 0
-
-            results = await asyncio.gather(
-                *(_run_account(acc) for acc in accounts)
-            )
-            max_queue = max(results, default=0)
         except Exception:
             logger.exception("worker tick failed")
             poll_wait = settings.poll_sec

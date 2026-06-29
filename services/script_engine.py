@@ -1084,6 +1084,7 @@ def resolve_zm_backlog_fallback(
             "ready",
             "question",
             "unknown",
+            "money_request",
         ):
             return []
         return ["01_intro"]
@@ -1091,7 +1092,7 @@ def resolve_zm_backlog_fallback(
         if intent == "declined":
             return []
         return ["02_how_it_works", "03_zmw_table"]
-    if effective_step < 6:
+    if not link_sent:
         if is_registration_confirmed(t):
             return []
         if is_registration_pending(t):
@@ -1116,9 +1117,9 @@ def resolve_eg_backlog_fallback(
 
     if not intro_sent:
         return ["01_intro"]
-    if not how_sent and effective_step < 4:
+    if not how_sent:
         return ["02_how_it_works"]
-    if not link_sent and effective_step < 6:
+    if not link_sent:
         return ["04_registration", "05_link"]
     dep_sn = script_ui_snippet("06_deposit", "eg")
     if (
@@ -1133,10 +1134,61 @@ def resolve_eg_backlog_fallback(
             "deposit_done",
             "question",
             "interested",
+            "money_request",
+            "unknown",
         )
     ):
         return ["06_deposit"]
     return []
+
+
+def funnel_step_from_script_gaps(
+    outgoing_texts: list[str],
+    *,
+    geo: str = "zm",
+    stored_step: int = 0,
+) -> int:
+    """Real funnel position from delivered scripts — not broadcast / manual noise."""
+    out = outgoing_texts or []
+    g = (geo or "zm").strip().lower()
+    step = max(int(stored_step or 0), 0)
+    intro_sn = script_ui_snippet("01_intro", g)
+    if not script_sent_in_history(out, intro_sn):
+        return 0
+    step = max(step, 1)
+    if g == "eg":
+        if not script_sent_in_history(
+            out, script_ui_snippet("02_how_it_works", g)
+        ):
+            return min(step, 1)
+        step = max(step, 2)
+        if not script_sent_in_history(out, script_ui_snippet("05_link", g)):
+            return min(step, 3)
+        step = max(step, 4)
+        if not script_sent_in_history(out, script_ui_snippet("06_deposit", g)):
+            return min(step, 5)
+        return max(step, 6)
+    if g == "cm":
+        if not script_sent_in_history(out, script_ui_snippet("01_intro_2", g)):
+            return min(step, 1)
+        if not script_sent_in_history(out, script_ui_snippet("02_age", g)):
+            return min(step, 2)
+        if not script_sent_in_history(out, script_ui_snippet("03_steps", g)):
+            return min(step, 2)
+        if not script_sent_in_history(out, script_ui_snippet("04_tier", g)):
+            return min(step, 3)
+        if not reg_link_sent_in_history(out, geo=g):
+            return min(step, 4)
+        return max(step, 5)
+    if not script_sent_in_history(out, script_ui_snippet("02_how_it_works", g)):
+        return min(step, 1)
+    step = max(step, 2)
+    if not reg_link_sent_in_history(out, geo=g):
+        return min(step, 3)
+    step = max(step, 4)
+    if not script_sent_in_history(out, script_ui_snippet("06_deposit", g)):
+        return min(step, 5)
+    return max(step, 6)
 
 
 def scripts_to_send_after_intent(step: int, intent: str, geo: str = "zm") -> list[str]:
