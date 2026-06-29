@@ -57,7 +57,8 @@ from services.ai_intent import (
     wants_registration_followup,
     wants_registration_link,
 )
-from services.encryption import Secrets
+from services.llm_client import llm_router_enabled
+from services.llm_router import route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
     extract_id_from_image_url,
@@ -3010,6 +3011,64 @@ async def _handle_conversation(
                     tier_text[:20],
                 )
                 break
+
+    if (
+        needs_reply
+        and not deposit_signal
+        and not keys
+        and llm_router_enabled()
+    ):
+        llm = await route_funnel_message(
+            geo=geo,
+            text=text or ("(photo)" if has_real_image else ""),
+            effective_step=effective_step,
+            rule_intent=intent.value,
+            outgoing_texts=op_outgoing,
+            folder=folder,
+            has_image=has_real_image,
+            reg_link_sent=reg_link_sent_in_history(op_outgoing, geo=geo),
+            deposit_script_sent=script_sent_in_history(
+                op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
+            ),
+        )
+        if llm and llm.confidence >= 0.55:
+            if llm.action == "pause":
+                await db.save_conversation_state(
+                    account_id,
+                    conv_id,
+                    pause_scripts=1,
+                    last_processed_msg_id=msg_id,
+                )
+                return "paused"
+            if llm.action == "wait":
+                pass
+            elif llm.escalate or llm.action == "escalate":
+                await _escalate_once(
+                    bot,
+                    esc_chat,
+                    account_id=account_id,
+                    conv_id=conv_id,
+                    msg_id=msg_id,
+                    state=state,
+                    account=account,
+                    channel_id=channel_id,
+                    title="LLM → оператор",
+                    client_name=client_name,
+                    channel_name=channel_name,
+                    folder=folder,
+                    reason=llm.escalate_reason or llm.note or "LLM escalate",
+                    last_message=text or "(photo)",
+                    pause=True,
+                )
+                return True
+            elif llm.script_keys:
+                keys = llm.script_keys
+                logger.info(
+                    "conv=%s LLM route keys=%s conf=%.2f",
+                    conv_id[:8],
+                    keys,
+                    llm.confidence,
+                )
 
     if needs_reply and not deposit_signal and not keys:
         if (
