@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -76,6 +77,18 @@ async def _save_session(tg_user_id: int, email: str, password: str, cookies: dic
     channels = await client.list_channels_api()
     if channels:
         await db.sync_channels(account_id, channels, default_enabled=False)
+        if os.getenv("PAGER_AUTO_ENABLE_CHANNELS", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            n = await db.enable_all_channels(account_id)
+            logger.info(
+                "Auto-enabled %s channel(s) for account %s (%s)",
+                n,
+                account_id,
+                email or tg_user_id,
+            )
     return probe.get("pager_user_id") or "ok"
 
 
@@ -172,7 +185,10 @@ async def on_password(message: Message, state: FSMContext) -> None:
         await _save_session(message.from_user.id, email, password, auth["cookies"])
         await status.edit_text(
             "✅ Pager подключён.\n"
-            "Откройте 📡 Каналы — включите нужные (по умолчанию все выключены)."
+            "Все каналы включены автоматически — бот сканирует «Завершено» "
+            "и «Депи не дошли» для обучения AI.\n"
+            "Проверка: /learn_stats через 10–15 мин.\n"
+            "GEO по каналам: 📡 Каналы (если нужно поправить страну)."
         )
     except Exception as exc:
         logger.exception("login")
@@ -218,7 +234,7 @@ async def on_cookies(message: Message, state: FSMContext) -> None:
     try:
         auth = await authenticate(cookie_raw=raw)
         await _save_session(message.from_user.id, "", "", auth["cookies"])
-        await status.edit_text("✅ Сессия сохранена. Откройте 📡 Каналы.")
+        await status.edit_text("✅ Сессия сохранена. Каналы включены — /learn_stats через 10–15 мин.")
     except Exception as exc:
         await status.edit_text(f"❌ {exc}", parse_mode=None)
     await state.clear()
