@@ -81,6 +81,8 @@ async def classify_screenshot_kind(url: str, api_key: str = "") -> str:
         logger.exception("screenshot classify vision failed")
     return "other"
 
+
+async def extract_id_from_image_url(
     url: str, openai_key: str = "", *, geo: str = "zm"
 ) -> str:
     if openai_key:
