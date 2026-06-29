@@ -39,13 +39,33 @@ def llm_model() -> str:
     )
 
 
+def llm_router_mode() -> str:
+    """off | learn (observe only) | fallback (scripts when rules fail)."""
+    raw = (os.getenv("PAGER_LLM_ROUTER") or "").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
+        return "off"
+    if raw in ("learn", "observe", "watch"):
+        return "learn"
+    if raw in ("1", "true", "yes", "fallback", "all"):
+        return "fallback"
+    return "off"
+
+
 def llm_router_enabled() -> bool:
-    return (os.getenv("PAGER_LLM_ROUTER") or "").strip().lower() in (
+    return llm_router_mode() in ("learn", "fallback")
+
+
+def llm_router_may_send() -> bool:
+    """False in learn mode — LLM must not trigger outbound messages."""
+    return llm_router_mode() == "fallback"
+
+
+def llm_router_strict() -> bool:
+    """No autonomous pause/escalate — only pick fixed script keys."""
+    return (os.getenv("PAGER_LLM_STRICT") or "1").strip().lower() in (
         "1",
         "true",
         "yes",
-        "all",
-        "fallback",
     )
 
 

@@ -57,7 +57,12 @@ from services.ai_intent import (
     wants_registration_followup,
     wants_registration_link,
 )
-from services.llm_client import llm_router_enabled
+from services.llm_client import (
+    llm_router_enabled,
+    llm_router_may_send,
+    llm_router_mode,
+    llm_router_strict,
+)
 from services.llm_router import route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
@@ -2298,6 +2303,15 @@ async def _handle_conversation(
             client_gid,
             step,
         )
+        if llm_router_mode() == "learn":
+            logger.info(
+                "LLM learn success conv=%s geo=%s gid=%s folder=%r eff_step=%s",
+                conv_id[:8],
+                geo,
+                client_gid,
+                folder[:24] if folder else "",
+                effective_step,
+            )
         return True
 
     # --- Deposit done / deposit screenshot (never resend 04+05) ---
@@ -3031,44 +3045,74 @@ async def _handle_conversation(
                 op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
             ),
         )
-        if llm and llm.confidence >= 0.55:
-            if llm.action == "pause":
-                await db.save_conversation_state(
-                    account_id,
-                    conv_id,
-                    pause_scripts=1,
-                    last_processed_msg_id=msg_id,
-                )
-                return "paused"
-            if llm.action == "wait":
-                pass
-            elif llm.escalate or llm.action == "escalate":
-                await _escalate_once(
-                    bot,
-                    esc_chat,
-                    account_id=account_id,
-                    conv_id=conv_id,
-                    msg_id=msg_id,
-                    state=state,
-                    account=account,
-                    channel_id=channel_id,
-                    title="LLM → оператор",
-                    client_name=client_name,
-                    channel_name=channel_name,
-                    folder=folder,
-                    reason=llm.escalate_reason or llm.note or "LLM escalate",
-                    last_message=text or "(photo)",
-                    pause=True,
-                )
-                return True
-            elif llm.script_keys:
-                keys = llm.script_keys
+        if llm:
+            if llm_router_mode() == "learn":
                 logger.info(
-                    "conv=%s LLM route keys=%s conf=%.2f",
+                    "LLM learn observe conv=%s geo=%s action=%s keys=%s "
+                    "conf=%.2f intent=%s note=%r",
                     conv_id[:8],
-                    keys,
+                    geo,
+                    llm.action,
+                    llm.script_keys,
                     llm.confidence,
+                    llm.intent,
+                    (llm.note or "")[:80],
                 )
+            elif llm.confidence >= 0.55 and llm_router_may_send():
+                if llm_router_strict():
+                    if llm.action in ("pause", "escalate") or llm.escalate:
+                        logger.info(
+                            "conv=%s LLM strict — ignore %s",
+                            conv_id[:8],
+                            llm.action,
+                        )
+                    elif llm.action == "wait":
+                        pass
+                    elif llm.script_keys:
+                        keys = llm.script_keys
+                        logger.info(
+                            "conv=%s LLM route keys=%s conf=%.2f",
+                            conv_id[:8],
+                            keys,
+                            llm.confidence,
+                        )
+                elif llm.action == "pause":
+                    await db.save_conversation_state(
+                        account_id,
+                        conv_id,
+                        pause_scripts=1,
+                        last_processed_msg_id=msg_id,
+                    )
+                    return "paused"
+                elif llm.action == "wait":
+                    pass
+                elif llm.escalate or llm.action == "escalate":
+                    await _escalate_once(
+                        bot,
+                        esc_chat,
+                        account_id=account_id,
+                        conv_id=conv_id,
+                        msg_id=msg_id,
+                        state=state,
+                        account=account,
+                        channel_id=channel_id,
+                        title="LLM → оператор",
+                        client_name=client_name,
+                        channel_name=channel_name,
+                        folder=folder,
+                        reason=llm.escalate_reason or llm.note or "LLM escalate",
+                        last_message=text or "(photo)",
+                        pause=True,
+                    )
+                    return True
+                elif llm.script_keys:
+                    keys = llm.script_keys
+                    logger.info(
+                        "conv=%s LLM route keys=%s conf=%.2f",
+                        conv_id[:8],
+                        keys,
+                        llm.confidence,
+                    )
 
     if needs_reply and not deposit_signal and not keys:
         if (

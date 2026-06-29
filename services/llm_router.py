@@ -126,6 +126,10 @@ def _system_prompt(geo: str) -> str:
         f"Funnel order: {meta['funnel']}.\n"
         f"Allowed script_keys: {keys}.\n"
         "Rules:\n"
+        "- You ONLY choose pre-written script_keys from the list — never write message text.\n"
+        "- NEVER change links, promo codes, or minimum deposit amounts "
+        "(they are fixed inside script files).\n"
+        "- NEVER invent URLs, codes, or sums.\n"
         "- Never skip steps that were not sent yet (check scripts_delivered).\n"
         "- If client screenshot shows broken link / site inaccessible → "
         'action "link_help" (not deposit).\n'
