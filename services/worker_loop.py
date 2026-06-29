@@ -2059,8 +2059,21 @@ async def _handle_conversation(
             logger.info("conv=%s skipped human_takeover", conv_id[:8])
             return "paused"
     if state.get("pause_scripts") and not funnel_active:
-        logger.info("conv=%s skipped pause_scripts", conv_id[:8])
-        return "paused"
+        if is_no_status(conv) and needs_reply:
+            await db.save_conversation_state(
+                account_id,
+                conv_id,
+                pause_scripts=0,
+                send_failures=0,
+            )
+            state = {**state, "pause_scripts": 0, "send_failures": 0}
+            logger.info(
+                "conv=%s no_status unpause — resume backlog",
+                conv_id[:8],
+            )
+        else:
+            logger.info("conv=%s skipped pause_scripts", conv_id[:8])
+            return "paused"
     if state.get("pause_scripts") and funnel_active:
         await db.save_conversation_state(account_id, conv_id, pause_scripts=0)
 
@@ -3173,6 +3186,14 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 session_ok = True
                 break
             except PagerAPIError as exc:
+                if is_org_id_error(exc):
+                    await client.resolve_org_id_live()
+                    if client.org_id:
+                        client.org_id_fallback = client.org_id
+                        client.cookies["_pager_org_id"] = client.org_id
+                    if attempt == 0:
+                        await client.warm_session()
+                        continue
                 if attempt == 0 and is_session_error(exc):
                     logger.info(
                         "Worker account=%s: poll retry after warm",

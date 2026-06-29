@@ -976,9 +976,19 @@ def resolve_cm_backlog_fallback(
                 "deposit_done",
                 "question",
                 "interested",
+                "unknown",
             )
         ):
             return [dep_key]
+        gid_sn = script_ui_snippet("08_game_id", geo)
+        if (
+            effective_step < 8
+            and script_sent_in_history(out, dep_sn)
+            and not script_sent_in_history(out, gid_sn)
+            and intent
+            in ("unknown", "question", "positive", "interested", "ready")
+        ):
+            return ["08_game_id"]
         return []
 
     if not intro_sent:
@@ -1071,6 +1081,7 @@ def resolve_zm_backlog_fallback(
                 "deposit_done",
                 "question",
                 "interested",
+                "unknown",
             )
         ):
             return ["06_deposit"]
