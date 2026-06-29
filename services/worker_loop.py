@@ -57,6 +57,7 @@ from services.ai_intent import (
     wants_registration_followup,
     wants_registration_link,
 )
+from services.encryption import Secrets
 from services.llm_client import (
     llm_router_enabled,
     llm_router_may_send,
