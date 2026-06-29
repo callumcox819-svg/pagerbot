@@ -65,7 +65,12 @@ from services.llm_client import (
     llm_router_strict,
     resolve_llm_api_key,
 )
-from services.llm_learn import learn_scan_completed_chats, record_live_learn_success
+from services.llm_learn import (
+    format_learn_feedback,
+    learn_notify_enabled,
+    learn_scan_completed_chats,
+    record_live_learn_success,
+)
 from services.llm_router import route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
@@ -3586,7 +3591,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
 
         if llm_router_mode() == "learn":
             try:
-                await learn_scan_completed_chats(
+                recorded = await learn_scan_completed_chats(
                     account_id=account_id,
                     client=client,
                     enabled_channels=set(enabled),
@@ -3597,6 +3602,24 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                         os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "24") or "24"
                     ),
                 )
+                if recorded > 0 and learn_notify_enabled():
+                    esc = _escalation_chat(account)
+                    if esc:
+                        try:
+                            body = await format_learn_feedback(
+                                account_id,
+                                email=str(account.get("email") or ""),
+                            )
+                            await bot.send_message(
+                                esc,
+                                f"📚 <b>+{recorded}</b> новых примеров за цикл\n\n{body}",
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Worker account=%s: learn notify failed",
+                                account_id,
+                            )
             except Exception:
                 logger.exception(
                     "Worker account=%s: learn scan failed", account_id

@@ -1,8 +1,9 @@
-"""Learn from successful funnel chats — deposit profile / game ID screenshots."""
+"""Learn from funnel folders — deposit profile / game ID screenshots."""
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import defaultdict
 from typing import Any, Callable
@@ -16,7 +17,7 @@ from services.image_extract import (
 )
 from services.llm_client import llm_router_mode, resolve_llm_api_key
 from services.pager_api import PagerClient
-from services.status_ids import is_learn_success_conv
+from services.status_ids import is_deps_pending_conv, is_learn_folder_conv
 
 logger = logging.getLogger(__name__)
 _settings = load_settings()
@@ -26,7 +27,14 @@ _BALANCE_RE = re.compile(
     re.I,
 )
 
-_LEARN_FOLDER_KEYS = ("completed", "wait_id", "win")
+_LEARN_FOLDER_KEYS = ("completed", "deps_pending", "wait_id", "win")
+
+_GEO_LABELS = {
+    "zm": "Zambia",
+    "eg": "Egypt",
+    "cm": "Cameroon",
+    "dj": "Djibouti",
+}
 
 
 def _is_incoming(msg: dict[str, Any]) -> bool:
@@ -45,23 +53,122 @@ def _image_urls(msg: dict[str, Any]) -> list[str]:
     return out
 
 
-def _success_from_analysis(
+def _folder_is_deps_pending(folder: str) -> bool:
+    n = (folder or "").strip().lower()
+    if not n:
+        return False
+    return is_deps_pending_conv({"status": {"name": folder}, "statusId": ""})
+
+
+def _worth_recording(
     analysis: dict[str, Any],
     *,
     gid: str,
     geo: str,
+    folder: str,
 ) -> bool:
     if analysis.get("is_success") is True:
         return True
     kind = str(analysis.get("kind") or "").lower()
     balance = str(analysis.get("balance") or "").strip()
+    note = str(analysis.get("note") or "").strip()
     if kind in ("deposit_profile", "deposit", "payment_receipt") and balance:
         return True
     if gid and looks_like_game_id(gid, geo=geo):
         return True
     if balance and _BALANCE_RE.search(balance):
         return True
+    if _folder_is_deps_pending(folder):
+        if kind in (
+            "deposit_profile",
+            "deposit",
+            "payment_receipt",
+            "game_id",
+            "link_error",
+            "registration",
+        ):
+            return True
+        if note or balance or gid:
+            return True
     return False
+
+
+async def format_learn_feedback(
+    account_id: int,
+    *,
+    email: str = "",
+    recent_limit: int = 8,
+) -> str:
+    """Human-readable training report for Telegram."""
+    total = await db.count_learn_successes(account_id)
+    by_geo = await db.count_learn_successes_by_geo(account_id)
+    by_folder = await db.count_learn_successes_by_folder(account_id)
+    recent = await db.list_learn_recent(account_id, limit=recent_limit)
+    mode = llm_router_mode()
+
+    lines = ["📚 <b>AI обучение — отчёт</b>", ""]
+    if email:
+        lines.append(f"Pager: <code>{email}</code>")
+    lines.append(f"Всего примеров в базе: <b>{total}</b>")
+    lines.append(f"Режим LLM: <code>{mode or 'off'}</code>")
+    if mode == "learn":
+        lines.append(
+            "<i>Бот наблюдает и копит примеры — скрипты и ссылки не меняет.</i>"
+        )
+    lines.append("")
+
+    if by_geo:
+        lines.append("<b>По странам (GEO):</b>")
+        for geo in sorted(by_geo.keys()):
+            label = _GEO_LABELS.get(geo, geo.upper())
+            lines.append(f"• {label} ({geo}): {by_geo[geo]} примеров")
+        lines.append("")
+
+    if by_folder:
+        lines.append("<b>По папкам Pager:</b>")
+        for folder, n in list(by_folder.items())[:12]:
+            lines.append(f"• {folder}: {n}")
+        lines.append("")
+
+    if recent:
+        lines.append(f"<b>Последние {len(recent)} примеров:</b>")
+        for i, r in enumerate(recent, 1):
+            geo = str(r.get("geo") or "?").upper()
+            folder = str(r.get("folder") or "—")[:28]
+            client = str(r.get("client_name") or "—")[:22]
+            bal = str(r.get("balance_text") or "").strip()
+            gid = str(r.get("game_id") or "").strip()
+            kind = str(r.get("screenshot_kind") or "").strip()
+            extras = []
+            if bal:
+                extras.append(f"баланс {bal}")
+            if gid:
+                extras.append(f"ID {gid}")
+            if kind and kind != "deposit_profile":
+                extras.append(kind)
+            if note:
+                extras.append(note[:40])
+            tail = f" — {', '.join(extras)}" if extras else ""
+            lines.append(f"{i}. {geo} | {folder} | {client}{tail}")
+    elif total == 0:
+        lines.append(
+            "Пока нет примеров. Включите каналы в 📡 Каналы, "
+            "режим <code>PAGER_LLM_ROUTER=learn</code> на Railway, "
+            "подождите 10–15 мин."
+        )
+
+    lines.append("")
+    lines.append("Папки для обучения: <b>Завершено</b>, <b>Депи не дошли</b>, Чекаю ID, WIN.")
+    lines.append("Обновить отчёт: /learn_stats")
+    return "\n".join(lines)
+
+
+def learn_notify_enabled() -> bool:
+    return os.getenv("PAGER_LEARN_NOTIFY", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 async def record_live_learn_success(
@@ -155,7 +262,7 @@ async def _scan_conv_for_success(
                 gid = await extract_id_from_image_url(
                     url, api_key, geo=geo, cookies=cookies
                 )
-            if not _success_from_analysis(analysis, gid=gid, geo=geo):
+            if not _worth_recording(analysis, gid=gid, geo=geo, folder=folder):
                 continue
 
             balance = str(analysis.get("balance") or "").strip()
@@ -219,7 +326,7 @@ async def learn_scan_completed_chats(
     resolve_geo: Callable[[str], str],
     max_per_cycle: int = 24,
 ) -> int:
-    """Scan success folders per channel/geo — read-only learning."""
+    """Scan learn folders per channel/geo — read-only learning."""
     if llm_router_mode() != "learn":
         return 0
     api_key = resolve_llm_api_key()
@@ -228,7 +335,7 @@ async def learn_scan_completed_chats(
 
     seen: dict[str, dict] = {}
     for c in convs:
-        if is_learn_success_conv(c, funnel_statuses):
+        if is_learn_folder_conv(c, funnel_statuses):
             cid = str(c.get("id") or "")
             if cid:
                 seen[cid] = c
@@ -251,7 +358,7 @@ async def learn_scan_completed_chats(
                 if not batch:
                     break
                 for c in batch:
-                    if not is_learn_success_conv(c, funnel_statuses):
+                    if not is_learn_folder_conv(c, funnel_statuses):
                         continue
                     cid = str(c.get("id") or "")
                     if cid:
@@ -272,13 +379,15 @@ async def learn_scan_completed_chats(
 
     if candidates:
         by_geo = await db.count_learn_successes_by_geo(account_id)
+        by_folder = await db.count_learn_successes_by_folder(account_id)
         logger.info(
             "LLM learn scan account=%s candidate_chats=%s scanned=%s "
-            "recorded=%s totals_by_geo=%s",
+            "recorded=%s totals_by_geo=%s totals_by_folder=%s",
             account_id,
             len(candidates),
             len(sample),
             recorded,
             by_geo or {},
+            by_folder or {},
         )
     return recorded

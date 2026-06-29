@@ -15,5 +15,6 @@ async def register_bot_commands(bot: Bot) -> None:
             BotCommand(command="pause", description="Пауза авто-ответов"),
             BotCommand(command="resume", description="Включить авто-ответы"),
             BotCommand(command="reset_pauses", description="Сбросить паузы чатов"),
+            BotCommand(command="learn_stats", description="Отчёт обучения AI"),
         ]
     )

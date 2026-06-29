@@ -8,6 +8,8 @@ from aiogram.types import Message
 
 import database as db
 from keyboards.main_menu import main_menu
+from services.llm_client import llm_router_mode
+from services.llm_learn import format_learn_feedback
 
 router = Router()
 
@@ -20,7 +22,7 @@ async def cmd_start(message: Message) -> None:
         "2. 📡 Каналы — выберите Kelvin Phiri и др.\n"
         "3. Бот сам шлёт скрипты в Messenger\n"
         "4. В Telegram — только когда нужен человек\n\n"
-        "Команды: /start /pause /resume /status",
+        "Команды: /start /pause /resume /status /learn_stats",
         reply_markup=main_menu(),
     )
 
@@ -31,6 +33,7 @@ async def settings_menu(message: Message) -> None:
         "⚙️ Настройки\n"
         "/pause — пауза авто-ответов в Pager\n"
         "/resume — продолжить\n"
+        "/learn_stats — отчёт обучения AI\n"
         "/escalation — куда слать эскалации (этот чат по умолчанию)"
     )
 
@@ -73,13 +76,28 @@ async def cmd_status(message: Message) -> None:
         + (f"Активные: {', '.join(enabled_names)}\n" if enabled_names else "")
         + f"Paused: {bool(acc.get('paused'))}\n"
         f"Auto-reply: {bool(acc.get('auto_reply'))}\n"
+        f"LLM learn: {llm_router_mode() or 'off'}\n"
         f"Escalation chat: {acc.get('escalation_chat_id') or acc.get('tg_user_id')}\n\n"
         "Обрабатывает канал Kelvin (и др. включённые):\n"
         "• «Без статусу» — новые лиды, шлёт intro/скрипты\n"
         "• Воронка — В процесі / Чекаю ID / Реєстрація\n"
         "Не трогает: Завершено, Депи не дійшли, Скасовано.\n"
-        "/reset_pauses — сбросить паузу после эскалаций."
+        "/reset_pauses — сбросить паузу после эскалаций.\n"
+        "/learn_stats — что AI уже выучил из Завершено и Депи не дошли."
     )
+
+
+@router.message(Command("learn_stats"))
+async def cmd_learn_stats(message: Message) -> None:
+    acc = await db.get_account_by_tg(message.from_user.id)
+    if not acc:
+        await message.answer("Pager не подключён. Сначала 🔐 Pager аккаунт.")
+        return
+    text = await format_learn_feedback(
+        int(acc["id"]),
+        email=str(acc.get("email") or ""),
+    )
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("reset_pauses"))

@@ -186,6 +186,40 @@ def is_learn_success_conv(
     return False
 
 
+def is_deps_pending_conv(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
+    """«Депи не дошли» — deposit issues, still useful for AI learning."""
+    name = _status_name_lower(conv)
+    if _is_negative_completed_name(name):
+        return False
+    fs = funnel_statuses or ZM_STATUSES
+    status_id = str(conv.get("statusId") or "").strip()
+    deps_sid = str(fs.get("deps_pending") or "").strip()
+    if deps_sid and status_id == deps_sid:
+        return True
+    return any(
+        h in name
+        for h in (
+            "депи не",
+            "депы не",
+            "deps pending",
+            "не дошл",
+            "не дійш",
+            "не дошли",
+        )
+    )
+
+
+def is_learn_folder_conv(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
+    """Folders scanned for AI learning (Завершено, Депи не дошли, Чекаю ID, WIN)."""
+    if is_learn_success_conv(conv, funnel_statuses):
+        return True
+    return is_deps_pending_conv(conv, funnel_statuses)
+
+
 def should_skip_processing(
     conv: dict, funnel_statuses: dict[str, str] | None = None
 ) -> bool:

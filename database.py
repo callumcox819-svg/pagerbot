@@ -990,6 +990,53 @@ async def list_learn_success_examples(
     return [dict(r) for r in rows]
 
 
+async def count_learn_successes_by_folder(
+    account_id: int | None = None,
+) -> dict[str, int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if account_id is not None:
+            cur = await db.execute(
+                """
+                SELECT folder, COUNT(*) FROM funnel_learn_success
+                WHERE account_id = ? AND folder != ''
+                GROUP BY folder
+                ORDER BY COUNT(*) DESC
+                """,
+                (account_id,),
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT folder, COUNT(*) FROM funnel_learn_success
+                WHERE folder != ''
+                GROUP BY folder
+                ORDER BY COUNT(*) DESC
+                """
+            )
+        rows = await cur.fetchall()
+    return {str(f or "").strip(): int(n) for f, n in rows if f}
+
+
+async def list_learn_recent(
+    account_id: int, *, limit: int = 10
+) -> list[dict[str, str]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """
+            SELECT geo, game_id, balance_text, screenshot_kind,
+                   folder, client_name, note, learned_at
+            FROM funnel_learn_success
+            WHERE account_id = ?
+            ORDER BY learned_at DESC
+            LIMIT ?
+            """,
+            (account_id, max(1, limit)),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 def session_cookies_from_encrypted(session_enc: str, secrets_decrypt) -> dict[str, str]:
     if not session_enc:
         return {}
