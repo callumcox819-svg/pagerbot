@@ -607,6 +607,9 @@ def resolve_funnel_scripts(
     if is_deferral_reply(t) or is_refusal_reply(t) or intent == "declined":
         return []
 
+    if intent == "game_id_text":
+        return []
+
     if geo == "cm":
         from services.ai_intent import is_age_answer, is_deposit_tier_choice
 

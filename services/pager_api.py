@@ -1195,6 +1195,12 @@ class PagerClient:
         if user_id:
             taken = await self.take_conversation(conv_id, user_id)
             if not taken:
+                await asyncio.sleep(0.8)
+                fresh = await self.open_conversation(conv_id)
+                if fresh:
+                    conv_data = {**conv_data, **fresh}
+                taken = await self.take_conversation(conv_id, user_id)
+            if not taken:
                 raise PagerAPIError(
                     502,
                     json.dumps(

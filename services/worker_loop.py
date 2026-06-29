@@ -94,6 +94,7 @@ from services.script_engine import (
     filter_auto_script_keys,
     bodies_for_script_keys,
     browser_first_geos,
+    extract_game_id,
     should_send_deposit_script,
 )
 from services.status_ids import (
@@ -134,6 +135,50 @@ def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
 
 def _stored_game_id(state: dict[str, Any]) -> str:
     return str(state.get("extracted_game_id") or "").strip()
+
+
+def _is_waiting_for_game_id(
+    step: int,
+    conv_status_id: str,
+    funnel_statuses: dict[str, str],
+) -> bool:
+    wait_id_sid = str(funnel_statuses.get("wait_id") or "").strip()
+    return step >= 6 or bool(wait_id_sid and conv_status_id == wait_id_sid)
+
+
+def _game_id_from_client(
+    text: str,
+    msg_only: list[dict[str, Any]],
+    *,
+    geo: str,
+) -> str:
+    """Parse game ID from this message or a recent client line («I have sent»)."""
+    for raw in ((text or "").strip(),):
+        for candidate in (
+            extract_id_from_text(raw, geo=geo),
+            extract_game_id(raw, geo=geo),
+        ):
+            if candidate and looks_like_game_id(candidate, geo=geo):
+                return candidate
+    if re.search(
+        r"i have sent|already sent|i sent|je l'ai envoy|envoy[eé]|"
+        r"ارسلت|أرسلت|بعت|ابعت",
+        (text or ""),
+        re.I,
+    ):
+        for m in reversed(msg_only):
+            if not _is_incoming_direction(str(m.get("messageDirection") or "")):
+                continue
+            body = (m.get("text") or "").strip()
+            if not body:
+                continue
+            for candidate in (
+                extract_id_from_text(body, geo=geo),
+                extract_game_id(body, geo=geo),
+            ):
+                if candidate and looks_like_game_id(candidate, geo=geo):
+                    return candidate
+    return ""
 
 
 def _is_deposit_screenshot_without_gid(
@@ -2112,6 +2157,76 @@ async def _handle_conversation(
                 return True
         return "no_script"
 
+    client_gid = _game_id_from_client(text, msg_only, geo=geo)
+    if (
+        needs_reply
+        and client_gid
+        and _is_waiting_for_game_id(step, conv_status_id, funnel_statuses)
+    ):
+        stored_gid = _stored_game_id(state)
+        if stored_gid == client_gid and step >= 7:
+            await db.save_conversation_state(
+                account_id, conv_id, last_processed_msg_id=msg_id
+            )
+            return "done"
+        op_gid_out = [
+            (m.get("text") or "")
+            for m in msg_only
+            if _valid_outgoing_reply(m)
+        ]
+        tg_sn = script_ui_snippet("09_tg_link", geo)
+        if script_sent_in_history(op_gid_out, tg_sn):
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 8),
+                extracted_game_id=client_gid,
+                last_processed_msg_id=msg_id,
+            )
+            return True
+        await _escalate_once(
+            bot,
+            esc_chat,
+            account_id=account_id,
+            conv_id=conv_id,
+            msg_id=msg_id,
+            state=state,
+            account=account,
+            channel_id=channel_id,
+            title="Game ID распознан",
+            client_name=client_name,
+            channel_name=channel_name,
+            folder=folder,
+            reason="Проверьте депозит при необходимости",
+            last_message=text or client_gid,
+            extra=f"ID: {client_gid}",
+            pause=False,
+        )
+        send_buf.queue_script_send(
+            conv_id,
+            ["08_tg_invite", "09_tg_link"],
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        if pager_user_id:
+            send_buf.queue_status_patch(
+                conv_id, funnel_statuses.get("deps_pending") or funnel_statuses["wait_id"]
+            )
+        send_buf.queue_commit(
+            conv_id,
+            step=max(step, 8),
+            extracted_game_id=client_gid,
+            last_processed_msg_id=msg_id,
+            pause_scripts=0,
+        )
+        logger.info(
+            "conv=%s game_id accepted gid=%s step=%s",
+            conv_id[:8],
+            client_gid,
+            step,
+        )
+        return True
+
     # --- Deposit done / deposit screenshot (never resend 04+05) ---
     if deposit_signal and needs_reply and effective_step >= 4:
         op_outgoing = [
@@ -2606,18 +2721,18 @@ async def _handle_conversation(
                 )
             return True
 
-    # --- Text game ID at wait_id step ---
+    # --- Text game ID (legacy path — early accept handles wait_id) ---
     if intent == Intent.GAME_ID_TEXT:
-        gid = extract_id_from_text(text, geo=geo)
-        if gid and step >= 5 and step < 7:
-            await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
-            if pager_user_id:
-                send_buf.queue_status_patch(
-                    conv_id, funnel_statuses["wait_id"]
-                )
+        gid = _game_id_from_client(text, msg_only, geo=geo)
+        if (
+            gid
+            and step >= 5
+            and step < 9
+            and not _is_waiting_for_game_id(step, conv_status_id, funnel_statuses)
+        ):
             send_buf.queue_commit(
                 conv_id,
-                step=7,
+                step=max(step, 7),
                 extracted_game_id=gid,
                 last_processed_msg_id=msg_id,
             )
