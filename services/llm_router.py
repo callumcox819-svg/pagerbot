@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from config import SCRIPTS_DIR
-from services.llm_client import chat_completion_json, resolve_llm_api_key
+import database as db
+from services.llm_client import chat_completion_json, llm_router_enabled, resolve_llm_api_key
 from services.script_engine import (
     deposit_script_key,
     game_id_script_key,
@@ -116,15 +117,19 @@ def _filter_valid_keys(geo: str, keys: list[str]) -> list[str]:
     return out
 
 
-def _system_prompt(geo: str) -> str:
+def _system_prompt(geo: str, learn_block: str = "") -> str:
     meta = GEO_META.get(geo, GEO_META["zm"])
     keys = ", ".join(_script_keys_for_geo(geo)[:40])
+    extra = ""
+    if learn_block:
+        extra = f"\n{learn_block}\n"
     return (
         "You route Pager funnel chats for 1xBet acquisition bots. "
         "Reply with JSON only, no markdown.\n"
         f"GEO: {geo} ({meta['label']}). Client language: {meta['language']}.\n"
         f"Funnel order: {meta['funnel']}.\n"
         f"Allowed script_keys: {keys}.\n"
+        f"{extra}"
         "Rules:\n"
         "- You ONLY choose pre-written script_keys from the list — never write message text.\n"
         "- NEVER change links, promo codes, or minimum deposit amounts "
@@ -144,6 +149,35 @@ def _system_prompt(geo: str) -> str:
         '"intent":"interested|positive|ready|question|unknown|declined|complaint|deposit_done|image_only",'
         '"escalate":false,"escalate_reason":"","confidence":0.0,"note":""}'
     )
+
+
+async def _learn_examples_block(geo: str) -> str:
+    if not llm_router_enabled():
+        return ""
+    rows = await db.list_learn_success_examples(geo, limit=6)
+    if not rows:
+        return ""
+    lines = [
+        "Successful patterns from real clients in this GEO "
+        "(use only to pick script_keys — never copy links/codes/amounts):"
+    ]
+    for r in rows:
+        parts = []
+        kind = str(r.get("screenshot_kind") or "").strip()
+        if kind:
+            parts.append(f"kind={kind}")
+        bal = str(r.get("balance_text") or "").strip()
+        if bal:
+            parts.append(f"balance={bal!r}")
+        gid = str(r.get("game_id") or "").strip()
+        if gid:
+            parts.append(f"game_id={gid}")
+        folder = str(r.get("folder") or "").strip()
+        if folder:
+            parts.append(f"folder={folder!r}")
+        if parts:
+            lines.append("- " + ", ".join(parts))
+    return "\n".join(lines)
 
 
 async def route_funnel_message(
@@ -180,9 +214,10 @@ async def route_funnel_message(
         "game_id_key": game_id_script_key(g),
     }
 
+    learn_block = await _learn_examples_block(g)
     raw = await chat_completion_json(
         [
-            {"role": "system", "content": _system_prompt(g)},
+            {"role": "system", "content": _system_prompt(g, learn_block)},
             {
                 "role": "user",
                 "content": (

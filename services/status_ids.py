@@ -17,8 +17,19 @@ _STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "wait_id": ("чекаю id", "чекаю ід", "wait id", "wait_id"),
     "registration": ("рега", "реєстрація", "регистрация", "registration"),
     "deps_pending": ("депи не", "депы не", "deps pending", "deps"),
-    "completed": ("заверш", "completed", "finish", "terminé", "termine"),
+    "completed": ("завершено", "completed", "finish", "terminé", "termine"),
+    "win": (" win", "виграш", "winner", "gagné", "gagne"),
 }
+
+# Folder names that contain «заверш» but are NOT successful closes.
+_NOT_COMPLETED_NAME_FRAGMENTS = (
+    "не заверш",
+    "unfinished",
+    "incomplete",
+    "не завершений",
+    "не завершені",
+    "не завершен",
+)
 
 FUNNEL_GEOS = frozenset({"zm", "eg", "dj", "cm"})
 
@@ -127,17 +138,52 @@ def is_no_status(conv: dict) -> bool:
     return "без статус" in name or name in ("", "—", "-")
 
 
+def _status_name_lower(conv: dict) -> str:
+    return ((conv.get("status") or {}).get("name") or "").strip().lower()
+
+
+def _is_negative_completed_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return any(frag in n for frag in _NOT_COMPLETED_NAME_FRAGMENTS)
+
+
 def is_completed_conv(
     conv: dict, funnel_statuses: dict[str, str] | None = None
 ) -> bool:
     """«Завершено» — successful / closed chats for learning."""
     fs = funnel_statuses or ZM_STATUSES
+    name = _status_name_lower(conv)
+    if _is_negative_completed_name(name):
+        return False
     status_id = str(conv.get("statusId") or "").strip()
     completed_sid = str(fs.get("completed") or "").strip()
     if completed_sid and status_id == completed_sid:
         return True
-    name = ((conv.get("status") or {}).get("name") or "").strip().lower()
     return any(h in name for h in _STATUS_NAME_HINTS.get("completed", ()))
+
+
+def is_learn_success_conv(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
+    """Chats where clients often send deposit profile / game ID screenshots."""
+    if is_completed_conv(conv, funnel_statuses):
+        return True
+    fs = funnel_statuses or ZM_STATUSES
+    status_id = str(conv.get("statusId") or "").strip()
+    name = _status_name_lower(conv)
+    wait_sid = str(fs.get("wait_id") or "").strip()
+    if wait_sid and status_id == wait_sid:
+        return True
+    if any(h in name for h in _STATUS_NAME_HINTS.get("wait_id", ())):
+        return True
+    win_sid = str(fs.get("win") or "").strip()
+    if win_sid and status_id == win_sid:
+        return True
+    if name.strip() in ("win", "виграш") or any(
+        h in name for h in _STATUS_NAME_HINTS.get("win", ())
+    ):
+        return True
+    return False
 
 
 def should_skip_processing(

@@ -929,6 +929,67 @@ async def count_learn_successes(account_id: int | None = None) -> int:
         return int(row[0] if row else 0)
 
 
+async def count_learn_successes_by_geo(
+    account_id: int | None = None,
+) -> dict[str, int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        if account_id is not None:
+            cur = await db.execute(
+                """
+                SELECT geo, COUNT(*) FROM funnel_learn_success
+                WHERE account_id = ? AND geo != ''
+                GROUP BY geo
+                """,
+                (account_id,),
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT geo, COUNT(*) FROM funnel_learn_success
+                WHERE geo != ''
+                GROUP BY geo
+                """
+            )
+        rows = await cur.fetchall()
+    return {str(g or "").strip().lower(): int(n) for g, n in rows if g}
+
+
+async def list_learn_success_examples(
+    geo: str, *, limit: int = 5, account_id: int | None = None
+) -> list[dict[str, str]]:
+    g = (geo or "").strip().lower()
+    if not g:
+        return []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if account_id is not None:
+            cur = await db.execute(
+                """
+                SELECT geo, game_id, balance_text, screenshot_kind,
+                       folder, client_name, note
+                FROM funnel_learn_success
+                WHERE geo = ? AND account_id = ?
+                ORDER BY learned_at DESC
+                LIMIT ?
+                """,
+                (g, account_id, max(1, limit)),
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT geo, game_id, balance_text, screenshot_kind,
+                       folder, client_name, note
+                FROM funnel_learn_success
+                WHERE geo = ?
+                ORDER BY learned_at DESC
+                LIMIT ?
+                """,
+                (g, max(1, limit)),
+            )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 def session_cookies_from_encrypted(session_enc: str, secrets_decrypt) -> dict[str, str]:
     if not session_enc:
         return {}

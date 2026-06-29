@@ -65,7 +65,7 @@ from services.llm_client import (
     llm_router_strict,
     resolve_llm_api_key,
 )
-from services.llm_learn import learn_scan_completed_chats
+from services.llm_learn import learn_scan_completed_chats, record_live_learn_success
 from services.llm_router import route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
@@ -2307,13 +2307,15 @@ async def _handle_conversation(
             step,
         )
         if llm_router_mode() == "learn":
-            logger.info(
-                "LLM learn success conv=%s geo=%s gid=%s folder=%r eff_step=%s",
-                conv_id[:8],
-                geo,
-                client_gid,
-                folder[:24] if folder else "",
-                effective_step,
+            await record_live_learn_success(
+                account_id,
+                conv_id,
+                message_id=msg_id,
+                geo=geo,
+                game_id=client_gid,
+                screenshot_kind="game_id",
+                client_name=client_name,
+                folder=folder,
             )
         return True
 
@@ -3584,7 +3586,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     funnel_statuses=funnel_statuses,
                     resolve_geo=lambda ch: resolve_conv_geo(account, ch),
                     max_per_cycle=int(
-                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "12") or "12"
+                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "24") or "24"
                     ),
                 )
             except Exception:
