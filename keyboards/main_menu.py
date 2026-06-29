@@ -58,6 +58,7 @@ def channels_kb(channels: list[dict], *, account_geo: str = "zm") -> InlineKeybo
         )
     rows.append(
         [
+            InlineKeyboardButton(text="✅ Вкл все", callback_data="ch:all_on"),
             InlineKeyboardButton(text="⬜ Выкл все", callback_data="ch:all_off"),
             InlineKeyboardButton(text="🔄 Обновить", callback_data="ch:refresh"),
         ]

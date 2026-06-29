@@ -96,6 +96,7 @@ async def cmd_learn_stats(message: Message) -> None:
     text = await format_learn_feedback(
         int(acc["id"]),
         email=str(acc.get("email") or ""),
+        account_meta=acc,
     )
     await message.answer(text, parse_mode="HTML")
 

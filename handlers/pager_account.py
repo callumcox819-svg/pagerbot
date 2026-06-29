@@ -71,6 +71,7 @@ async def _save_session(tg_user_id: int, email: str, password: str, cookies: dic
         last_error="",
     )
     await db.deactivate_other_accounts(email=email, keep_id=account_id)
+    await db.set_account_flags(tg_user_id, paused=0, auto_reply=1)
     cleared = await db.clear_pauses_for_account(account_id)
     if cleared:
         logger.info("Cleared %s script pauses for account %s", cleared, account_id)
@@ -287,6 +288,19 @@ async def cb_toggle_channel(cb: CallbackQuery) -> None:
         await cb.answer("Включено — непрочитанные чаты обработаются ~45 сек")
     else:
         await cb.answer("Выключено")
+
+
+@router.callback_query(F.data == "ch:all_on")
+async def cb_all_on_channels(cb: CallbackQuery) -> None:
+    acc = await db.get_account_by_tg(cb.from_user.id)
+    if not acc:
+        await cb.answer("Нет аккаунта")
+        return
+    n = await db.enable_all_channels(int(acc["id"]))
+    chs = await db.list_channels(int(acc["id"]))
+    acc_geo = str(acc.get("geo") or "zm")
+    await cb.message.edit_reply_markup(reply_markup=channels_kb(chs, account_geo=acc_geo))
+    await cb.answer(f"Включено каналов: {n}. /learn_stats через 10–15 мин")
 
 
 @router.callback_query(F.data == "ch:all_off")

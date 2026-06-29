@@ -98,6 +98,7 @@ async def format_learn_feedback(
     *,
     email: str = "",
     recent_limit: int = 8,
+    account_meta: dict | None = None,
 ) -> str:
     """Human-readable training report for Telegram."""
     total = await db.count_learn_successes(account_id)
@@ -151,10 +152,32 @@ async def format_learn_feedback(
             tail = f" — {', '.join(extras)}" if extras else ""
             lines.append(f"{i}. {geo} | {folder} | {client}{tail}")
     elif total == 0:
+        chs = await db.list_channels(account_id)
+        enabled_n = sum(1 for c in chs if c.get("enabled"))
+        lines.append("<b>Почему пока 0:</b>")
+        lines.append(f"• Каналов включено: <b>{enabled_n}/{len(chs)}</b>")
+        meta = account_meta or {}
+        if meta:
+            lines.append(
+                f"• Воркер: auto_reply={'✅' if meta.get('auto_reply') else '❌'} "
+                f"paused={'⏸' if meta.get('paused') else '▶️'} "
+                f"session={'OK' if meta.get('session_ok') else 'FAIL'}"
+            )
+        if not resolve_llm_api_key():
+            lines.append("• ⚠️ <code>OPENROUTER_API_KEY</code> не задан на Railway")
+        if enabled_n == 0 and chs:
+            lines.append(
+                "• ⚠️ <b>Все каналы выключены</b> — 📡 Каналы → «✅ Вкл все» "
+                "или перелогиньтесь в 🔐 Pager"
+            )
+        elif enabled_n > 0:
+            lines.append(
+                "• Каналы вкл — подождите 10–15 мин, воркер сканирует "
+                "«Завершено» и «Депи не дошли»"
+            )
         lines.append(
-            "Пока нет примеров. Включите каналы в 📡 Каналы, "
-            "режим <code>PAGER_LLM_ROUTER=learn</code> на Railway, "
-            "подождите 10–15 мин."
+            "<i>Примеры привязаны к этому Pager-аккаунту "
+            "(старые с других логинов сюда не попадают).</i>"
         )
 
     lines.append("")
