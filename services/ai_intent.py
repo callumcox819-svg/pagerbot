@@ -1348,7 +1348,7 @@ def classify(
             return Intent.POSITIVE
         if is_positive_message_reaction(message_reaction):
             return Intent.POSITIVE
-        if funnel_step < 6:
+        if funnel_step < 4:
             return Intent.POSITIVE
         return Intent.IMAGE_ONLY
     game_re = _GAME_ID

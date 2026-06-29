@@ -22,7 +22,65 @@ async def download_image(url: str) -> bytes:
             return await resp.read()
 
 
-async def extract_id_from_image_url(
+async def classify_screenshot_kind(url: str, api_key: str = "") -> str:
+    """Classify client screenshot: link_error, deposit, game_id, registration, other."""
+    if not api_key or not url:
+        return "other"
+    import base64
+
+    try:
+        data = await download_image(url)
+    except Exception:
+        logger.warning("screenshot download failed")
+        return "other"
+    b64 = base64.standard_b64encode(data).decode("ascii")
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "Classify this phone screenshot from a betting funnel chat. "
+                            "Reply with exactly one word:\n"
+                            "LINK_ERROR — browser shows site inaccessible, connection error, "
+                            "ERR_QUIC, DNS error, blank page, or tinyurl/link failed to open\n"
+                            "DEPOSIT — payment receipt, deposit confirmation, mobile money transfer\n"
+                            "GAME_ID — casino app account/profile showing numeric game ID\n"
+                            "REGISTRATION — 1xBet registration form or successful signup screen\n"
+                            "OTHER — anything else"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 20,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=45),
+            ) as resp:
+                resp.raise_for_status()
+                body = await resp.json()
+        raw = (body["choices"][0]["message"]["content"] or "").strip().upper()
+        for label in ("LINK_ERROR", "DEPOSIT", "GAME_ID", "REGISTRATION", "OTHER"):
+            if label in raw:
+                return label.lower()
+    except Exception:
+        logger.exception("screenshot classify vision failed")
+    return "other"
+
     url: str, openai_key: str = "", *, geo: str = "zm"
 ) -> str:
     if openai_key:

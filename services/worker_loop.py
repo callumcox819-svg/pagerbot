@@ -59,6 +59,7 @@ from services.ai_intent import (
 )
 from services.encryption import Secrets
 from services.image_extract import (
+    classify_screenshot_kind,
     extract_id_from_image_url,
     extract_id_from_text,
     looks_like_game_id,
@@ -86,6 +87,7 @@ from services.script_engine import (
     reg_script_keys_set,
     deposit_script_key,
     game_id_script_key,
+    link_help_script_keys,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -1832,6 +1834,64 @@ async def _handle_conversation(
     dep_script_sent = script_sent_in_history(op_texts_early, dep_sn_early)
     reg_link_sent = reg_link_sent_in_history(op_texts_early, geo=geo)
 
+    if (
+        needs_reply
+        and has_real_image
+        and not (text or "").strip()
+        and reg_link_sent
+        and not dep_script_sent
+    ):
+        img_url = ""
+        for att in attachments:
+            if att.get("type") == "image":
+                img_url = (att.get("payload") or {}).get("url") or ""
+                break
+        shot_kind = "other"
+        if img_url and _settings.openai_api_key:
+            shot_kind = await classify_screenshot_kind(
+                img_url, _settings.openai_api_key
+            )
+        if shot_kind in ("link_error", "registration", "other"):
+            help_keys = link_help_script_keys(geo)
+            send_buf.queue_script_send(
+                conv_id,
+                help_keys,
+                client_name=client_name,
+                channel_id=channel_id,
+                geo=geo,
+            )
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, effective_step),
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            await _escalate_once(
+                bot,
+                esc_chat,
+                account_id=account_id,
+                conv_id=conv_id,
+                msg_id=msg_id,
+                state=state,
+                account=account,
+                channel_id=channel_id,
+                title="Ссылка не открывается",
+                client_name=client_name,
+                channel_name=channel_name,
+                folder=folder,
+                reason="Скрин похож на ошибку ссылки — отправлен Chrome + линк",
+                last_message="(photo)",
+                extra=f"vision={shot_kind}",
+                pause=False,
+            )
+            logger.info(
+                "conv=%s post-link screenshot kind=%s keys=%s",
+                conv_id[:8],
+                shot_kind,
+                help_keys,
+            )
+            return True
+
     deposit_signal = (
         not is_reaction_only
         and not is_deposit_question(text)
@@ -1846,8 +1906,7 @@ async def _handle_conversation(
                 has_real_image
                 and reg_link_sent
                 and (
-                    effective_step >= 6
-                    or dep_script_sent
+                    dep_script_sent
                     or script_sent_in_history(
                         op_texts_early,
                         script_ui_snippet(game_id_script_key(geo), geo),

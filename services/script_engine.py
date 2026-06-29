@@ -143,6 +143,16 @@ def game_id_script_key(geo: str = "zm") -> str:
     return "08_game_id" if geo == "cm" else "07_game_id"
 
 
+def link_help_script_keys(geo: str = "zm") -> list[str]:
+    """Resend link + browser hint when a screenshot shows the link won't open."""
+    g = (geo or "zm").strip().lower()
+    if g == "cm":
+        return ["07_chrome", "06_link"]
+    if g == "eg":
+        return ["04_registration", "05_link"]
+    return ["04_registration", "05_link"]
+
+
 def reg_script_keys_set(geo: str = "zm") -> frozenset[str]:
     if geo == "cm":
         return CM_REG_SCRIPT_KEYS
@@ -704,7 +714,8 @@ def resolve_funnel_scripts(
                 and (
                     is_what_required_question(t)
                     or is_post_link_registration_question(t)
-                    or intent in ("question", "positive", "interested", "ready")
+                    or intent in ("question", "interested", "ready")
+                    or (intent == "positive" and t.strip())
                 )
             ):
                 return [dep_key]
@@ -978,6 +989,8 @@ def resolve_cm_backlog_fallback(
                 "interested",
                 "unknown",
             )
+            and intent != "image_only"
+            and (intent != "positive" or t.strip())
         ):
             return [dep_key]
         gid_sn = script_ui_snippet("08_game_id", geo)
@@ -1083,6 +1096,8 @@ def resolve_zm_backlog_fallback(
                 "interested",
                 "unknown",
             )
+            and intent != "image_only"
+            and (intent != "positive" or t.strip())
         ):
             return ["06_deposit"]
         return []
