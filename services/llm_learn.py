@@ -102,7 +102,9 @@ async def format_learn_feedback(
 ) -> str:
     """Human-readable training report for Telegram."""
     total = await db.count_learn_successes(account_id)
+    global_total = await db.count_learn_successes(None)
     by_geo = await db.count_learn_successes_by_geo(account_id)
+    global_by_geo = await db.count_learn_successes_by_geo(None)
     by_folder = await db.count_learn_successes_by_folder(account_id)
     recent = await db.list_learn_recent(account_id, limit=recent_limit)
     mode = llm_router_mode()
@@ -111,6 +113,11 @@ async def format_learn_feedback(
     if email:
         lines.append(f"Pager: <code>{email}</code>")
     lines.append(f"Всего примеров в базе: <b>{total}</b>")
+    if global_total > total:
+        lines.append(
+            f"<i>На всех аккаунтах воркера: <b>{global_total}</b> "
+            f"({', '.join(f'{g}={n}' for g, n in sorted(global_by_geo.items()))})</i>"
+        )
     lines.append(f"Режим LLM: <code>{mode or 'off'}</code>")
     if mode == "learn":
         lines.append(
@@ -177,7 +184,14 @@ async def format_learn_feedback(
                 "• Обучение идёт по <b>всем</b> каналам аккаунта — "
                 "📂 Выбор папок и вкл/выкл каналов не нужны"
             )
-            lines.append("• Подождите 10–15 мин после деплоя")
+            if len(chs) < 5:
+                lines.append(
+                    "• ⚠️ Мало каналов в боте — 📡 Каналы → <b>🔄 Обновить</b> "
+                    "(на главном Pager их обычно больше)"
+                )
+            lines.append(
+                "• Скан идёт — если 0 долго: скрины не скачиваются с Facebook CDN"
+            )
         lines.append(
             "<i>Примеры привязаны к этому Pager-аккаунту.</i>"
         )
@@ -256,7 +270,7 @@ async def _scan_conv_for_success(
     folder = ((conv.get("status") or {}).get("name") or "").strip()
 
     try:
-        messages = await client.list_messages(conv_id, page_size=80)
+        messages = await client.list_messages(conv_id, page_size=120)
     except Exception:
         logger.debug("learn scan messages failed conv=%s", conv_id[:8])
         return 0
@@ -288,6 +302,15 @@ async def _scan_conv_for_success(
                     url, api_key, geo=geo, cookies=cookies
                 )
             if not _worth_recording(analysis, gid=gid, geo=geo, folder=folder):
+                logger.debug(
+                    "LLM learn skip conv=%s geo=%s folder=%r kind=%s balance=%r gid=%s",
+                    conv_id[:8],
+                    geo,
+                    folder[:20],
+                    analysis.get("kind"),
+                    str(analysis.get("balance") or "")[:16],
+                    gid or "-",
+                )
                 continue
 
             balance = str(analysis.get("balance") or "").strip()

@@ -90,6 +90,19 @@ async def _save_session(tg_user_id: int, email: str, password: str, cookies: dic
                 account_id,
                 email or tg_user_id,
             )
+    try:
+        await client.warm_session()
+        await client.resolve_org_id_live()
+        statuses = await client.list_statuses_api()
+        if statuses:
+            await db.sync_statuses(account_id, statuses)
+            logger.info(
+                "Synced %s status folder(s) for account %s",
+                len(statuses),
+                account_id,
+            )
+    except Exception as exc:
+        logger.warning("Status sync on login failed account=%s: %s", account_id, exc)
     return probe.get("pager_user_id") or "ok"
 
 
