@@ -163,11 +163,14 @@ async def _learn_examples_block(geo: str) -> str:
     ]
     for r in rows:
         kind = str(r.get("screenshot_kind") or "").strip()
-        if kind == "dialog_flow":
+        if kind == "dialog_flow" or kind == "chat_dialog":
             note = str(r.get("note") or "").strip()
+            dlg = str(r.get("dialog_text") or "").strip()
             folder = str(r.get("folder") or "").strip()
             if note:
-                lines.append(f"- dialog_flow folder={folder!r}: {note[:160]}")
+                lines.append(f"- chat folder={folder!r}: {note[:200]}")
+            elif dlg:
+                lines.append(f"- chat folder={folder!r}: {dlg[:200].replace(chr(10), ' | ')}")
             continue
         parts = []
         if kind:

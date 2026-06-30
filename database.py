@@ -107,6 +107,7 @@ async def init_db() -> None:
             "ALTER TABLE conversation_states ADD COLUMN send_failures INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE conversation_states ADD COLUMN last_escalation_msg_id TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE pager_channels ADD COLUMN geo TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE funnel_learn_success ADD COLUMN dialog_text TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 await db.execute(stmt)
@@ -882,14 +883,16 @@ async def save_learn_success(
     client_name: str = "",
     folder: str = "",
     note: str = "",
+    dialog_text: str = "",
 ) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
             INSERT INTO funnel_learn_success (
                 account_id, conversation_id, message_id, geo, game_id,
-                balance_text, screenshot_kind, client_name, folder, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                balance_text, screenshot_kind, client_name, folder, note,
+                dialog_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id, conversation_id, message_id) DO UPDATE SET
                 geo = excluded.geo,
                 game_id = excluded.game_id,
@@ -898,6 +901,7 @@ async def save_learn_success(
                 client_name = excluded.client_name,
                 folder = excluded.folder,
                 note = excluded.note,
+                dialog_text = excluded.dialog_text,
                 learned_at = datetime('now')
             """,
             (
@@ -910,7 +914,8 @@ async def save_learn_success(
                 (screenshot_kind or "").strip()[:32],
                 (client_name or "").strip()[:64],
                 (folder or "").strip()[:48],
-                (note or "").strip()[:200],
+                (note or "").strip()[:500],
+                (dialog_text or "").strip()[:8000],
             ),
         )
         await db.commit()
@@ -966,7 +971,7 @@ async def list_learn_success_examples(
             cur = await db.execute(
                 """
                 SELECT geo, game_id, balance_text, screenshot_kind,
-                       folder, client_name, note
+                       folder, client_name, note, dialog_text
                 FROM funnel_learn_success
                 WHERE geo = ? AND account_id = ?
                 ORDER BY learned_at DESC
@@ -978,7 +983,7 @@ async def list_learn_success_examples(
             cur = await db.execute(
                 """
                 SELECT geo, game_id, balance_text, screenshot_kind,
-                       folder, client_name, note
+                       folder, client_name, note, dialog_text
                 FROM funnel_learn_success
                 WHERE geo = ?
                 ORDER BY learned_at DESC
@@ -1025,7 +1030,7 @@ async def list_learn_recent(
         cur = await db.execute(
             """
             SELECT geo, game_id, balance_text, screenshot_kind,
-                   folder, client_name, note, learned_at
+                   folder, client_name, note, learned_at, dialog_text
             FROM funnel_learn_success
             WHERE account_id = ?
             ORDER BY learned_at DESC

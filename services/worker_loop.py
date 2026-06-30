@@ -3589,7 +3589,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     funnel_statuses=funnel_statuses,
                     resolve_geo=lambda ch: resolve_conv_geo(account, ch),
                     max_per_cycle=int(
-                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "24") or "24"
+                        os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "40") or "40"
                     ),
                 )
                 if recorded > 0 and learn_notify_enabled():

@@ -19,15 +19,10 @@ from services.llm_client import llm_router_mode, resolve_llm_api_key
 from services.pager_api import PagerClient
 from services.script_engine import (
     infer_step_from_thread,
-    reg_link_sent_in_history,
     script_sent_in_history,
     script_ui_snippet,
 )
-from services.status_ids import (
-    is_completed_conv,
-    is_deps_pending_conv,
-    is_learn_folder_conv,
-)
+from services.status_ids import is_deps_pending_conv, is_learn_folder_conv
 
 logger = logging.getLogger(__name__)
 _settings = load_settings()
@@ -109,18 +104,70 @@ def _client_text_turns(messages: list[dict[str, Any]], *, limit: int = 6) -> lis
     return turns[-limit:]
 
 
-def _dialog_note(
-    *,
-    scripts: list[str],
-    step: int,
-    client_turns: list[str],
-    folder: str,
+def _geo_from_transcript(blob: str, fallback: str = "zm") -> str:
+    b = (blob or "").lower()
+    if "camerun" in b or "cash056" in b or " xaf" in b or "fcfa" in b:
+        return "cm"
+    if "egypt" in b or "egp" in b or "egypt0011" in b:
+        return "eg"
+    if "djibouti" in b or "bji777" in b:
+        return "dj"
+    if "zam577" in b or "zmw" in b:
+        return "zm"
+    return (fallback or "zm").strip().lower() or "zm"
+
+
+def _build_transcript(messages: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for m in sorted(messages, key=lambda x: str(x.get("createdAt") or "")):
+        d = str(m.get("messageDirection") or "").lower()
+        if d in ("incoming", "in", "from_client", "client"):
+            role = "CLIENT"
+        elif d in ("outgoing", "out"):
+            role = "OPERATOR"
+        else:
+            continue
+        text = (m.get("text") or "").strip()
+        if not text and m.get("attachments"):
+            text = "(photo)"
+        if not text:
+            continue
+        lines.append(f"{role}: {text[:400]}")
+    return "\n".join(lines)[:8000]
+
+
+def learn_screenshots_enabled() -> bool:
+    return os.getenv("PAGER_LEARN_SCREENSHOTS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+async def _summarize_dialog(
+    transcript: str, *, api_key: str, folder: str, client_name: str
 ) -> str:
-    parts = [f"scripts={','.join(scripts[:12])}", f"step={step}", f"folder={folder[:24]}"]
-    if client_turns:
-        sample = " | ".join(client_turns[:4])
-        parts.append(f"client={sample[:120]}")
-    return " ; ".join(parts)[:200]
+    if not api_key or len(transcript) < 40:
+        return ""
+    from services.llm_client import chat_completion
+
+    summary = await chat_completion(
+        [
+            {
+                "role": "user",
+                "content": (
+                    f"Successful 1xBet funnel chat, folder «{folder}», client {client_name}.\n"
+                    "In 2-3 short sentences: how did the operator guide the client, "
+                    "what did the client say/do, what was the outcome?\n"
+                    "Do NOT invent links, promo codes, or amounts.\n\n"
+                    f"{transcript[:3500]}"
+                ),
+            }
+        ],
+        api_key=api_key,
+        max_tokens=150,
+    )
+    return (summary or "").strip()[:500]
 
 
 def _is_incoming(msg: dict[str, Any]) -> bool:
@@ -204,11 +251,11 @@ async def format_learn_feedback(
     lines.append(f"Всего примеров в базе: <b>{total}</b>")
     dialog_n = sum(
         1
-        for r in await db.list_learn_recent(account_id, limit=200)
-        if str(r.get("screenshot_kind") or "") == "dialog_flow"
+        for r in await db.list_learn_recent(account_id, limit=500)
+        if str(r.get("screenshot_kind") or "") in ("chat_dialog", "dialog_flow")
     )
     if dialog_n:
-        lines.append(f"Из них диалогов (логика общения): <b>{dialog_n}</b>")
+        lines.append(f"Успешных чатов (переписка): <b>{dialog_n}</b>")
     if global_total > total:
         lines.append(
             f"<i>На всех аккаунтах воркера: <b>{global_total}</b> "
@@ -251,9 +298,12 @@ async def format_learn_feedback(
                 extras.append(f"ID {gid}")
             if kind and kind != "deposit_profile":
                 extras.append(kind)
-            if kind == "dialog_flow":
+            if kind == "dialog_flow" or kind == "chat_dialog":
                 if note:
-                    extras.append(note[:80])
+                    extras.append(note[:120])
+                dlg = str(r.get("dialog_text") or "").strip()
+                if dlg:
+                    extras.append(dlg[:100].replace("\n", " / "))
             elif note:
                 extras.append(note[:40])
             tail = f" — {', '.join(extras)}" if extras else ""
@@ -298,8 +348,8 @@ async def format_learn_feedback(
 
     lines.append("")
     lines.append(
-        "Папки: <b>Завершено</b>, <b>Депи не дошли</b>, Чекаю ID — "
-        "скрины + <b>логика диалога</b> (какие скрипты → что ответил клиент)."
+        "Папки: <b>Завершено</b>, <b>Депи не дошли</b>, <b>Чекаю ID</b> — "
+        "бот читает всю переписку OPERATOR/CLIENT."
     )
     lines.append("Обновить отчёт: /learn_stats")
     return "\n".join(lines)
@@ -457,8 +507,9 @@ async def _scan_conv_for_dialog(
     conv: dict,
     funnel_statuses: dict[str, str],
     resolve_geo: Callable[[str], str],
+    api_key: str,
 ) -> int:
-    """Learn communication flow from successful text threads (no screenshot needed)."""
+    """Read full chat from success folders — how operator talks to client."""
     conv_id = str(conv.get("id") or "")
     if not conv_id:
         return 0
@@ -466,41 +517,43 @@ async def _scan_conv_for_dialog(
     if await db.learn_success_exists(account_id, conv_id, dlg_msg_id):
         return 0
 
-    ch = str(conv.get("channelId") or "").strip()
-    geo = resolve_geo(ch)
-    client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
-    folder = ((conv.get("status") or {}).get("name") or "").strip()
-
     if not is_learn_folder_conv(conv, funnel_statuses):
         return 0
 
+    ch = str(conv.get("channelId") or "").strip()
+    channel_geo = resolve_geo(ch)
+    client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
+    folder = ((conv.get("status") or {}).get("name") or "").strip()
+
     try:
-        messages = await client.list_messages(conv_id, page_size=150)
+        messages = await client.list_messages(conv_id, page_size=200)
     except Exception:
+        logger.warning("learn dialog messages failed conv=%s", conv_id[:8])
         return 0
 
+    transcript = _build_transcript(messages)
+    if not transcript:
+        logger.debug("learn dialog empty transcript conv=%s folder=%r", conv_id[:8], folder[:20])
+        return 0
+
+    client_lines = sum(1 for ln in transcript.splitlines() if ln.startswith("CLIENT:"))
+    op_lines = sum(1 for ln in transcript.splitlines() if ln.startswith("OPERATOR:"))
+    if client_lines < 1 or op_lines < 1:
+        return 0
+
+    geo = _geo_from_transcript(transcript, channel_geo)
     outgoing = _outgoing_texts(messages)
-    if not outgoing:
-        return 0
-
-    scripts = _scripts_delivered_keys(outgoing, geo)
+    scripts: list[str] = []
+    for g in ("cm", "eg", "zm", "dj"):
+        scripts = _scripts_delivered_keys(outgoing, g)
+        if scripts:
+            geo = g
+            break
     step = infer_step_from_thread(messages, geo=geo)
-    link_sent = reg_link_sent_in_history(outgoing, geo=geo)
-
-    completed = is_completed_conv(conv, funnel_statuses)
-    deps = is_deps_pending_conv(conv, funnel_statuses)
-    if not link_sent or len(scripts) < 2:
-        return 0
-    if step < 5 and not completed and not deps:
-        return 0
-
-    client_turns = _client_text_turns(messages)
-    note = _dialog_note(
-        scripts=scripts,
-        step=step,
-        client_turns=client_turns,
-        folder=folder,
+    summary = await _summarize_dialog(
+        transcript, api_key=api_key, folder=folder, client_name=client_name
     )
+    note = summary or f"folder={folder[:32]}; step={step}; scripts={','.join(scripts[:8])}"
 
     await db.save_learn_success(
         account_id,
@@ -508,20 +561,23 @@ async def _scan_conv_for_dialog(
         message_id=dlg_msg_id,
         geo=geo,
         game_id="",
-        balance_text=f"step={step}",
-        screenshot_kind="dialog_flow",
+        balance_text=f"msgs={client_lines + op_lines}",
+        screenshot_kind="chat_dialog",
         client_name=client_name,
         folder=folder,
         note=note,
+        dialog_text=transcript,
     )
     logger.info(
-        "LLM learn dialog conv=%s geo=%s client=%r step=%s scripts=%s folder=%r",
+        "LLM learn dialog conv=%s geo=%s client=%r folder=%r "
+        "turns=%s+%s scripts=%s",
         conv_id[:8],
         geo,
         client_name[:24],
-        step,
-        scripts[:6],
-        folder[:20],
+        folder[:24],
+        op_lines,
+        client_lines,
+        scripts[:5],
     )
     return 1
 
@@ -551,9 +607,9 @@ async def learn_scan_completed_chats(
     convs: list[dict],
     funnel_statuses: dict[str, str],
     resolve_geo: Callable[[str], str],
-    max_per_cycle: int = 24,
+    max_per_cycle: int = 40,
 ) -> int:
-    """Scan learn folders on all account channels — independent of auto-reply toggles."""
+    """Scan success folders — learn from full chat dialogs."""
     if llm_router_mode() != "learn":
         return 0
     api_key = resolve_llm_api_key()
@@ -572,7 +628,7 @@ async def learn_scan_completed_chats(
             sid = str(funnel_statuses.get(folder_key) or "").strip()
             if not sid:
                 continue
-            for page in range(1, 4):
+            for page in range(1, 7):
                 try:
                     batch = await client.list_conversations(
                         page=page,
@@ -602,14 +658,16 @@ async def learn_scan_completed_chats(
             conv=conv,
             funnel_statuses=funnel_statuses,
             resolve_geo=resolve_geo,
-        )
-        recorded += await _scan_conv_for_success(
-            account_id=account_id,
-            client=client,
-            conv=conv,
-            resolve_geo=resolve_geo,
             api_key=api_key,
         )
+        if learn_screenshots_enabled():
+            recorded += await _scan_conv_for_success(
+                account_id=account_id,
+                client=client,
+                conv=conv,
+                resolve_geo=resolve_geo,
+                api_key=api_key,
+            )
 
     if candidates:
         by_geo = await db.count_learn_successes_by_geo(account_id)
