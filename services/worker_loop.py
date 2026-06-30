@@ -67,6 +67,7 @@ from services.llm_client import (
 )
 from services.llm_learn import (
     format_learn_feedback,
+    learn_account_allowed,
     learn_notify_enabled,
     learn_scan_completed_chats,
     record_live_learn_success,
@@ -3423,7 +3424,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             for c in ch_rows
             if c.get("channel_id")
         }
-        learn_active = llm_router_mode() == "learn" and bool(resolve_llm_api_key())
+        learn_active = (
+            llm_router_mode() == "learn"
+            and bool(resolve_llm_api_key())
+            and learn_account_allowed(account)
+        )
 
         if enabled is None and not all_channel_ids:
             logger.warning(

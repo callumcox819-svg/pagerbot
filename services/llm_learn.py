@@ -9,7 +9,7 @@ from collections import defaultdict
 from typing import Any, Callable
 
 import database as db
-from config import load_settings
+from config import SCRIPTS_DIR, load_settings
 from services.image_extract import (
     analyze_success_screenshot,
     extract_id_from_image_url,
@@ -17,7 +17,17 @@ from services.image_extract import (
 )
 from services.llm_client import llm_router_mode, resolve_llm_api_key
 from services.pager_api import PagerClient
-from services.status_ids import is_deps_pending_conv, is_learn_folder_conv
+from services.script_engine import (
+    infer_step_from_thread,
+    reg_link_sent_in_history,
+    script_sent_in_history,
+    script_ui_snippet,
+)
+from services.status_ids import (
+    is_completed_conv,
+    is_deps_pending_conv,
+    is_learn_folder_conv,
+)
 
 logger = logging.getLogger(__name__)
 _settings = load_settings()
@@ -35,6 +45,82 @@ _GEO_LABELS = {
     "cm": "Cameroon",
     "dj": "Djibouti",
 }
+
+
+def learn_account_email() -> str:
+    """Pager email used for AI learning (default: harley account)."""
+    return (
+        os.getenv("PAGER_LEARN_EMAIL") or "2harleydewidson@gmail.com"
+    ).strip().lower()
+
+
+def learn_account_allowed(account: dict[str, Any]) -> bool:
+    want = learn_account_email()
+    if want in ("", "*", "all"):
+        return True
+    return (str(account.get("email") or "").strip().lower()) == want
+
+
+def _outgoing_texts(messages: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    for m in messages:
+        if str(m.get("messageDirection") or "").lower() not in ("outgoing", "out"):
+            continue
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        if not (m.get("isDelivered") or m.get("facebookMessageId")):
+            continue
+        out.append(text)
+    return out
+
+
+def _scripts_delivered_keys(outgoing: list[str], geo: str) -> list[str]:
+    g = (geo or "zm").strip().lower()
+    root = SCRIPTS_DIR / g
+    if not root.is_dir():
+        return []
+    keys: list[str] = []
+    for path in sorted(root.glob("*.txt")):
+        stem = path.stem
+        sn = script_ui_snippet(stem, g)
+        if sn and script_sent_in_history(outgoing, sn):
+            keys.append(stem)
+    extras = root / "extras"
+    if extras.is_dir():
+        for path in sorted(extras.glob("*.txt")):
+            stem = f"extras/{path.stem}"
+            sn = script_ui_snippet(path.stem, g)
+            if sn and script_sent_in_history(outgoing, sn):
+                keys.append(stem)
+    return keys
+
+
+def _client_text_turns(messages: list[dict[str, Any]], *, limit: int = 6) -> list[str]:
+    turns: list[str] = []
+    for m in messages:
+        if not _is_incoming(m):
+            continue
+        text = (m.get("text") or "").strip()
+        if text:
+            turns.append(text[:100])
+        elif m.get("attachments"):
+            turns.append("(photo)")
+    return turns[-limit:]
+
+
+def _dialog_note(
+    *,
+    scripts: list[str],
+    step: int,
+    client_turns: list[str],
+    folder: str,
+) -> str:
+    parts = [f"scripts={','.join(scripts[:12])}", f"step={step}", f"folder={folder[:24]}"]
+    if client_turns:
+        sample = " | ".join(client_turns[:4])
+        parts.append(f"client={sample[:120]}")
+    return " ; ".join(parts)[:200]
 
 
 def _is_incoming(msg: dict[str, Any]) -> bool:
@@ -110,9 +196,19 @@ async def format_learn_feedback(
     mode = llm_router_mode()
 
     lines = ["📚 <b>AI обучение — отчёт</b>", ""]
+    learn_email = learn_account_email()
+    if learn_email and learn_email not in ("*", "all"):
+        lines.append(f"Учится только: <code>{learn_email}</code>")
     if email:
         lines.append(f"Pager: <code>{email}</code>")
     lines.append(f"Всего примеров в базе: <b>{total}</b>")
+    dialog_n = sum(
+        1
+        for r in await db.list_learn_recent(account_id, limit=200)
+        if str(r.get("screenshot_kind") or "") == "dialog_flow"
+    )
+    if dialog_n:
+        lines.append(f"Из них диалогов (логика общения): <b>{dialog_n}</b>")
     if global_total > total:
         lines.append(
             f"<i>На всех аккаунтах воркера: <b>{global_total}</b> "
@@ -147,6 +243,7 @@ async def format_learn_feedback(
             bal = str(r.get("balance_text") or "").strip()
             gid = str(r.get("game_id") or "").strip()
             kind = str(r.get("screenshot_kind") or "").strip()
+            note = str(r.get("note") or "").strip()
             extras = []
             if bal:
                 extras.append(f"баланс {bal}")
@@ -154,7 +251,10 @@ async def format_learn_feedback(
                 extras.append(f"ID {gid}")
             if kind and kind != "deposit_profile":
                 extras.append(kind)
-            if note:
+            if kind == "dialog_flow":
+                if note:
+                    extras.append(note[:80])
+            elif note:
                 extras.append(note[:40])
             tail = f" — {', '.join(extras)}" if extras else ""
             lines.append(f"{i}. {geo} | {folder} | {client}{tail}")
@@ -197,7 +297,10 @@ async def format_learn_feedback(
         )
 
     lines.append("")
-    lines.append("Папки для обучения: <b>Завершено</b>, <b>Депи не дошли</b>, Чекаю ID, WIN.")
+    lines.append(
+        "Папки: <b>Завершено</b>, <b>Депи не дошли</b>, Чекаю ID — "
+        "скрины + <b>логика диалога</b> (какие скрипты → что ответил клиент)."
+    )
     lines.append("Обновить отчёт: /learn_stats")
     return "\n".join(lines)
 
@@ -347,6 +450,82 @@ async def _scan_conv_for_success(
     return recorded
 
 
+async def _scan_conv_for_dialog(
+    *,
+    account_id: int,
+    client: PagerClient,
+    conv: dict,
+    funnel_statuses: dict[str, str],
+    resolve_geo: Callable[[str], str],
+) -> int:
+    """Learn communication flow from successful text threads (no screenshot needed)."""
+    conv_id = str(conv.get("id") or "")
+    if not conv_id:
+        return 0
+    dlg_msg_id = f"dialog:{conv_id}"
+    if await db.learn_success_exists(account_id, conv_id, dlg_msg_id):
+        return 0
+
+    ch = str(conv.get("channelId") or "").strip()
+    geo = resolve_geo(ch)
+    client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
+    folder = ((conv.get("status") or {}).get("name") or "").strip()
+
+    if not is_learn_folder_conv(conv, funnel_statuses):
+        return 0
+
+    try:
+        messages = await client.list_messages(conv_id, page_size=150)
+    except Exception:
+        return 0
+
+    outgoing = _outgoing_texts(messages)
+    if not outgoing:
+        return 0
+
+    scripts = _scripts_delivered_keys(outgoing, geo)
+    step = infer_step_from_thread(messages, geo=geo)
+    link_sent = reg_link_sent_in_history(outgoing, geo=geo)
+
+    completed = is_completed_conv(conv, funnel_statuses)
+    deps = is_deps_pending_conv(conv, funnel_statuses)
+    if not link_sent or len(scripts) < 2:
+        return 0
+    if step < 5 and not completed and not deps:
+        return 0
+
+    client_turns = _client_text_turns(messages)
+    note = _dialog_note(
+        scripts=scripts,
+        step=step,
+        client_turns=client_turns,
+        folder=folder,
+    )
+
+    await db.save_learn_success(
+        account_id,
+        conv_id,
+        message_id=dlg_msg_id,
+        geo=geo,
+        game_id="",
+        balance_text=f"step={step}",
+        screenshot_kind="dialog_flow",
+        client_name=client_name,
+        folder=folder,
+        note=note,
+    )
+    logger.info(
+        "LLM learn dialog conv=%s geo=%s client=%r step=%s scripts=%s folder=%r",
+        conv_id[:8],
+        geo,
+        client_name[:24],
+        step,
+        scripts[:6],
+        folder[:20],
+    )
+    return 1
+
+
 def _fair_sample_by_channel(
     candidates: list[dict], *, max_total: int
 ) -> list[dict]:
@@ -417,6 +596,13 @@ async def learn_scan_completed_chats(
 
     recorded = 0
     for conv in sample:
+        recorded += await _scan_conv_for_dialog(
+            account_id=account_id,
+            client=client,
+            conv=conv,
+            funnel_statuses=funnel_statuses,
+            resolve_geo=resolve_geo,
+        )
         recorded += await _scan_conv_for_success(
             account_id=account_id,
             client=client,

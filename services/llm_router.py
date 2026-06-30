@@ -162,8 +162,14 @@ async def _learn_examples_block(geo: str) -> str:
         "(use only to pick script_keys — never copy links/codes/amounts):"
     ]
     for r in rows:
-        parts = []
         kind = str(r.get("screenshot_kind") or "").strip()
+        if kind == "dialog_flow":
+            note = str(r.get("note") or "").strip()
+            folder = str(r.get("folder") or "").strip()
+            if note:
+                lines.append(f"- dialog_flow folder={folder!r}: {note[:160]}")
+            continue
+        parts = []
         if kind:
             parts.append(f"kind={kind}")
         bal = str(r.get("balance_text") or "").strip()
