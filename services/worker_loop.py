@@ -3708,6 +3708,20 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 account_id,
                 len(all_channel_ids),
             )
+        elif reply_active and llm_router_compose():
+            geos = sorted(
+                {
+                    resolve_conv_geo(account, cid)
+                    for cid in (enabled or [])
+                }
+            )
+            logger.info(
+                "Worker account=%s email=%r: compose AI — %s channel(s) geos=%s",
+                account_id,
+                (str(account.get("email") or ""))[:36],
+                len(enabled or []),
+                geos,
+            )
 
         ch_names = {
             str(c.get("channel_id") or ""): str(c.get("name") or "")
