@@ -10,7 +10,15 @@ from typing import Any
 
 from config import SCRIPTS_DIR
 import database as db
-from services.llm_client import chat_completion_json, llm_router_enabled, resolve_llm_api_key
+from services.llm_client import (
+    chat_completion_json,
+    llm_router_enabled,
+    llm_router_may_send,
+    llm_router_mode,
+    llm_router_primary,
+    llm_router_strict,
+    resolve_llm_api_key,
+)
 from services.script_engine import (
     deposit_script_key,
     game_id_script_key,
@@ -117,14 +125,22 @@ def _filter_valid_keys(geo: str, keys: list[str]) -> list[str]:
     return out
 
 
-def _system_prompt(geo: str, learn_block: str = "") -> str:
+def _system_prompt(geo: str, learn_block: str = "", *, primary: bool = False) -> str:
     meta = GEO_META.get(geo, GEO_META["zm"])
     keys = ", ".join(_script_keys_for_geo(geo)[:40])
     extra = ""
     if learn_block:
         extra = f"\n{learn_block}\n"
+    if primary:
+        role = (
+            "You operate this funnel like a successful human operator. "
+            "Use learned chat patterns below — same tone, same script order, "
+            "same reactions to client messages. "
+        )
+    else:
+        role = "You route Pager funnel chats for 1xBet acquisition bots. "
     return (
-        "You route Pager funnel chats for 1xBet acquisition bots. "
+        f"{role}"
         "Reply with JSON only, no markdown.\n"
         f"GEO: {geo} ({meta['label']}). Client language: {meta['language']}.\n"
         f"Funnel order: {meta['funnel']}.\n"
@@ -154,7 +170,8 @@ def _system_prompt(geo: str, learn_block: str = "") -> str:
 async def _learn_examples_block(geo: str) -> str:
     if not llm_router_enabled():
         return ""
-    rows = await db.list_learn_success_examples(geo, limit=6)
+    limit = 12 if llm_router_primary() else 6
+    rows = await db.list_learn_success_examples(geo, limit=limit)
     if not rows:
         return ""
     lines = [
@@ -167,7 +184,12 @@ async def _learn_examples_block(geo: str) -> str:
             note = str(r.get("note") or "").strip()
             dlg = str(r.get("dialog_text") or "").strip()
             folder = str(r.get("folder") or "").strip()
-            if note:
+            path = ""
+            if "path=" in note:
+                path = note.split("path=", 1)[-1].split(";", 1)[0].strip()
+            if path:
+                lines.append(f"- chat folder={folder!r} path={path!r}: {note[:160]}")
+            elif note:
                 lines.append(f"- chat folder={folder!r}: {note[:200]}")
             elif dlg:
                 lines.append(f"- chat folder={folder!r}: {dlg[:200].replace(chr(10), ' | ')}")
@@ -226,7 +248,7 @@ async def route_funnel_message(
     learn_block = await _learn_examples_block(g)
     raw = await chat_completion_json(
         [
-            {"role": "system", "content": _system_prompt(g, learn_block)},
+            {"role": "system", "content": _system_prompt(g, learn_block, primary=llm_router_primary())},
             {
                 "role": "user",
                 "content": (

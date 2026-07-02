@@ -32,7 +32,15 @@ _BALANCE_RE = re.compile(
     re.I,
 )
 
-_LEARN_FOLDER_KEYS = ("completed", "deps_pending", "wait_id", "win")
+_LEARN_FOLDER_KEYS = (
+    "completed",
+    "deps_pending",
+    "incomplete_dep",
+    "wait_id",
+    "win",
+    "in_progress",
+    "registration",
+)
 
 _GEO_LABELS = {
     "zm": "Zambia",
@@ -42,18 +50,70 @@ _GEO_LABELS = {
 }
 
 
-def learn_account_email() -> str:
-    """Pager email used for AI learning (default: harley account)."""
-    return (
-        os.getenv("PAGER_LEARN_EMAIL") or "2harleydewidson@gmail.com"
+def learn_allowed_emails() -> list[str]:
+    """Pager emails allowed for AI learning (comma-separated)."""
+    raw = (
+        os.getenv("PAGER_LEARN_EMAIL")
+        or "2harleydewidson@gmail.com,maria88porta@gmail.com"
     ).strip().lower()
+    if raw in ("", "*", "all"):
+        return []
+    return [e.strip() for e in raw.replace(";", ",").split(",") if e.strip()]
+
+
+def learn_account_email() -> str:
+    """First learn email (legacy / display)."""
+    allowed = learn_allowed_emails()
+    return allowed[0] if allowed else ""
 
 
 def learn_account_allowed(account: dict[str, Any]) -> bool:
-    want = learn_account_email()
-    if want in ("", "*", "all"):
+    allowed = learn_allowed_emails()
+    if not allowed:
         return True
-    return (str(account.get("email") or "").strip().lower()) == want
+    email = (str(account.get("email") or "").strip().lower())
+    return email in allowed
+
+
+def _parse_account_geo_map() -> dict[str, set[str]]:
+    """email:zm|cm pairs from PAGER_LEARN_ACCOUNT_GEO."""
+    raw = (
+        os.getenv("PAGER_LEARN_ACCOUNT_GEO")
+        or "2harleydewidson@gmail.com:zm,maria88porta@gmail.com:cm"
+    ).strip()
+    out: dict[str, set[str]] = {}
+    if not raw or raw in ("*", "all"):
+        return out
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        em, gs = part.split(":", 1)
+        em = em.strip().lower()
+        geos = {g.strip().lower() for g in gs.replace("|", ",").split(",") if g.strip()}
+        if em and geos:
+            out[em] = geos
+    return out
+
+
+def learn_geos_filter(account_email: str = "") -> set[str] | None:
+    """GEO codes to learn. Per-account map wins over PAGER_LEARN_GEO."""
+    em = (account_email or "").strip().lower()
+    per_acc = _parse_account_geo_map()
+    if em and em in per_acc:
+        return per_acc[em]
+    raw = (os.getenv("PAGER_LEARN_GEO") or "").strip().lower()
+    if raw in ("", "*", "all"):
+        return None
+    out = {g.strip() for g in raw.replace("|", ",").split(",") if g.strip()}
+    return out or None
+
+
+def learn_geo_allowed(geo: str, *, account_email: str = "") -> bool:
+    allowed = learn_geos_filter(account_email)
+    if not allowed:
+        return True
+    return (geo or "zm").strip().lower() in allowed
 
 
 def _outgoing_texts(messages: list[dict[str, Any]]) -> list[str]:
@@ -144,30 +204,200 @@ def learn_screenshots_enabled() -> bool:
     )
 
 
+def learn_dialog_vision_enabled() -> bool:
+    """Read client screenshots inside full-dialog learning (balance, game ID)."""
+    return (os.getenv("PAGER_LEARN_DIALOG_VISION") or "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _annotate_operator_text(text: str, geo: str) -> str:
+    """Tag operator line with matched script keys (what was sent after client reply)."""
+    keys = _scripts_delivered_keys([text], geo)
+    body = (text or "").strip()[:380]
+    if not body:
+        return ""
+    if keys:
+        return f"{body} [scripts: {','.join(keys[:6])}]"
+    return body
+
+
+async def _vision_label_for_image(
+    url: str,
+    *,
+    api_key: str,
+    geo: str,
+    cookies: dict[str, str] | None,
+) -> tuple[str, str, str]:
+    """Return (client_line, game_id, balance) for a client screenshot."""
+    analysis = await analyze_success_screenshot(
+        url, api_key, geo=geo, cookies=cookies
+    )
+    gid = str(analysis.get("game_id") or "").strip()
+    if not gid:
+        gid = await extract_id_from_image_url(
+            url, api_key, geo=geo, cookies=cookies
+        )
+    balance = str(analysis.get("balance") or "").strip()
+    kind = str(analysis.get("kind") or "").strip()
+    parts = ["(screenshot"]
+    if balance:
+        parts.append(f"balance={balance}")
+    if gid and looks_like_game_id(gid, geo=geo):
+        parts.append(f"game_id={gid}")
+    if kind and kind != "other":
+        parts.append(f"kind={kind}")
+    parts.append(")")
+    return "CLIENT: " + " ".join(parts), gid, balance
+
+
+async def _build_rich_transcript(
+    messages: list[dict[str, Any]],
+    *,
+    api_key: str,
+    geo: str,
+    cookies: dict[str, str] | None,
+    analyze_images: bool,
+) -> tuple[str, str, str]:
+    """OPERATOR/CLIENT thread with script tags and screenshot vision."""
+    lines: list[str] = []
+    best_gid = ""
+    best_balance = ""
+    for m in sorted(messages, key=lambda x: str(x.get("createdAt") or "")):
+        d = str(m.get("messageDirection") or "").lower()
+        if d in ("incoming", "in", "from_client", "client"):
+            role = "CLIENT"
+        elif d in ("outgoing", "out"):
+            role = "OPERATOR"
+        else:
+            continue
+        text = (m.get("text") or "").strip()
+        if role == "CLIENT" and not text and m.get("attachments"):
+            if analyze_images and api_key:
+                urls = _image_urls(m)
+                if urls:
+                    try:
+                        line, gid, bal = await _vision_label_for_image(
+                            urls[0],
+                            api_key=api_key,
+                            geo=geo,
+                            cookies=cookies,
+                        )
+                        lines.append(line[:500])
+                        if gid and looks_like_game_id(gid, geo=geo):
+                            best_gid = gid
+                        if bal:
+                            best_balance = bal
+                        continue
+                    except Exception:
+                        logger.debug("learn vision failed", exc_info=True)
+            text = "(photo)"
+        if not text:
+            continue
+        if role == "OPERATOR":
+            ann = _annotate_operator_text(text, geo)
+            if ann:
+                lines.append(f"OPERATOR: {ann}")
+        else:
+            lines.append(f"CLIENT: {text[:400]}")
+    return "\n".join(lines)[:8000], best_gid, best_balance
+
+
 async def _summarize_dialog(
-    transcript: str, *, api_key: str, folder: str, client_name: str
+    transcript: str,
+    *,
+    api_key: str,
+    folder: str,
+    client_name: str,
+    folder_flow: str = "",
 ) -> str:
     if not api_key or len(transcript) < 40:
         return ""
     from services.llm_client import chat_completion
 
+    flow_hint = ""
+    if folder_flow:
+        flow_hint = f"\nTypical folder path in Pager: {folder_flow}\n"
     summary = await chat_completion(
         [
             {
                 "role": "user",
                 "content": (
-                    f"Successful 1xBet funnel chat, folder «{folder}», client {client_name}.\n"
-                    "In 2-3 short sentences: how did the operator guide the client, "
-                    "what did the client say/do, what was the outcome?\n"
-                    "Do NOT invent links, promo codes, or amounts.\n\n"
-                    f"{transcript[:3500]}"
+                    f"Successful 1xBet funnel chat, final folder «{folder}», "
+                    f"client {client_name}.\n"
+                    "In 2-4 short sentences: how did the operator guide the client, "
+                    "what did the client say/do (including screenshots), "
+                    "which scripts were sent after each client reply, "
+                    "and what happened after deposit/game-ID screenshots.\n"
+                    "Do NOT invent links, promo codes, or amounts.\n"
+                    f"{flow_hint}\n{transcript[:3500]}"
                 ),
             }
         ],
         api_key=api_key,
-        max_tokens=150,
+        max_tokens=180,
     )
     return (summary or "").strip()[:500]
+
+
+def _folder_flow_hint(
+    *,
+    geo: str,
+    step: int,
+    scripts: list[str],
+    outcome_folder: str,
+) -> str:
+    """Infer Pager folder path from funnel step/scripts (for AI folder training)."""
+    g = (geo or "zm").strip().lower()
+    scr = " ".join(scripts).lower()
+    stages: list[str] = ["Без статусу"]
+    if step >= 1 or "01_intro" in scr:
+        stages.append("В процесі")
+    if g in ("zm", "dj"):
+        if any(x in scr for x in ("04_registration", "05_link", "registration")):
+            stages.append("Реєстрація")
+        if any(x in scr for x in ("06_deposit", "deposit")):
+            stages.append("В процесі реєстрації")
+        if any(x in scr for x in ("07_game_id", "08_tg", "09_tg")):
+            stages.append("Чекаю ID")
+    elif g == "cm":
+        if any(x in scr for x in ("05_registration", "06_link", "registration")):
+            stages.append("Реєстрація")
+        if any(x in scr for x in ("09_deposit", "deposit")):
+            stages.append("В процесі реєстрації")
+        if any(x in scr for x in ("08_game_id", "10_tg", "11_tg")):
+            stages.append("Чекаю ID")
+    elif g == "eg":
+        if "05_link" in scr or "registration" in scr:
+            stages.append("Реєстрація")
+        if "06_deposit" in scr or "deposit" in scr:
+            stages.append("В процесі реєстрації")
+        if "07_game_id" in scr or "08_tg" in scr:
+            stages.append("Чекаю ID")
+    out = (outcome_folder or "").strip()
+    if out and out not in stages:
+        low = out.lower()
+        if "заверш" in low or "completed" in low:
+            stages.append("Завершено")
+        elif "чекаю" in low or "wait" in low:
+            if "Чекаю ID" not in stages:
+                stages.append("Чекаю ID")
+        elif "деп" in low and "не" in low:
+            stages.append("Депи не дошли")
+        elif "не заверш" in low or "незаверш" in low or "incomplete" in low:
+            stages.append("Не завершений деп")
+        else:
+            stages.append(out[:32])
+    # dedupe preserving order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for s in stages:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return " → ".join(uniq)
 
 
 def _is_incoming(msg: dict[str, Any]) -> bool:
@@ -243,11 +473,33 @@ async def format_learn_feedback(
     mode = llm_router_mode()
 
     lines = ["📚 <b>AI обучение — отчёт</b>", ""]
-    learn_email = learn_account_email()
-    if learn_email and learn_email not in ("*", "all"):
-        lines.append(f"Учится только: <code>{learn_email}</code>")
+    allowed = learn_allowed_emails()
+    if allowed:
+        lines.append(
+            "Учится с аккаунтов: "
+            + ", ".join(f"<code>{e}</code>" for e in allowed)
+        )
+        per_acc = _parse_account_geo_map()
+        if per_acc:
+            geo_lines = []
+            for em in allowed:
+                gs = per_acc.get(em) or learn_geos_filter(em) or set()
+                if gs:
+                    labels = ", ".join(
+                        _GEO_LABELS.get(g, g.upper()) for g in sorted(gs)
+                    )
+                    geo_lines.append(f"• {em[:28]}… → {labels}")
+            if geo_lines:
+                lines.append("<b>GEO по аккаунтам:</b>")
+                lines.extend(geo_lines)
     if email:
-        lines.append(f"Pager: <code>{email}</code>")
+        lines.append(f"Этот отчёт — Pager: <code>{email}</code>")
+        acc_geo = learn_geos_filter(email)
+        if acc_geo:
+            labels = ", ".join(
+                f"{_GEO_LABELS.get(g, g.upper())} ({g})" for g in sorted(acc_geo)
+            )
+            lines.append(f"Страны для этого аккаунта: <b>{labels}</b>")
     lines.append(f"Всего примеров в базе: <b>{total}</b>")
     dialog_n = sum(
         1
@@ -265,6 +517,15 @@ async def format_learn_feedback(
     if mode == "learn":
         lines.append(
             "<i>Бот наблюдает и копит примеры — скрипты и ссылки не меняет.</i>"
+        )
+    elif mode == "primary":
+        lines.append(
+            "<i>AI ведёт чат как оператор (по выученным примерам); "
+            "правила — только запасной вариант.</i>"
+        )
+    elif mode == "fallback":
+        lines.append(
+            "<i>AI подключается, когда правила не нашли скрипт.</i>"
         )
     lines.append("")
 
@@ -348,8 +609,9 @@ async def format_learn_feedback(
 
     lines.append("")
     lines.append(
-        "Папки: <b>Завершено</b>, <b>Депи не дошли</b>, <b>Чекаю ID</b> — "
-        "бот читает всю переписку OPERATOR/CLIENT."
+        "Папки: <b>Завершено</b>, <b>Чекаю ID</b>, <b>Депи не дошли</b>, "
+        "<b>Не завершений деп</b>, <b>В процесі</b>, <b>Реєстрація</b> — "
+        "полная переписка OPERATOR/CLIENT + скрины (баланс, game ID)."
     )
     lines.append("Обновить отчёт: /learn_stats")
     return "\n".join(lines)
@@ -375,9 +637,12 @@ async def record_live_learn_success(
     client_name: str = "",
     folder: str = "",
     note: str = "",
+    account_email: str = "",
 ) -> None:
-    """Record success during live processing (all GEOs, learn mode only)."""
+    """Record success during live processing (learn mode only)."""
     if llm_router_mode() != "learn":
+        return
+    if not learn_geo_allowed(geo, account_email=account_email):
         return
     if not message_id or not conv_id:
         return
@@ -413,12 +678,18 @@ async def _scan_conv_for_success(
     conv: dict,
     resolve_geo: Callable[[str], str],
     api_key: str,
+    account_email: str = "",
 ) -> int:
     conv_id = str(conv.get("id") or "")
     if not conv_id:
         return 0
+    dlg_msg_id = f"dialog:{conv_id}"
+    if await db.learn_success_exists(account_id, conv_id, dlg_msg_id):
+        return 0
     ch = str(conv.get("channelId") or "").strip()
     geo = resolve_geo(ch)
+    if not learn_geo_allowed(geo, account_email=account_email):
+        return 0
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     folder = ((conv.get("status") or {}).get("name") or "").strip()
 
@@ -500,6 +771,26 @@ async def _scan_conv_for_success(
     return recorded
 
 
+def _resolve_learn_geo(
+    *,
+    transcript: str,
+    outgoing: list[str],
+    channel_geo: str,
+) -> tuple[str, list[str]]:
+    """GEO for a learned chat — channel setting wins over CM script false-positives."""
+    scripts = _scripts_delivered_keys(outgoing, channel_geo)
+    if scripts:
+        return channel_geo, scripts
+    geo = _geo_from_transcript(transcript, channel_geo)
+    for g in ("cm", "eg", "zm", "dj"):
+        if g == channel_geo:
+            continue
+        scripts = _scripts_delivered_keys(outgoing, g)
+        if scripts:
+            return g, scripts
+    return geo, scripts
+
+
 async def _scan_conv_for_dialog(
     *,
     account_id: int,
@@ -508,20 +799,31 @@ async def _scan_conv_for_dialog(
     funnel_statuses: dict[str, str],
     resolve_geo: Callable[[str], str],
     api_key: str,
+    account_email: str = "",
 ) -> int:
     """Read full chat from success folders — how operator talks to client."""
     conv_id = str(conv.get("id") or "")
     if not conv_id:
         return 0
     dlg_msg_id = f"dialog:{conv_id}"
-    if await db.learn_success_exists(account_id, conv_id, dlg_msg_id):
-        return 0
 
     if not is_learn_folder_conv(conv, funnel_statuses):
         return 0
 
     ch = str(conv.get("channelId") or "").strip()
     channel_geo = resolve_geo(ch)
+    if not learn_geo_allowed(channel_geo, account_email=account_email):
+        return 0
+
+    already = await db.learn_success_exists(account_id, conv_id, dlg_msg_id)
+    if already:
+        stored_geo = await db.get_learn_success_geo(
+            account_id, conv_id, dlg_msg_id
+        )
+        if stored_geo == channel_geo:
+            return 0
+        # Mis-tagged GEO — re-read and fix (e.g. cm→zm).
+
     client_name = ((conv.get("client") or {}).get("name") or "Client").strip()
     folder = ((conv.get("status") or {}).get("name") or "").strip()
 
@@ -531,7 +833,23 @@ async def _scan_conv_for_dialog(
         logger.warning("learn dialog messages failed conv=%s", conv_id[:8])
         return 0
 
-    transcript = _build_transcript(messages)
+    outgoing = _outgoing_texts(messages)
+    geo_probe = channel_geo
+    if outgoing:
+        geo_probe, _ = _resolve_learn_geo(
+            transcript=_build_transcript(messages),
+            outgoing=outgoing,
+            channel_geo=channel_geo,
+        )
+
+    cookies = getattr(client, "cookies", None)
+    transcript, vision_gid, vision_bal = await _build_rich_transcript(
+        messages,
+        api_key=api_key,
+        geo=geo_probe,
+        cookies=cookies,
+        analyze_images=learn_dialog_vision_enabled(),
+    )
     if not transcript:
         logger.debug("learn dialog empty transcript conv=%s folder=%r", conv_id[:8], folder[:20])
         return 0
@@ -541,33 +859,65 @@ async def _scan_conv_for_dialog(
     if client_lines < 1 or op_lines < 1:
         return 0
 
-    geo = _geo_from_transcript(transcript, channel_geo)
-    outgoing = _outgoing_texts(messages)
-    scripts: list[str] = []
-    for g in ("cm", "eg", "zm", "dj"):
-        scripts = _scripts_delivered_keys(outgoing, g)
-        if scripts:
-            geo = g
-            break
-    step = infer_step_from_thread(messages, geo=geo)
-    summary = await _summarize_dialog(
-        transcript, api_key=api_key, folder=folder, client_name=client_name
+    geo, scripts = _resolve_learn_geo(
+        transcript=transcript,
+        outgoing=outgoing,
+        channel_geo=channel_geo,
     )
-    note = summary or f"folder={folder[:32]}; step={step}; scripts={','.join(scripts[:8])}"
+    if not learn_geo_allowed(geo, account_email=account_email):
+        return 0
+    step = infer_step_from_thread(messages, geo=geo)
+    folder_flow = _folder_flow_hint(
+        geo=geo, step=step, scripts=scripts, outcome_folder=folder
+    )
+    summary = await _summarize_dialog(
+        transcript,
+        api_key=api_key,
+        folder=folder,
+        client_name=client_name,
+        folder_flow=folder_flow,
+    )
+    base = f"folder={folder[:32]}; step={step}; scripts={','.join(scripts[:8])}"
+    if folder_flow:
+        base = f"{base}; path={folder_flow}"
+    if vision_bal:
+        base = f"{base}; balance={vision_bal}"
+    if vision_gid:
+        base = f"{base}; gid={vision_gid}"
+    note = f"{summary}; {base}" if summary else base
+
+    bal_note = f"msgs={client_lines + op_lines}"
+    if vision_bal:
+        bal_note = f"{vision_bal}; {bal_note}"
+
+    old_geo = ""
+    if already:
+        old_geo = await db.get_learn_success_geo(account_id, conv_id, dlg_msg_id)
 
     await db.save_learn_success(
         account_id,
         conv_id,
         message_id=dlg_msg_id,
         geo=geo,
-        game_id="",
-        balance_text=f"msgs={client_lines + op_lines}",
+        game_id=vision_gid,
+        balance_text=bal_note[:64],
         screenshot_kind="chat_dialog",
         client_name=client_name,
         folder=folder,
         note=note,
         dialog_text=transcript,
     )
+    if already:
+        if old_geo and old_geo != geo:
+            logger.info(
+                "LLM learn regeo conv=%s %s->%s client=%r",
+                conv_id[:8],
+                old_geo,
+                geo,
+                client_name[:24],
+            )
+        return 0
+
     logger.info(
         "LLM learn dialog conv=%s geo=%s client=%r folder=%r "
         "turns=%s+%s scripts=%s",
@@ -580,6 +930,40 @@ async def _scan_conv_for_dialog(
         scripts[:5],
     )
     return 1
+
+
+def _fair_sample_learn(
+    candidates: list[dict],
+    *,
+    max_total: int,
+    resolve_geo: Callable[[str], str],
+    geo_counts: dict[str, int] | None = None,
+) -> list[dict]:
+    """Prefer GEOs with fewer examples (ZM) and spread across channels."""
+    counts = geo_counts or {}
+    by_ch: dict[str, list[dict]] = defaultdict(list)
+    for c in candidates:
+        ch = str(c.get("channelId") or "").strip() or "_"
+        by_ch[ch].append(c)
+    for ch in by_ch:
+        by_ch[ch].sort(
+            key=lambda c: counts.get(resolve_geo(str(c.get("channelId") or "")), 0)
+        )
+    if not by_ch:
+        return []
+    per_ch = max(1, max_total // len(by_ch))
+    picked: list[dict] = []
+    seen: set[str] = set()
+    for ch in sorted(by_ch.keys()):
+        for c in by_ch[ch][:per_ch]:
+            cid = str(c.get("id") or "")
+            if cid and cid not in seen:
+                seen.add(cid)
+                picked.append(c)
+    picked.sort(
+        key=lambda c: counts.get(resolve_geo(str(c.get("channelId") or "")), 0)
+    )
+    return picked[: max(1, max_total)]
 
 
 def _fair_sample_by_channel(
@@ -608,6 +992,7 @@ async def learn_scan_completed_chats(
     funnel_statuses: dict[str, str],
     resolve_geo: Callable[[str], str],
     max_per_cycle: int = 40,
+    account_email: str = "",
 ) -> int:
     """Scan success folders — learn from full chat dialogs."""
     if llm_router_mode() != "learn":
@@ -615,6 +1000,19 @@ async def learn_scan_completed_chats(
     api_key = resolve_llm_api_key()
     if not api_key:
         return 0
+
+    geo_filter = learn_geos_filter(account_email)
+    logger.info(
+        "LLM learn scan start account=%s email=%r geos=%s channels=%s",
+        account_id,
+        (account_email or "")[:32],
+        sorted(geo_filter) if geo_filter else "all",
+        len(scan_channels),
+    )
+    if geo_filter:
+        scan_channels = {
+            ch for ch in scan_channels if resolve_geo(ch) in geo_filter
+        }
 
     seen: dict[str, dict] = {}
     for c in convs:
@@ -648,7 +1046,19 @@ async def learn_scan_completed_chats(
                         seen[cid] = c
 
     candidates = list(seen.values())
-    sample = _fair_sample_by_channel(candidates, max_total=max_per_cycle)
+    if geo_filter:
+        candidates = [
+            c
+            for c in candidates
+            if resolve_geo(str(c.get("channelId") or "")) in geo_filter
+        ]
+    by_geo = await db.count_learn_successes_by_geo(account_id)
+    sample = _fair_sample_learn(
+        candidates,
+        max_total=max_per_cycle,
+        resolve_geo=resolve_geo,
+        geo_counts=by_geo,
+    )
 
     recorded = 0
     for conv in sample:
@@ -659,6 +1069,7 @@ async def learn_scan_completed_chats(
             funnel_statuses=funnel_statuses,
             resolve_geo=resolve_geo,
             api_key=api_key,
+            account_email=account_email,
         )
         if learn_screenshots_enabled():
             recorded += await _scan_conv_for_success(
@@ -667,6 +1078,7 @@ async def learn_scan_completed_chats(
                 conv=conv,
                 resolve_geo=resolve_geo,
                 api_key=api_key,
+                account_email=account_email,
             )
 
     if candidates:

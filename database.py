@@ -857,6 +857,21 @@ async def save_conversation_state(
         await db.commit()
 
 
+async def get_learn_success_geo(
+    account_id: int, conversation_id: str, message_id: str
+) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            SELECT geo FROM funnel_learn_success
+            WHERE account_id = ? AND conversation_id = ? AND message_id = ?
+            """,
+            (account_id, conversation_id, message_id),
+        )
+        row = await cur.fetchone()
+        return str(row[0] if row else "").strip().lower()
+
+
 async def learn_success_exists(
     account_id: int, conversation_id: str, message_id: str
 ) -> bool:

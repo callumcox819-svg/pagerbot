@@ -62,6 +62,7 @@ from services.llm_client import (
     llm_router_enabled,
     llm_router_may_send,
     llm_router_mode,
+    llm_router_primary,
     llm_router_strict,
     resolve_llm_api_key,
 )
@@ -2324,6 +2325,7 @@ async def _handle_conversation(
                 screenshot_kind="game_id",
                 client_name=client_name,
                 folder=folder,
+                account_email=str(account.get("email") or ""),
             )
         return True
 
@@ -2851,7 +2853,61 @@ async def _handle_conversation(
         if _valid_outgoing_reply(m)
     ]
     keys: list[str] = []
-    if needs_reply and not deposit_signal:
+    if (
+        needs_reply
+        and not deposit_signal
+        and llm_router_primary()
+        and llm_router_enabled()
+    ):
+        llm_primary = await route_funnel_message(
+            geo=geo,
+            text=text or ("(photo)" if has_real_image else ""),
+            effective_step=effective_step,
+            rule_intent=intent.value,
+            outgoing_texts=op_outgoing,
+            folder=folder,
+            has_image=has_real_image,
+            reg_link_sent=reg_link_sent_in_history(op_outgoing, geo=geo),
+            deposit_script_sent=script_sent_in_history(
+                op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
+            ),
+        )
+        if llm_primary and llm_primary.confidence >= 0.55 and llm_router_may_send():
+            if llm_router_strict():
+                if (
+                    llm_primary.action not in ("pause", "escalate")
+                    and not llm_primary.escalate
+                    and llm_primary.action != "wait"
+                    and llm_primary.script_keys
+                ):
+                    keys = llm_primary.script_keys
+                    logger.info(
+                        "conv=%s LLM primary keys=%s conf=%.2f",
+                        conv_id[:8],
+                        keys,
+                        llm_primary.confidence,
+                    )
+            elif llm_primary.script_keys and llm_primary.action not in (
+                "pause",
+                "escalate",
+                "wait",
+            ):
+                keys = llm_primary.script_keys
+                logger.info(
+                    "conv=%s LLM primary keys=%s conf=%.2f",
+                    conv_id[:8],
+                    keys,
+                    llm_primary.confidence,
+                )
+        elif llm_primary:
+            logger.info(
+                "conv=%s LLM primary — rules backup conf=%.2f action=%s",
+                conv_id[:8],
+                llm_primary.confidence,
+                llm_primary.action,
+            )
+
+    if needs_reply and not deposit_signal and not keys:
         keys = resolve_funnel_scripts(
             effective_step,
             text,
@@ -3050,6 +3106,7 @@ async def _handle_conversation(
         and not deposit_signal
         and not keys
         and llm_router_enabled()
+        and not llm_router_primary()
     ):
         llm = await route_funnel_message(
             geo=geo,
@@ -3591,6 +3648,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     max_per_cycle=int(
                         os.getenv("PAGER_LEARN_SCAN_PER_CYCLE", "40") or "40"
                     ),
+                    account_email=str(account.get("email") or ""),
                 )
                 if recorded > 0 and learn_notify_enabled():
                     esc = _escalation_chat(account)

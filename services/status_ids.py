@@ -17,6 +17,15 @@ _STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
     "wait_id": ("чекаю id", "чекаю ід", "wait id", "wait_id"),
     "registration": ("рега", "реєстрація", "регистрация", "registration"),
     "deps_pending": ("депи не", "депы не", "deps pending", "deps"),
+    "incomplete_dep": (
+        "не завершен",
+        "не завершений",
+        "не завершені",
+        "незаверш",
+        "unfinished",
+        "incomplete dep",
+        "incomplete",
+    ),
     "completed": ("завершено", "completed", "finish", "terminé", "termine"),
     "win": (" win", "виграш", "winner", "gagné", "gagne"),
 }
@@ -211,13 +220,46 @@ def is_deps_pending_conv(
     )
 
 
+def is_incomplete_dep_conv(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
+    """«Не завершений деп» / незавершённый депозит — учим переписку и скрины."""
+    name = _status_name_lower(conv)
+    fs = funnel_statuses or ZM_STATUSES
+    status_id = str(conv.get("statusId") or "").strip()
+    inc_sid = str(fs.get("incomplete_dep") or "").strip()
+    if inc_sid and status_id == inc_sid:
+        return True
+    return any(h in name for h in _STATUS_NAME_HINTS.get("incomplete_dep", ()))
+
+
+def is_learn_mid_funnel_conv(
+    conv: dict, funnel_statuses: dict[str, str] | None = None
+) -> bool:
+    """«В процесі» / «Реєстрація» — mid-funnel dialogs worth learning."""
+    fs = funnel_statuses or ZM_STATUSES
+    status_id = str(conv.get("statusId") or "").strip()
+    name = _status_name_lower(conv)
+    for key in ("in_progress", "registration"):
+        sid = str(fs.get(key) or "").strip()
+        if sid and status_id == sid:
+            return True
+        if any(h in name for h in _STATUS_NAME_HINTS.get(key, ())):
+            return True
+    return False
+
+
 def is_learn_folder_conv(
     conv: dict, funnel_statuses: dict[str, str] | None = None
 ) -> bool:
-    """Folders scanned for AI learning (Завершено, Депи не дошли, Чекаю ID, WIN)."""
+    """Folders scanned for AI learning."""
     if is_learn_success_conv(conv, funnel_statuses):
         return True
-    return is_deps_pending_conv(conv, funnel_statuses)
+    if is_deps_pending_conv(conv, funnel_statuses):
+        return True
+    if is_incomplete_dep_conv(conv, funnel_statuses):
+        return True
+    return is_learn_mid_funnel_conv(conv, funnel_statuses)
 
 
 def should_skip_processing(

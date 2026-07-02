@@ -40,24 +40,31 @@ def llm_model() -> str:
 
 
 def llm_router_mode() -> str:
-    """off | learn (observe only) | fallback (scripts when rules fail)."""
+    """off | learn | fallback (rules first) | primary (AI first, rules backup)."""
     raw = (os.getenv("PAGER_LLM_ROUTER") or "").strip().lower()
     if raw in ("0", "false", "no", "off", ""):
         return "off"
     if raw in ("learn", "observe", "watch"):
         return "learn"
+    if raw in ("primary", "drive", "auto", "work"):
+        return "primary"
     if raw in ("1", "true", "yes", "fallback", "all"):
         return "fallback"
     return "off"
 
 
 def llm_router_enabled() -> bool:
-    return llm_router_mode() in ("learn", "fallback")
+    return llm_router_mode() in ("learn", "fallback", "primary")
 
 
 def llm_router_may_send() -> bool:
     """False in learn mode — LLM must not trigger outbound messages."""
-    return llm_router_mode() == "fallback"
+    return llm_router_mode() in ("fallback", "primary")
+
+
+def llm_router_primary() -> bool:
+    """AI decides first (learned chats), rules only when LLM has no answer."""
+    return llm_router_mode() == "primary"
 
 
 def llm_router_strict() -> bool:
