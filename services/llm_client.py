@@ -76,6 +76,26 @@ def llm_router_strict() -> bool:
     )
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def llm_primary_confidence_min() -> float:
+    """Min confidence to accept LLM script_keys in primary mode."""
+    return _env_float("PAGER_LLM_PRIMARY_CONF", 0.45)
+
+
+def llm_rescue_confidence_min() -> float:
+    """Lower bar for rescue pass when rules found no script."""
+    return _env_float("PAGER_LLM_RESCUE_CONF", 0.35)
+
+
 def _request_headers(api_key: str) -> dict[str, str]:
     headers = {
         "Authorization": f"Bearer {api_key}",

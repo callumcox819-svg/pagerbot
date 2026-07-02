@@ -59,6 +59,8 @@ from services.ai_intent import (
 )
 from services.encryption import Secrets
 from services.llm_client import (
+    llm_primary_confidence_min,
+    llm_rescue_confidence_min,
     llm_router_enabled,
     llm_router_may_send,
     llm_router_mode,
@@ -71,9 +73,10 @@ from services.llm_learn import (
     learn_account_allowed,
     learn_notify_enabled,
     learn_scan_completed_chats,
+    maybe_bulk_regeo_learn_for_account,
     record_live_learn_success,
 )
-from services.llm_router import route_funnel_message
+from services.llm_router import LlmRouteDecision, route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
     extract_id_from_image_url,
@@ -139,6 +142,122 @@ _worker_task: asyncio.Task | None = None
 # In-process Clerk cookies — DB copy often loses org context between ticks.
 _session_cache: dict[int, tuple[float, dict[str, str]]] = {}
 _SESSION_CACHE_TTL = 3600.0
+
+
+def _primary_last_resort_keys(
+    geo: str,
+    intent: Intent,
+    effective_step: int,
+) -> list[str]:
+    """Extras when LLM rescue still has no keys — avoid silence in primary mode."""
+    if intent not in (Intent.QUESTION, Intent.UNKNOWN):
+        return []
+    g = (geo or "zm").strip().lower()
+    if g == "cm":
+        if effective_step >= 4:
+            return ["extras/waiting"]
+        return ["extras/chat_only"]
+    if g in ("zm", "dj"):
+        return ["extras/chat_only"]
+    return []
+
+
+def _apply_llm_route_keys(
+    llm: LlmRouteDecision | None,
+    *,
+    geo: str,
+    conv_id: str,
+    label: str,
+    min_confidence: float,
+) -> list[str]:
+    if not llm or not llm_router_may_send():
+        return []
+    if llm.confidence < min_confidence:
+        return []
+    if llm_router_strict():
+        if llm.action in ("pause", "escalate") or llm.escalate:
+            logger.info(
+                "conv=%s LLM strict — ignore %s (%s)",
+                conv_id[:8],
+                llm.action,
+                label,
+            )
+            return []
+        if llm.action == "wait":
+            return []
+        if llm.action == "link_help":
+            keys = link_help_script_keys(geo)
+            if keys:
+                logger.info(
+                    "conv=%s LLM %s link_help keys=%s conf=%.2f",
+                    conv_id[:8],
+                    label,
+                    keys,
+                    llm.confidence,
+                )
+            return keys
+        if llm.script_keys:
+            logger.info(
+                "conv=%s LLM %s keys=%s conf=%.2f",
+                conv_id[:8],
+                label,
+                llm.script_keys,
+                llm.confidence,
+            )
+            return llm.script_keys
+        return []
+    if llm.action in ("pause", "escalate") or llm.escalate or llm.action == "wait":
+        return []
+    if llm.action == "link_help":
+        return link_help_script_keys(geo)
+    return list(llm.script_keys or [])
+
+
+async def _llm_rescue_route_keys(
+    *,
+    geo: str,
+    text: str,
+    effective_step: int,
+    intent: Intent,
+    op_outgoing: list[str],
+    folder: str,
+    has_real_image: bool,
+    conv_id: str,
+) -> list[str]:
+    if not llm_router_enabled() or not llm_router_primary():
+        return []
+    llm = await route_funnel_message(
+        geo=geo,
+        text=text or ("(photo)" if has_real_image else ""),
+        effective_step=effective_step,
+        rule_intent=intent.value,
+        outgoing_texts=op_outgoing,
+        folder=folder,
+        has_image=has_real_image,
+        reg_link_sent=reg_link_sent_in_history(op_outgoing, geo=geo),
+        deposit_script_sent=script_sent_in_history(
+            op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
+        ),
+        rescue=True,
+    )
+    keys = _apply_llm_route_keys(
+        llm,
+        geo=geo,
+        conv_id=conv_id,
+        label="rescue",
+        min_confidence=llm_rescue_confidence_min(),
+    )
+    if keys:
+        return keys
+    fallback = _primary_last_resort_keys(geo, intent, effective_step)
+    if fallback:
+        logger.info(
+            "conv=%s LLM rescue fallback keys=%s intent=%s",
+            conv_id[:8],
+            fallback,
+            intent.value,
+        )
+    return fallback
 
 
 def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
@@ -1519,10 +1638,11 @@ async def _handle_conversation(
         message_reaction=message_reaction,
     )
 
-    if needs_reply and intent == Intent.DECLINED:
+    if needs_reply and intent in (Intent.DECLINED, Intent.COMPLAINT):
         logger.info(
-            "conv=%s declined — pause, no scripts text=%r",
+            "conv=%s %s — drop chat, pause (no scripts) text=%r",
             conv_id[:8],
+            intent.value,
             (text or "")[:40],
         )
         await db.save_conversation_state(
@@ -2872,34 +2992,15 @@ async def _handle_conversation(
                 op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
             ),
         )
-        if llm_primary and llm_primary.confidence >= 0.55 and llm_router_may_send():
-            if llm_router_strict():
-                if (
-                    llm_primary.action not in ("pause", "escalate")
-                    and not llm_primary.escalate
-                    and llm_primary.action != "wait"
-                    and llm_primary.script_keys
-                ):
-                    keys = llm_primary.script_keys
-                    logger.info(
-                        "conv=%s LLM primary keys=%s conf=%.2f",
-                        conv_id[:8],
-                        keys,
-                        llm_primary.confidence,
-                    )
-            elif llm_primary.script_keys and llm_primary.action not in (
-                "pause",
-                "escalate",
-                "wait",
-            ):
-                keys = llm_primary.script_keys
-                logger.info(
-                    "conv=%s LLM primary keys=%s conf=%.2f",
-                    conv_id[:8],
-                    keys,
-                    llm_primary.confidence,
-                )
-        elif llm_primary:
+        if llm_primary:
+            keys = _apply_llm_route_keys(
+                llm_primary,
+                geo=geo,
+                conv_id=conv_id,
+                label="primary",
+                min_confidence=llm_primary_confidence_min(),
+            )
+        if not keys and llm_primary:
             logger.info(
                 "conv=%s LLM primary — rules backup conf=%.2f action=%s",
                 conv_id[:8],
@@ -3191,8 +3292,22 @@ async def _handle_conversation(
                     )
 
     if needs_reply and not deposit_signal and not keys:
+        if llm_router_primary() and llm_router_enabled():
+            keys = await _llm_rescue_route_keys(
+                geo=geo,
+                text=text or "",
+                effective_step=effective_step,
+                intent=intent,
+                op_outgoing=op_outgoing,
+                folder=folder,
+                has_real_image=has_real_image,
+                conv_id=conv_id,
+            )
+
+    if needs_reply and not deposit_signal and not keys:
         if (
-            intent in (Intent.QUESTION, Intent.UNKNOWN)
+            not llm_router_primary()
+            and intent in (Intent.QUESTION, Intent.UNKNOWN)
             and not funnel_active
             and needs_human_for_text(
                 intent, step, text, no_status=no_status, geo=geo
@@ -3486,6 +3601,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             and bool(resolve_llm_api_key())
             and learn_account_allowed(account)
         )
+        if learn_account_allowed(account):
+            await maybe_bulk_regeo_learn_for_account(
+                account_id,
+                str(account.get("email") or ""),
+            )
 
         if enabled is None and not all_channel_ids:
             logger.warning(

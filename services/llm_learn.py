@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from typing import Any, Callable
 
@@ -114,6 +115,46 @@ def learn_geo_allowed(geo: str, *, account_email: str = "") -> bool:
     if not allowed:
         return True
     return (geo or "zm").strip().lower() in allowed
+
+
+_regeo_cooldown: dict[int, float] = {}
+_REGEO_COOLDOWN_SEC = 3600.0
+
+
+async def maybe_bulk_regeo_learn_for_account(
+    account_id: int,
+    account_email: str = "",
+) -> int:
+    """One-time bulk fix for mis-tagged learn rows (Harley cm→zm)."""
+    now = time.time()
+    if now - _regeo_cooldown.get(account_id, 0) < _REGEO_COOLDOWN_SEC:
+        return 0
+    geo_filter = learn_geos_filter(account_email)
+    if not geo_filter or len(geo_filter) != 1:
+        return 0
+    correct = next(iter(geo_filter))
+    total = 0
+    for wrong in ("cm", "zm", "eg", "dj"):
+        if wrong == correct:
+            continue
+        n = await db.bulk_regeo_learn_success(
+            account_id,
+            wrong_geo=wrong,
+            correct_geo=correct,
+        )
+        if n:
+            logger.info(
+                "LLM learn bulk regeo account=%s email=%r %s->%s rows=%d",
+                account_id,
+                (account_email or "")[:28],
+                wrong,
+                correct,
+                n,
+            )
+        total += n
+    if total:
+        _regeo_cooldown[account_id] = now
+    return total
 
 
 def _outgoing_texts(messages: list[dict[str, Any]]) -> list[str]:

@@ -125,7 +125,13 @@ def _filter_valid_keys(geo: str, keys: list[str]) -> list[str]:
     return out
 
 
-def _system_prompt(geo: str, learn_block: str = "", *, primary: bool = False) -> str:
+def _system_prompt(
+    geo: str,
+    learn_block: str = "",
+    *,
+    primary: bool = False,
+    rescue: bool = False,
+) -> str:
     meta = GEO_META.get(geo, GEO_META["zm"])
     keys = ", ".join(_script_keys_for_geo(geo)[:40])
     extra = ""
@@ -139,6 +145,19 @@ def _system_prompt(geo: str, learn_block: str = "", *, primary: bool = False) ->
         )
     else:
         role = "You route Pager funnel chats for 1xBet acquisition bots. "
+    question_rule = (
+        "- Client questions (even late funnel): pick motivating script_keys "
+        "from funnel or extras/* — keep them moving forward. Never escalate.\n"
+        if primary
+        else "- If unclear human question → action escalate.\n"
+    )
+    rescue_rule = ""
+    if primary and rescue:
+        rescue_rule = (
+            "- RESCUE: rule engine found no script. You MUST respond — "
+            'action "send_scripts" with at least one script_key from extras/* '
+            "or the next appropriate funnel step. Use learned chats for tone.\n"
+        )
     return (
         f"{role}"
         "Reply with JSON only, no markdown.\n"
@@ -157,7 +176,8 @@ def _system_prompt(geo: str, learn_block: str = "", *, primary: bool = False) ->
         "- Deposit script only after registration link was delivered AND "
         "client registered or sent payment proof.\n"
         "- If client declines / insults / scam accusation → action pause.\n"
-        "- If unclear human question → action escalate.\n"
+        f"{question_rule}"
+        f"{rescue_rule}"
         "- game_id only in wait_id stage after deposit script.\n"
         "JSON schema:\n"
         '{"action":"send_scripts|link_help|wait|escalate|pause",'
@@ -222,6 +242,7 @@ async def route_funnel_message(
     has_image: bool,
     reg_link_sent: bool,
     deposit_script_sent: bool,
+    rescue: bool = False,
 ) -> LlmRouteDecision | None:
     """Pick next funnel action for any GEO using one shared LLM key."""
     api_key = resolve_llm_api_key()
@@ -244,11 +265,23 @@ async def route_funnel_message(
         "deposit_key": deposit_script_key(g),
         "game_id_key": game_id_script_key(g),
     }
+    if rescue:
+        user_payload["situation"] = (
+            "no_script_rescue: rules found nothing — pick best motivating script_keys"
+        )
 
     learn_block = await _learn_examples_block(g)
     raw = await chat_completion_json(
         [
-            {"role": "system", "content": _system_prompt(g, learn_block, primary=llm_router_primary())},
+            {
+                "role": "system",
+                "content": _system_prompt(
+                    g,
+                    learn_block,
+                    primary=llm_router_primary(),
+                    rescue=rescue,
+                ),
+            },
             {
                 "role": "user",
                 "content": (

@@ -936,6 +936,30 @@ async def save_learn_success(
         await db.commit()
 
 
+async def bulk_regeo_learn_success(
+    account_id: int,
+    *,
+    wrong_geo: str,
+    correct_geo: str,
+) -> int:
+    """Fix mis-tagged learn rows (e.g. Harley cm→zm)."""
+    wrong = (wrong_geo or "").strip().lower()
+    correct = (correct_geo or "").strip().lower()
+    if not wrong or not correct or wrong == correct:
+        return 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            UPDATE funnel_learn_success
+            SET geo = ?, learned_at = datetime('now')
+            WHERE account_id = ? AND LOWER(geo) = ?
+            """,
+            (correct, account_id, wrong),
+        )
+        await db.commit()
+        return int(cur.rowcount or 0)
+
+
 async def count_learn_successes(account_id: int | None = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         if account_id is not None:
