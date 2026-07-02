@@ -55,6 +55,8 @@ from services.ai_intent import (
     needs_human_for_text,
     wants_details_after_intro,
     wants_registration_followup,
+    is_registration_pending,
+    is_requesting_registration_link,
     wants_registration_link,
 )
 from services.encryption import Secrets
@@ -107,6 +109,7 @@ from services.script_engine import (
     funnel_step_from_script_gaps,
     reg_link_sent_in_history,
     reg_link_script_key,
+    registration_link_keys_for_geo,
     reg_bundle_pending_link,
     reg_script_keys_set,
     deposit_script_key,
@@ -1751,15 +1754,10 @@ async def _handle_conversation(
 
     if (
         needs_reply
-        and wants_registration_link(text)
-        and not reg_link_sent_in_history(op_texts_early, geo=geo)
-        and geo in ("cm", "zm", "dj")
+        and is_requesting_registration_link(text)
+        and geo in ("cm", "zm", "dj", "eg")
     ):
-        reg_keys = (
-            ["05_registration", "06_link", "07_chrome"]
-            if geo == "cm"
-            else ["04_registration", "05_link"]
-        )
+        reg_keys = registration_link_keys_for_geo(geo, op_texts_early)
         send_buf.queue_script_send(
             conv_id,
             reg_keys,

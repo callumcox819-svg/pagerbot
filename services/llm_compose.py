@@ -27,6 +27,7 @@ from services.llm_router import GEO_META, _script_keys_for_geo, _scripts_deliver
 from services.script_engine import (
     deposit_script_key,
     link_help_script_keys,
+    registration_link_keys_for_geo,
     resolve_funnel_scripts,
 )
 
@@ -82,8 +83,8 @@ def _system_prompt(geo: str, learn_block: str, locked_block: str) -> str:
         "- For promo codes, registration links, deposit amounts: use {{LOCK_N}} placeholders ONLY.\n"
         "- NEVER invent or alter URLs, promo codes, or money amounts.\n"
         "- If client declines / insults / scam accusation → action pause, messages=[].\n"
-        "- If client needs registration link help (broken site screenshot) → reference_script_keys "
-        'include link_help keys and explain calmly.\n'
+        "- If client asks for link/url/registration (even one word «Link») → "
+        "reference_script_keys must include registration+link, NEVER game_id.\n"
         "- Usually 1 message; max 2 short messages in the array.\n"
         "- Do not repeat what the operator already sent (check scripts_delivered).\n"
         'JSON: {"action":"send|pause|wait","messages":["..."],"reference_script_keys":["..."],'
@@ -100,6 +101,10 @@ def _hint_script_keys(
     text: str,
     outgoing_texts: list[str],
 ) -> list[str]:
+    from services.ai_intent import is_requesting_registration_link
+
+    if is_requesting_registration_link(text):
+        return registration_link_keys_for_geo(geo, outgoing_texts)
     keys = resolve_funnel_scripts(
         effective_step,
         text,

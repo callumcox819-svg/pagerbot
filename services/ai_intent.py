@@ -57,6 +57,16 @@ _FR_LINK_ASK = re.compile(
     r"\benvoy\w*.*\blien\b|\blien\b.*\benvoy\w*\b",
     re.I,
 )
+_EN_LINK_ASK = re.compile(
+    r"(?i)"
+    r"(?:^|\b)(?:the\s+)?link(?:\s+please)?(?:\s*[.!?]*)?\s*$|"
+    r"\b(?:send|give|share|want|need|get|where|gimme).{0,28}\b(?:link|url)\b|"
+    r"\b(?:link|url)\b.{0,28}\b(?:please|pls|send|registration|register)\b|"
+    r"\bregistration\s+link\b|"
+    r"\bregister\s+link\b|"
+    r"\blink\s+for\s+registration\b|"
+    r"\bneed\s+(?:the\s+)?link\b"
+)
 _FR_WHAT_REQUIRED = re.compile(
     r"\b(que faire|quoi faire|qu'est-ce qu'il faut|quest ce qu il faut|"
     r"c'est quoi|cest quoi|il me faut quoi)\b",
@@ -684,11 +694,19 @@ def xbet_site_confirm_reply(*, geo: str = "zm") -> str:
         return fallbacks.get(g, fallbacks["zm"])
 
 
-def wants_registration_link(text: str) -> bool:
-    """Client asks where/how to register — send reg+link, not intro again."""
+def is_requesting_registration_link(text: str) -> bool:
+    """Client wants registration URL — «Link», «send link», «lien», Arabic, etc."""
     t = (text or "").strip()
     if not t:
         return False
+    if re.fullmatch(
+        r"(?:the\s+)?(?:link|url|lien|le\s+lien)(?:\s+please)?\s*[.!?]*",
+        t,
+        re.I,
+    ):
+        return True
+    if _EN_LINK_ASK.search(t):
+        return True
     if re.search(
         r"(?i)\b(lequel|laquelle|quel|quelle|where|which)\b.{0,24}\blien\b",
         t,
@@ -703,7 +721,16 @@ def wants_registration_link(text: str) -> bool:
         return True
     if _FR_REG.search(t) and "lien" in t.lower():
         return True
-    return bool(_AR_REG_LINK.search(t)) or wants_registration_followup(t)
+    if bool(_AR_REG_LINK.search(t)):
+        return True
+    if wants_registration_followup(t):
+        return True
+    return False
+
+
+def wants_registration_link(text: str) -> bool:
+    """Client asks where/how to register — send reg+link, not intro again."""
+    return is_requesting_registration_link(text)
 
 
 def is_deferral_reply(text: str) -> bool:
@@ -1319,6 +1346,8 @@ def classify(
     message_reaction: str | None = None,
 ) -> Intent:
     t = (text or "").strip()
+    if is_requesting_registration_link(t):
+        return Intent.READY
     if is_funnel_earning_interest(t):
         return Intent.INTERESTED
     if is_phone_number_request(t):

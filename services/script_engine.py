@@ -493,6 +493,24 @@ def reg_link_script_key(geo: str = "zm") -> str:
     return "06_link" if geo == "cm" else "05_link"
 
 
+def registration_link_keys_for_geo(
+    geo: str,
+    outgoing_texts: list[str] | None = None,
+) -> list[str]:
+    """Scripts when client asks for registration link (any funnel step)."""
+    g = (geo or "zm").strip().lower()
+    out = outgoing_texts or []
+    if reg_link_sent_in_history(out, geo=g):
+        if g == "cm":
+            return ["06_link"]
+        return [reg_link_script_key(g)]
+    if g == "cm":
+        return ["05_registration", "06_link", "07_chrome"]
+    if g == "eg":
+        return ["04_registration", "05_link"]
+    return ["04_registration", "05_link"]
+
+
 def reg_registration_script_key(geo: str = "zm") -> str:
     return "05_registration" if geo == "cm" else "04_registration"
 
@@ -616,6 +634,11 @@ def resolve_funnel_scripts(
 
     if is_deferral_reply(t) or is_refusal_reply(t) or intent == "declined":
         return []
+
+    from services.ai_intent import is_requesting_registration_link
+
+    if is_requesting_registration_link(t):
+        return registration_link_keys_for_geo(geo, out)
 
     if intent == "game_id_text":
         return []
