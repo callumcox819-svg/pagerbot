@@ -76,6 +76,31 @@ def learn_account_allowed(account: dict[str, Any]) -> bool:
     return email in allowed
 
 
+def learn_only_emails() -> set[str]:
+    """Accounts that scan/learn only — never auto-reply (Harley)."""
+    raw = (
+        os.getenv("PAGER_LEARN_ONLY_EMAIL") or "2harleydewidson@gmail.com"
+    ).strip()
+    if not raw or raw.lower() in ("", "none", "off", "false", "0"):
+        return set()
+    return {
+        e.strip().lower()
+        for e in raw.replace(";", ",").split(",")
+        if e.strip()
+    }
+
+
+def learn_only_account(account: dict[str, Any]) -> bool:
+    emails = learn_only_emails()
+    if not emails:
+        return False
+    return (str(account.get("email") or "").strip().lower()) in emails
+
+
+def auto_reply_account_allowed(account: dict[str, Any]) -> bool:
+    return not learn_only_account(account)
+
+
 def _parse_account_geo_map() -> dict[str, set[str]]:
     """email:zm|cm pairs from PAGER_LEARN_ACCOUNT_GEO."""
     raw = (

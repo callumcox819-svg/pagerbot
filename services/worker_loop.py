@@ -69,9 +69,11 @@ from services.llm_client import (
     resolve_llm_api_key,
 )
 from services.llm_learn import (
+    auto_reply_account_allowed,
     format_learn_feedback,
     learn_account_allowed,
     learn_notify_enabled,
+    learn_only_account,
     learn_scan_completed_chats,
     maybe_bulk_regeo_learn_for_account,
     record_live_learn_success,
@@ -127,6 +129,7 @@ from services.status_ids import (
     conv_folder_key,
     funnel_status_ids,
     infer_step_from_status,
+    is_completed_conv,
     is_no_status,
     normalize_enabled_folders,
     resolve_funnel_statuses,
@@ -258,6 +261,24 @@ async def _llm_rescue_route_keys(
             intent.value,
         )
     return fallback
+
+
+def _is_win_conv(conv: dict[str, Any], funnel_statuses: dict[str, str]) -> bool:
+    status_id = str(conv.get("statusId") or "").strip()
+    win_sid = str(funnel_statuses.get("win") or "").strip()
+    if win_sid and status_id == win_sid:
+        return True
+    name = ((conv.get("status") or {}).get("name") or "").strip().lower()
+    return name in ("win", "виграш") or "winner" in name or "gagn" in name
+
+
+def _skip_auto_reply_folder(
+    conv: dict[str, Any], funnel_statuses: dict[str, str]
+) -> bool:
+    """Завершено / Win — только обучение, без исходящих скриптов."""
+    return is_completed_conv(conv, funnel_statuses) or _is_win_conv(
+        conv, funnel_statuses
+    )
 
 
 def resolve_conv_geo(account: dict[str, Any], channel_id: str) -> str:
@@ -1309,6 +1330,9 @@ async def _handle_conversation(
     if not conv_id:
         return False
 
+    if learn_only_account(account):
+        return False
+
     state = cycle_ctx.conv_state(conv_id)
     allowed_folders = cycle_ctx.allowed_folders
 
@@ -1317,13 +1341,11 @@ async def _handle_conversation(
             if int(state.get("step") or 0) < 1:
                 return False
         else:
-            status_id_early = str(conv.get("statusId") or "").strip()
-            in_funnel = status_id_early in active_funnel
-            in_picker = allowed_folders is not None and conv_allowed_in_folders(
-                conv, allowed_folders
+            logger.info(
+                "conv=%s skip — last turn outgoing, wait for client",
+                conv_id[:8],
             )
-            if not in_funnel and not in_picker:
-                return False
+            return "done"
 
     enabled = cycle_ctx.enabled
     if not enabled or channel_id not in enabled:
@@ -1352,11 +1374,12 @@ async def _handle_conversation(
 
     completed_sid = str(funnel_statuses.get("completed") or "").strip()
     conv_status_id = str(conv.get("statusId") or "").strip()
-    if (
-        completed_sid
-        and conv_status_id == completed_sid
-        and int(state.get("step") or 0) >= 9
-    ):
+    if _skip_auto_reply_folder(conv, funnel_statuses):
+        logger.info(
+            "conv=%s skip — closed folder (%s), no auto-reply",
+            conv_id[:8],
+            ((conv.get("status") or {}).get("name") or "")[:24],
+        )
         return "done"
     if int(state.get("send_failures") or 0) >= 5:
         logger.info(
@@ -1541,7 +1564,10 @@ async def _handle_conversation(
             conv_id[:8],
         )
         await db.save_conversation_state(
-            account_id, conv_id, last_processed_msg_id=msg_id
+            account_id,
+            conv_id,
+            pause_scripts=1,
+            last_processed_msg_id=msg_id,
         )
         return "done"
 
@@ -1558,64 +1584,14 @@ async def _handle_conversation(
     if msg_id and msg_id == state.get("last_processed_msg_id"):
         if not needs_reply:
             return "done"
-        pre_intent = classify(
-            text,
-            has_image=has_image,
-            has_ad=has_ad,
-            geo=geo,
-            attachments=attachments,
-            funnel_step=max(effective_step_early, 1),
-            message_reaction=message_reaction,
-        )
-        funnel_retry = needs_reply and effective_step_early < 8 and (
-            pre_intent
-            in (
-                Intent.POSITIVE,
-                Intent.INTERESTED,
-                Intent.READY,
-                Intent.MONEY_REQUEST,
-            )
-            or is_funnel_positive_reaction(
-                text,
-                attachments,
-                funnel_step=max(effective_step_early, 1),
-                geo=geo,
-                message_reaction=message_reaction,
-            )
-        )
-        if state.get("pause_scripts") and not deposit_funnel_early and not funnel_retry:
+        if not deposit_funnel_early:
             logger.info(
-                "conv=%s skip — already handled (paused, no client reply yet)",
+                "conv=%s skip — same client msg already handled",
                 conv_id[:8],
             )
-            return "paused"
-        if (
-            msg_id
-            and msg_id == str(state.get("last_escalation_msg_id") or "")
-            and not deposit_funnel_early
-            and not funnel_retry
-        ):
-            logger.info(
-                "conv=%s skip — already escalated for this message",
-                conv_id[:8],
-            )
-            return "paused"
-        if funnel_retry and state.get("pause_scripts") and pre_intent != Intent.COMPLAINT:
-            logger.info(
-                "conv=%s funnel retry — unpausing scripts (keep escalation dedupe)",
-                conv_id[:8],
-            )
-            await db.save_conversation_state(
-                account_id,
-                conv_id,
-                pause_scripts=0,
-            )
-            state = {
-                **state,
-                "pause_scripts": 0,
-            }
+            return "done"
         logger.info(
-            "conv=%s retry: was marked processed but no reply sent",
+            "conv=%s deposit retry on same msg_id",
             conv_id[:8],
         )
         is_retry = True
@@ -3596,11 +3572,15 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
             for c in ch_rows
             if c.get("channel_id")
         }
-        learn_active = (
-            llm_router_mode() == "learn"
-            and bool(resolve_llm_api_key())
+        learn_scan_active = (
+            bool(resolve_llm_api_key())
             and learn_account_allowed(account)
+            and (
+                llm_router_mode() == "learn"
+                or learn_only_account(account)
+            )
         )
+        reply_active = bool(enabled) and auto_reply_account_allowed(account)
         if learn_account_allowed(account):
             await maybe_bulk_regeo_learn_for_account(
                 account_id,
@@ -3613,13 +3593,21 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 account_id,
             )
             return 0
-        if not enabled and not learn_active:
+        if not enabled and not learn_scan_active:
             logger.warning(
                 "Worker account=%s: no enabled channels",
                 account_id,
             )
             return 0
-        if not enabled and learn_active:
+        if learn_only_account(account):
+            logger.info(
+                "Worker account=%s: learn-only — %s channel(s), "
+                "auto-reply off%s",
+                account_id,
+                len(all_channel_ids),
+                " (channels enabled in bot but blocked)" if enabled else "",
+            )
+        elif not enabled and learn_scan_active:
             logger.info(
                 "Worker account=%s: learn-only — %s channel(s), "
                 "auto-reply off, scanning Завершено/Депи не дошли",
@@ -3756,7 +3744,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     funnel_statuses=funnel_statuses,
                 )
 
-        if learn_active and all_channel_ids:
+        if learn_scan_active and all_channel_ids:
             try:
                 recorded = await learn_scan_completed_chats(
                     account_id=account_id,
@@ -3793,16 +3781,13 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                     "Worker account=%s: learn scan failed", account_id
                 )
 
-        if not enabled:
+        if not reply_active:
             return 0
 
-        completed_sid = str(funnel_statuses.get("completed") or "").strip()
         inbound_convs = [
             c
             for c in convs
             if _is_incoming_direction(str(c.get("lastMessageDirection") or ""))
-            or str(c.get("statusId") or "").strip() in funnel_status_ids(funnel_statuses)
-            or (completed_sid and str(c.get("statusId") or "").strip() == completed_sid)
         ]
 
         no_status_count = sum(1 for c in inbound_convs if is_no_status(c))
