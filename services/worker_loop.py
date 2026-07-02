@@ -59,8 +59,10 @@ from services.ai_intent import (
 )
 from services.encryption import Secrets
 from services.llm_client import (
+    llm_compose_confidence_min,
     llm_primary_confidence_min,
     llm_rescue_confidence_min,
+    llm_router_compose,
     llm_router_enabled,
     llm_router_may_send,
     llm_router_mode,
@@ -78,6 +80,7 @@ from services.llm_learn import (
     maybe_bulk_regeo_learn_for_account,
     record_live_learn_success,
 )
+from services.llm_compose import compose_client_reply
 from services.llm_router import LlmRouteDecision, route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
@@ -2949,6 +2952,50 @@ async def _handle_conversation(
         if _valid_outgoing_reply(m)
     ]
     keys: list[str] = []
+    composed_bodies: list[str] = []
+    if (
+        needs_reply
+        and not deposit_signal
+        and llm_router_compose()
+        and llm_router_enabled()
+    ):
+        comp = await compose_client_reply(
+            geo=geo,
+            text=text or ("(photo)" if has_real_image else ""),
+            effective_step=effective_step,
+            rule_intent=intent.value,
+            outgoing_texts=op_outgoing,
+            folder=folder,
+            has_image=has_real_image,
+            reg_link_sent=reg_link_sent_in_history(op_outgoing, geo=geo),
+            deposit_script_sent=script_sent_in_history(
+                op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
+            ),
+        )
+        if (
+            comp
+            and comp.action == "send"
+            and comp.messages
+            and comp.confidence >= llm_compose_confidence_min()
+            and llm_router_may_send()
+        ):
+            composed_bodies = comp.messages
+            keys = list(comp.reference_script_keys or [])
+            logger.info(
+                "conv=%s LLM compose texts=%s refs=%s conf=%.2f",
+                conv_id[:8],
+                len(composed_bodies),
+                keys[:4],
+                comp.confidence,
+            )
+        elif comp:
+            logger.info(
+                "conv=%s LLM compose — rules backup conf=%.2f action=%s",
+                conv_id[:8],
+                comp.confidence,
+                comp.action,
+            )
+
     if (
         needs_reply
         and not deposit_signal
@@ -3267,8 +3314,39 @@ async def _handle_conversation(
                         llm.confidence,
                     )
 
-    if needs_reply and not deposit_signal and not keys:
-        if llm_router_primary() and llm_router_enabled():
+    if needs_reply and not deposit_signal and not keys and not composed_bodies:
+        if llm_router_compose() and llm_router_enabled():
+            comp_rescue = await compose_client_reply(
+                geo=geo,
+                text=text or ("(photo)" if has_real_image else ""),
+                effective_step=effective_step,
+                rule_intent=intent.value,
+                outgoing_texts=op_outgoing,
+                folder=folder,
+                has_image=has_real_image,
+                reg_link_sent=reg_link_sent_in_history(op_outgoing, geo=geo),
+                deposit_script_sent=script_sent_in_history(
+                    op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
+                ),
+                rescue=True,
+            )
+            if (
+                comp_rescue
+                and comp_rescue.action == "send"
+                and comp_rescue.messages
+                and comp_rescue.confidence >= llm_rescue_confidence_min()
+                and llm_router_may_send()
+            ):
+                composed_bodies = comp_rescue.messages
+                keys = list(comp_rescue.reference_script_keys or [])
+                logger.info(
+                    "conv=%s LLM compose rescue texts=%s refs=%s conf=%.2f",
+                    conv_id[:8],
+                    len(composed_bodies),
+                    keys[:4],
+                    comp_rescue.confidence,
+                )
+        elif llm_router_primary() and llm_router_enabled():
             keys = await _llm_rescue_route_keys(
                 geo=geo,
                 text=text or "",
@@ -3280,9 +3358,10 @@ async def _handle_conversation(
                 conv_id=conv_id,
             )
 
-    if needs_reply and not deposit_signal and not keys:
+    if needs_reply and not deposit_signal and not keys and not composed_bodies:
         if (
             not llm_router_primary()
+            and not llm_router_compose()
             and intent in (Intent.QUESTION, Intent.UNKNOWN)
             and not funnel_active
             and needs_human_for_text(
@@ -3357,7 +3436,22 @@ async def _handle_conversation(
         )
         return True
 
-    if keys:
+    if composed_bodies:
+        logger.info(
+            "conv=%s sending %s composed message(s) refs=%s",
+            conv_id[:8],
+            len(composed_bodies),
+            keys[:5],
+        )
+        send_buf.queue_send(
+            conv_id,
+            composed_bodies,
+            client_name=client_name,
+            channel_id=channel_id,
+            geo=geo,
+        )
+        actions_sent = True
+    elif keys:
         logger.info(
             "conv=%s sending %s saved reply(s) keys=%s",
             conv_id[:8],

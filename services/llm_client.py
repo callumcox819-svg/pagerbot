@@ -40,12 +40,14 @@ def llm_model() -> str:
 
 
 def llm_router_mode() -> str:
-    """off | learn | fallback (rules first) | primary (AI first, rules backup)."""
+    """off | learn | fallback | primary | compose (AI writes text from learned chats)."""
     raw = (os.getenv("PAGER_LLM_ROUTER") or "").strip().lower()
     if raw in ("0", "false", "no", "off", ""):
         return "off"
     if raw in ("learn", "observe", "watch"):
         return "learn"
+    if raw in ("compose", "writer", "text", "free", "human"):
+        return "compose"
     if raw in ("primary", "drive", "auto", "work"):
         return "primary"
     if raw in ("1", "true", "yes", "fallback", "all"):
@@ -54,17 +56,22 @@ def llm_router_mode() -> str:
 
 
 def llm_router_enabled() -> bool:
-    return llm_router_mode() in ("learn", "fallback", "primary")
+    return llm_router_mode() in ("learn", "fallback", "primary", "compose")
 
 
 def llm_router_may_send() -> bool:
     """False in learn mode — LLM must not trigger outbound messages."""
-    return llm_router_mode() in ("fallback", "primary")
+    return llm_router_mode() in ("fallback", "primary", "compose")
 
 
 def llm_router_primary() -> bool:
-    """AI decides first (learned chats), rules only when LLM has no answer."""
+    """AI picks script keys first (legacy strict mode)."""
     return llm_router_mode() == "primary"
+
+
+def llm_router_compose() -> bool:
+    """AI writes client-facing text using learned dialogs + locked placeholders."""
+    return llm_router_mode() == "compose"
 
 
 def llm_router_strict() -> bool:
@@ -94,6 +101,11 @@ def llm_primary_confidence_min() -> float:
 def llm_rescue_confidence_min() -> float:
     """Lower bar for rescue pass when rules found no script."""
     return _env_float("PAGER_LLM_RESCUE_CONF", 0.35)
+
+
+def llm_compose_confidence_min() -> float:
+    """Min confidence to send LLM-composed text."""
+    return _env_float("PAGER_LLM_COMPOSE_CONF", 0.55)
 
 
 def _request_headers(api_key: str) -> dict[str, str]:

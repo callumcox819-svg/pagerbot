@@ -1061,7 +1061,9 @@ async def learn_scan_completed_chats(
     account_email: str = "",
 ) -> int:
     """Scan success folders — learn from full chat dialogs."""
-    if llm_router_mode() != "learn":
+    if llm_router_mode() != "learn" and not learn_only_account(
+        {"email": account_email}
+    ):
         return 0
     api_key = resolve_llm_api_key()
     if not api_key:
