@@ -89,6 +89,7 @@ def _system_prompt(geo: str, learn_block: str, locked_block: str) -> str:
         "- Usually 1 message; max 2 short messages in the array.\n"
         "- Do not repeat what the operator already sent (check scripts_delivered).\n"
         "- Zambia game ID always begins with 17 — never write 159, 59, or other prefixes.\n"
+        "- Deposit OTP/validation/SMS codes: explain briefly in chat — do NOT ask for game ID.\n"
         'JSON: {"action":"send|pause|wait","messages":["..."],"reference_script_keys":["..."],'
         '"intent":"interested|positive|ready|question|unknown|declined|complaint|deposit_done",'
         '"confidence":0.0,"note":""}'

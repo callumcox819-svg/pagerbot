@@ -638,6 +638,8 @@ def is_post_link_registration_question(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if is_deposit_help_question(t):
+        return False
     if is_xbet_site_question(t):
         return True
     if _FR_POST_LINK.search(t):
@@ -966,9 +968,11 @@ def is_ready_for_registration(text: str, *, geo: str = "zm") -> bool:
 
 
 def is_deposit_question(text: str) -> bool:
-    """«اعمل ايداع في ايه» — asking about deposit, not confirming."""
+    """«اعمل ايداع في ايه» — asking about deposit amount/method, not OTP help."""
     t = (text or "").strip()
     if not t:
+        return False
+    if is_deposit_help_question(t):
         return False
     if _AR_DEPOSIT_QUESTION.search(t) and re.search(
         r"إيداع|ايداع|deposit", t, re.I
@@ -982,6 +986,37 @@ def is_deposit_question(text: str) -> bool:
             re.I,
         )
     )
+
+
+_DEPOSIT_HELP = re.compile(
+    r"(?i)("
+    r"code de validation|validation code|verification code|confirm(?:ation)? code|"
+    r"otp|sms code|pin code|one[- ]time|"
+    r"code.{0,30}(mettre|entrer|enter|put|tape|saisir|utiliser|use)|"
+    r"(mettre|entrer|put|enter|tape|saisir).{0,30}code|"
+    r"quel code|quelle code|what code|which code|"
+    r"méthode de paiement|method of payment|payment method|"
+    r"comment.{0,24}(déposer|deposer|payer|pay|deposit)|"
+    r"how.{0,24}(deposit|pay)|"
+    r"كود التحقق|رمز التحقق|كود التفعيل"
+    r")"
+)
+
+
+def is_deposit_help_question(text: str) -> bool:
+    """Client asks how to complete deposit (OTP, validation code, payment) — not game ID."""
+    t = (text or "").strip()
+    if not t or len(t) > 280:
+        return False
+    if _DEPOSIT_HELP.search(t):
+        return True
+    if re.search(
+        r"(?i)(tu dois mettre quoi|what (?:do i|should i) (?:put|enter)|"
+        r"on te demande.{0,40}(code|otp))",
+        t,
+    ):
+        return True
+    return False
 
 
 _READY_CONTINUE_BROADCAST = re.compile(
@@ -1396,6 +1431,8 @@ def classify(
     t = (text or "").strip()
     if is_requesting_registration_link(t):
         return Intent.READY
+    if is_deposit_help_question(t):
+        return Intent.QUESTION
     if is_funnel_earning_interest(t):
         return Intent.INTERESTED
     if is_money_request(t):

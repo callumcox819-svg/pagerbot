@@ -33,6 +33,7 @@ from services.ai_intent import (
     client_replied_to_ready_broadcast,
     client_replied_to_operator_broadcast,
     is_deposit_question,
+    is_deposit_help_question,
     deposit_screenshot_nudge_reply,
     is_already_registered_before_funnel,
     is_age_answer,
@@ -187,6 +188,8 @@ def _assist_eligible(
     no_status: bool,
 ) -> bool:
     """AI assist only for non-trivial client questions after funnel step 3."""
+    if is_deposit_help_question(text):
+        return step >= 4
     if intent not in (Intent.QUESTION, Intent.UNKNOWN):
         return False
     if step < 4:
@@ -3628,6 +3631,10 @@ async def _handle_conversation(
             return "done"
 
     keys = filter_auto_script_keys(keys)
+
+    if keys and is_deposit_help_question(text):
+        blocked = {game_id_script_key(geo), deposit_script_key(geo)}
+        keys = [k for k in keys if k not in blocked]
 
     if keys and reg_link_sent_in_history(op_outgoing, geo=geo):
         if is_registration_confirmed(text) or intent == Intent.JOINED:

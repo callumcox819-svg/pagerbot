@@ -661,6 +661,11 @@ def resolve_funnel_scripts(
     if is_deferral_reply(t) or is_refusal_reply(t) or intent == "declined":
         return []
 
+    from services.ai_intent import is_deposit_help_question
+
+    if is_deposit_help_question(t):
+        return []
+
     from services.ai_intent import is_requesting_registration_link
 
     if is_requesting_registration_link(t):
@@ -789,6 +794,14 @@ def resolve_funnel_scripts(
         if effective_step < 8 and intent == "game_id_text":
             if script_sent_in_history(out, script_ui_snippet(gid_key, geo)):
                 return []
+            return [gid_key]
+
+        if (
+            effective_step < 8
+            and intent in ("deposit_done", "joined")
+            and script_sent_in_history(out, script_ui_snippet(dep_key, geo))
+            and not script_sent_in_history(out, script_ui_snippet(gid_key, geo))
+        ):
             return [gid_key]
 
         return []
@@ -1047,29 +1060,12 @@ def resolve_cm_backlog_fallback(
         if (
             effective_step < 8
             and not script_sent_in_history(out, dep_sn)
-            and intent
-            in (
-                "joined",
-                "positive",
-                "ready",
-                "deposit_done",
-                "question",
-                "interested",
-                "unknown",
+            and is_registration_confirmed(t)
+            and should_send_deposit_script(
+                t, effective_step, out, folder_step=0, geo=geo
             )
-            and intent != "image_only"
-            and (intent != "positive" or t.strip())
         ):
             return [dep_key]
-        gid_sn = script_ui_snippet("08_game_id", geo)
-        if (
-            effective_step < 8
-            and script_sent_in_history(out, dep_sn)
-            and not script_sent_in_history(out, gid_sn)
-            and intent
-            in ("unknown", "question", "positive", "interested", "ready")
-        ):
-            return ["08_game_id"]
         return []
 
     if not intro_sent:
