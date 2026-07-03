@@ -123,6 +123,7 @@ from services.script_engine import (
     link_help_script_keys,
     post_deposit_channel_keys,
     reg_instructions_sent_in_history,
+    explain_scripts_sent_in_history,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -1590,16 +1591,19 @@ async def _handle_conversation(
     ):
         folder_step = hist_step
     stored_step = int(state.get("step") or 0)
+    gap_step = funnel_step_from_script_gaps(
+        thread_out_early,
+        geo=geo,
+        stored_step=stored_step,
+    )
     if is_no_status(conv) and not reg_link_sent_in_history(
         op_texts_early, geo=geo
     ):
-        effective_step_early = funnel_step_from_script_gaps(
-            thread_out_early,
-            geo=geo,
-            stored_step=stored_step,
-        )
+        effective_step_early = gap_step
     else:
         effective_step_early = max(hist_step, stored_step, folder_step)
+        if not reg_link_sent_in_history(op_texts_early, geo=geo):
+            effective_step_early = min(effective_step_early, gap_step + 1)
 
     last_in = _pick_client_turn_message(
         msg_only,
@@ -3631,6 +3635,22 @@ async def _handle_conversation(
             return "done"
 
     keys = filter_auto_script_keys(keys)
+
+    if (
+        keys
+        and geo in ("zm", "dj", "cm")
+        and not explain_scripts_sent_in_history(op_outgoing, geo=geo)
+        and reg_script_keys_set(geo).intersection(keys)
+    ):
+        if geo == "cm":
+            keys = ["03_steps", "04_tier"]
+        else:
+            keys = ["02_how_it_works", "03_zmw_table"]
+        logger.info(
+            "conv=%s reg blocked — explain scripts first keys=%s",
+            conv_id[:8],
+            keys,
+        )
 
     if keys and is_deposit_help_question(text):
         blocked = {game_id_script_key(geo), deposit_script_key(geo)}

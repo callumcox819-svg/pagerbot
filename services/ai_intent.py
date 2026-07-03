@@ -153,7 +153,7 @@ _ACK = re.compile(
     re.I,
 )
 _POSITIVE = re.compile(
-    r"\b(yess?|ok|okay|explain|i am|you can|sure|alright|got it|"
+    r"\b(yess?|ok|okay|i am|you can|sure|alright|got it|"
     r"how can i start|how do i start|how to start)\b",
     re.I,
 )
@@ -620,13 +620,11 @@ def is_commitment_reply(text: str) -> bool:
 
 
 def wants_registration_followup(text: str) -> bool:
-    """After intro — treat start/how/explain questions like a positive reply."""
+    """After intro — how to start / next step (not bare «explain»)."""
     t = (text or "").strip()
     if not t:
         return False
     if _AR_REG_LINK.search(t):
-        return True
-    if re.fullmatch(r"explain\??", t, re.I):
         return True
     if is_post_link_registration_question(t):
         return True
@@ -909,6 +907,8 @@ def wants_details_after_intro(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if re.fullmatch(r"explain\??", t, re.I):
+        return True
     if _AR_DETAILS.search(t):
         return True
     return wants_registration_followup(t)
@@ -952,10 +952,6 @@ def is_ready_for_registration(text: str, *, geo: str = "zm") -> bool:
     if _READY.search(t):
         return True
     if wants_registration_followup(t):
-        return True
-    if _INTERESTED.search(t) and "explain" in t.lower():
-        return True
-    if re.fullmatch(r"explain\??", t, re.I):
         return True
     # Short ack only — not enough for registration link
     if _ACK.search(t) and len(t.split()) <= 4:
@@ -1432,6 +1428,8 @@ def classify(
     if is_requesting_registration_link(t):
         return Intent.READY
     if is_deposit_help_question(t):
+        return Intent.QUESTION
+    if wants_details_after_intro(t):
         return Intent.QUESTION
     if is_funnel_earning_interest(t):
         return Intent.INTERESTED

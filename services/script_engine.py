@@ -519,6 +519,23 @@ def reg_instructions_sent_in_history(
     return script_sent_in_history(out, script_ui_snippet("04_registration", g))
 
 
+def explain_scripts_sent_in_history(
+    outgoing_texts: list[str] | None,
+    geo: str = "zm",
+) -> bool:
+    """How-it-works + tier table were sent (ZM/DJ) before registration link."""
+    g = (geo or "zm").strip().lower()
+    out = outgoing_texts or []
+    if g == "cm":
+        return script_sent_in_history(out, script_ui_snippet("03_steps", g)) and (
+            script_sent_in_history(out, script_ui_snippet("04_tier", g))
+            or script_sent_in_history(out, script_ui_snippet("02_age", g))
+        )
+    how = script_ui_snippet("02_how_it_works", g)
+    tier = script_ui_snippet("03_zmw_table", g)
+    return script_sent_in_history(out, how) and script_sent_in_history(out, tier)
+
+
 def registration_link_keys_for_geo(
     geo: str,
     outgoing_texts: list[str] | None = None,
@@ -967,10 +984,22 @@ def resolve_funnel_scripts(
             ):
                 return ["06_deposit"]
             return []
+        wants_explain = (
+            wants_details_after_intro(t)
+            or intent in ("interested", "positive", "ready", "question")
+            or is_funnel_positive_reaction(
+                t, attachments, funnel_step=effective_step, geo=geo
+            )
+        )
+        if not explain_scripts_sent_in_history(out, geo=geo) and wants_explain:
+            return ["02_how_it_works", "03_zmw_table"]
         if (
-            is_ready_for_registration(t, geo=geo)
-            or wants_registration_link(t)
-            or intent in ("ready", "interested", "positive", "question")
+            explain_scripts_sent_in_history(out, geo=geo)
+            and (
+                is_ready_for_registration(t, geo=geo)
+                or wants_registration_link(t)
+                or intent in ("ready", "interested", "positive", "question")
+            )
         ):
             if link_sent_global and is_registration_confirmed(t):
                 return ["06_deposit"] if should_send_deposit_script(
