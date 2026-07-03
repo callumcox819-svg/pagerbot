@@ -61,6 +61,40 @@ def _parse_game_id_text(text: str, *, geo: str) -> str:
     return m.group(1) if m else ""
 
 
+async def extract_game_id_from_message(
+    text: str,
+    attachments: list | None,
+    *,
+    geo: str = "zm",
+    api_key: str = "",
+    cookies: dict[str, str] | None = None,
+) -> str:
+    """Game ID from message text or screenshot(s)."""
+    gid = extract_id_from_text(text or "", geo=geo)
+    if gid and looks_like_game_id(gid, geo=geo):
+        return gid
+    if not api_key:
+        return ""
+    for att in attachments or []:
+        if att.get("type") != "image":
+            continue
+        url = (att.get("payload") or {}).get("url") or ""
+        if not url:
+            continue
+        analysis = await analyze_success_screenshot(
+            url, api_key, geo=geo, cookies=cookies
+        )
+        gid = re.sub(r"\D", "", str(analysis.get("game_id") or ""))
+        if gid and looks_like_game_id(gid, geo=geo):
+            return gid
+        gid = await extract_id_from_image_url(
+            url, api_key, geo=geo, cookies=cookies
+        )
+        if gid and looks_like_game_id(gid, geo=geo):
+            return gid
+    return ""
+
+
 async def classify_screenshot_kind(
     url: str, api_key: str = "", *, cookies: dict[str, str] | None = None
 ) -> str:

@@ -457,6 +457,8 @@ def should_send_deposit_script(
         return False
     if not is_registration_confirmed(text):
         return False
+    if not reg_instructions_sent_in_history(outgoing_texts, geo=geo):
+        return False
     link_sent = reg_link_sent_in_history(outgoing_texts, geo=geo)
     min_step = 4 if geo == "eg" else 4
     if not link_sent and max(step, folder_step) < min_step:
@@ -503,6 +505,18 @@ ZM_EXPLAIN_SEND_KEYS = frozenset({"02_how_it_works", "03_zmw_table"})
 
 def reg_link_script_key(geo: str = "zm") -> str:
     return "06_link" if geo == "cm" else "05_link"
+
+
+def reg_instructions_sent_in_history(
+    outgoing_texts: list[str] | None,
+    geo: str = "zm",
+) -> bool:
+    """Registration instructions (04) were sent — not only the bare link."""
+    g = (geo or "zm").strip().lower()
+    out = outgoing_texts or []
+    if g == "cm":
+        return script_sent_in_history(out, script_ui_snippet("05_registration", g))
+    return script_sent_in_history(out, script_ui_snippet("04_registration", g))
 
 
 def registration_link_keys_for_geo(
@@ -880,7 +894,10 @@ def resolve_funnel_scripts(
             ) and (
                 is_what_required_question(t)
                 or is_post_link_registration_question(t)
-                or intent in ("question", "positive", "interested", "ready")
+                or (
+                    (is_registration_confirmed(t) or intent == "joined")
+                    and intent in ("positive", "interested", "ready", "joined")
+                )
             ):
                 return ["06_deposit"]
             if effective_step >= 4 and not link_sent and (
@@ -967,7 +984,10 @@ def resolve_funnel_scripts(
             if not script_sent_in_history(out, dep_sn) and (
                 is_what_required_question(t)
                 or is_post_link_registration_question(t)
-                or intent in ("question", "positive", "interested", "ready")
+                or (
+                    is_registration_confirmed(t)
+                    and intent in ("positive", "interested", "ready", "joined")
+                )
             ):
                 return ["06_deposit"]
         if is_registration_confirmed(t) or intent == "joined":
@@ -1128,26 +1148,11 @@ def resolve_zm_backlog_fallback(
     # Link already sent — never rewind to intro / resend 04+05.
     if link_sent:
         if is_registration_confirmed(t):
-            if not script_sent_in_history(out, dep_sn):
+            if should_send_deposit_script(
+                t, effective_step, out, folder_step=0, geo=geo
+            ):
                 return ["06_deposit"]
             return []
-        if (
-            effective_step < 8
-            and not script_sent_in_history(out, dep_sn)
-            and intent
-            in (
-                "joined",
-                "positive",
-                "ready",
-                "deposit_done",
-                "question",
-                "interested",
-                "unknown",
-            )
-            and intent != "image_only"
-            and (intent != "positive" or t.strip())
-        ):
-            return ["06_deposit"]
         return []
 
     if not intro_sent:
@@ -1202,17 +1207,9 @@ def resolve_eg_backlog_fallback(
     if (
         link_sent
         and effective_step < 8
-        and not script_sent_in_history(out, dep_sn)
-        and intent
-        in (
-            "joined",
-            "positive",
-            "ready",
-            "deposit_done",
-            "question",
-            "interested",
-            "money_request",
-            "unknown",
+        and is_registration_confirmed(t)
+        and should_send_deposit_script(
+            t, effective_step, out, folder_step=0, geo="eg"
         )
     ):
         return ["06_deposit"]

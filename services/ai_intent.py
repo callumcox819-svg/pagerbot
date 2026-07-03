@@ -841,12 +841,13 @@ def is_post_reg_ack(text: str) -> bool:
 
 
 def is_registration_confirmed(text: str) -> bool:
-    """After 04+05 — client registered or clearly on the site."""
-    return (
-        is_registration_complete(text)
-        or is_on_registration_site(text)
-        or is_post_reg_ack(text)
-    )
+    """After 04+05 — client explicitly registered or clearly on the site."""
+    return is_registration_complete(text) or is_on_registration_site(text)
+
+
+def is_registration_acknowledged(text: str) -> bool:
+    """Short okay after reg link — wait for explicit registration, not deposit yet."""
+    return is_post_reg_ack(text)
 
 
 def is_already_registered_before_funnel(text: str) -> bool:
@@ -1278,7 +1279,10 @@ def is_registration_pending(text: str) -> bool:
             r"haven'?t registered|still working|will do|doing it|"
             r"not done|not finished|no i haven'?t|not for now|"
             r"give me time|need time|later today|maybe later|"
-            r"still trying|working on it|in progress)\b",
+            r"still trying|working on it|in progress|"
+            r"let me create|create my account|create an account|"
+            r"open an account|opening an account|i'?m creating|"
+            r"going to register|going to create|some time)\b",
             t,
             re.I,
         )
@@ -1394,8 +1398,6 @@ def classify(
         return Intent.READY
     if is_funnel_earning_interest(t):
         return Intent.INTERESTED
-    if is_phone_number_request(t):
-        return Intent.PHONE_REQUEST
     if is_money_request(t):
         return Intent.MONEY_REQUEST
     if is_refusal_reply(t):
@@ -1429,6 +1431,8 @@ def classify(
         return Intent.GAME_ID_TEXT
     if geo != "eg" and _GAME_ID_LEGACY.search(t):
         return Intent.GAME_ID_TEXT
+    if is_phone_number_request(t):
+        return Intent.PHONE_REQUEST
     if geo == "eg" or _ARABIC.search(t):
         ar = _classify_arabic(t)
         if ar is not None:

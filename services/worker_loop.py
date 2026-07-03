@@ -90,6 +90,7 @@ from services.llm_compose import compose_client_reply
 from services.llm_router import LlmRouteDecision, route_funnel_message
 from services.image_extract import (
     classify_screenshot_kind,
+    extract_game_id_from_message,
     extract_id_from_image_url,
     extract_id_from_text,
     looks_like_game_id,
@@ -120,6 +121,7 @@ from services.script_engine import (
     game_id_script_key,
     link_help_script_keys,
     post_deposit_channel_keys,
+    reg_instructions_sent_in_history,
     scripts_for_registration_resend,
     scripts_to_resend_for_step,
     script_sent_in_history,
@@ -1746,8 +1748,15 @@ async def _handle_conversation(
             geo=geo,
         ):
             reg_done_keys = ["06_deposit"]
+        elif not reg_instructions_sent_in_history(op_texts_early, geo=geo):
+            reg_done_keys = ["04_registration", "05_link"]
         if reg_done_keys and pager_user_id:
-            send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
+            _queue_funnel_status(
+                send_buf,
+                conv_id,
+                conv_status_id,
+                funnel_statuses["in_progress"],
+            )
         elif (
             pager_user_id
             and is_already_registered_before_funnel(text)
@@ -2000,7 +2009,14 @@ async def _handle_conversation(
             "06_deposit" in dq_keys
             or (completed_sid and conv_status_id == completed_sid)
         ):
-            send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
+            _queue_funnel_status(
+                send_buf,
+                conv_id,
+                conv_status_id,
+                funnel_statuses["in_progress"]
+                if "06_deposit" in dq_keys
+                else funnel_statuses["wait_id"],
+            )
         logger.info(
             "conv=%s deposit question keys=%s text=%r",
             conv_id[:8],
@@ -2463,6 +2479,14 @@ async def _handle_conversation(
         return "no_script"
 
     client_gid = _game_id_from_client(text, msg_only, geo=geo)
+    if not client_gid and has_real_image and needs_reply and resolve_llm_api_key():
+        client_gid = await extract_game_id_from_message(
+            text,
+            attachments,
+            geo=geo,
+            api_key=resolve_llm_api_key(),
+            cookies=client.cookies,
+        )
     if (
         needs_reply
         and client_gid
@@ -2778,51 +2802,89 @@ async def _handle_conversation(
                 img_url = (att.get("payload") or {}).get("url") or ""
                 break
         extracted = extract_id_from_text(text, geo=geo)
-        if not extracted and img_url and resolve_llm_api_key():
-            extracted = await extract_id_from_image_url(
-                img_url,
-                resolve_llm_api_key(),
+        if not extracted and resolve_llm_api_key():
+            extracted = await extract_game_id_from_message(
+                text,
+                attachments,
                 geo=geo,
+                api_key=resolve_llm_api_key(),
                 cookies=client.cookies,
             )
 
         wait_id_sid = str(funnel_statuses.get("wait_id") or "").strip()
-        waiting_for_game_id = step >= 6 or (
-            wait_id_sid and conv_status_id == wait_id_sid
+        waiting_for_game_id = _is_waiting_for_game_id(
+            step, conv_status_id, funnel_statuses
         )
 
-        if waiting_for_game_id and step < 7:
-            if extracted:
-                await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
-                if pager_user_id:
-                    send_buf.queue_status_patch(
-                        conv_id, funnel_statuses["wait_id"]
-                    )
-                send_buf.queue_commit(
+        if (
+            waiting_for_game_id
+            and extracted
+            and looks_like_game_id(extracted, geo=geo)
+            and needs_reply
+        ):
+            stored_gid = _stored_game_id(state)
+            if stored_gid == extracted and step >= 7:
+                await db.save_conversation_state(
+                    account_id, conv_id, last_processed_msg_id=msg_id
+                )
+                return "done"
+            deposit_verified = _deposit_proof_in_thread(msg_only, geo=geo)
+            await _escalate_once(
+                bot,
+                esc_chat,
+                account_id=account_id,
+                conv_id=conv_id,
+                msg_id=msg_id,
+                state=state,
+                account=account,
+                channel_id=channel_id,
+                title="Game ID из скрина",
+                client_name=client_name,
+                channel_name=channel_name,
+                folder=folder,
+                reason=(
+                    "ID со скрина — проверьте депозит"
+                    if deposit_verified
+                    else "ID со скрина без депозита — проверьте вручную"
+                ),
+                last_message=text or extracted,
+                extra=f"ID: {extracted}",
+                pause=False,
+            )
+            if deposit_verified:
+                send_buf.queue_script_send(
                     conv_id,
-                    step=7,
-                    extracted_game_id=extracted,
-                    last_processed_msg_id=msg_id,
-                )
-                await _escalate_once(
-                    bot,
-                    esc_chat,
-                    account_id=account_id,
-                    conv_id=conv_id,
-                    msg_id=msg_id,
-                    state=state,
-                    account=account,
-                    channel_id=channel_id,
-                    title="Game ID распознан",
+                    post_deposit_channel_keys(geo),
                     client_name=client_name,
-                    channel_name=channel_name,
-                    folder=folder,
-                    reason="Проверьте депозит при необходимости",
-                    last_message=text or "(photo)",
-                    extra=f"ID: {extracted}",
-                    pause=False,
+                    channel_id=channel_id,
+                    geo=geo,
                 )
-                return True
+                if pager_user_id:
+                    _queue_funnel_status(
+                        send_buf,
+                        conv_id,
+                        conv_status_id,
+                        funnel_statuses.get("deps_pending")
+                        or funnel_statuses["wait_id"],
+                    )
+            else:
+                await _outbound_send([EXCELLENT], script_keys=[])
+            send_buf.queue_commit(
+                conv_id,
+                step=max(step, 7 if not deposit_verified else 8),
+                extracted_game_id=extracted,
+                last_processed_msg_id=msg_id,
+                pause_scripts=0,
+            )
+            logger.info(
+                "conv=%s game_id from image gid=%s deposit_verified=%s",
+                conv_id[:8],
+                extracted,
+                deposit_verified,
+            )
+            return True
+
+        if waiting_for_game_id and has_real_image and not extracted:
             await _escalate_once(
                 bot,
                 esc_chat,
@@ -2836,41 +2898,12 @@ async def _handle_conversation(
                 client_name=client_name,
                 channel_name=channel_name,
                 folder=folder,
-                reason="Нужен оператор",
+                reason="Нужен оператор — ID на скрине не распознан",
                 last_message="(photo)",
-                pause=True,
-            )
-            return True
-
-        if step >= 5 and step < 7 and extracted:
-            await _outbound_send([EXCELLENT], script_keys=["06_deposit"])
-            if pager_user_id:
-                send_buf.queue_status_patch(
-                    conv_id, funnel_statuses["wait_id"]
-                )
-            send_buf.queue_commit(
-                conv_id,
-                step=7,
-                extracted_game_id=extracted,
-                last_processed_msg_id=msg_id,
-            )
-            await _escalate_once(
-                bot,
-                esc_chat,
-                account_id=account_id,
-                conv_id=conv_id,
-                msg_id=msg_id,
-                state=state,
-                account=account,
-                channel_id=channel_id,
-                title="Game ID распознан",
-                client_name=client_name,
-                channel_name=channel_name,
-                folder=folder,
-                reason="Проверьте депозит при необходимости",
-                last_message=text or "(photo)",
-                extra=f"ID: {extracted}",
                 pause=False,
+            )
+            await db.save_conversation_state(
+                account_id, conv_id, last_processed_msg_id=msg_id
             )
             return True
 
@@ -3680,7 +3713,7 @@ async def _handle_conversation(
                 send_buf,
                 conv_id,
                 conv_status_id,
-                funnel_statuses["wait_id"],
+                funnel_statuses["in_progress"],
             )
     elif game_id_script_key(geo) in keys:
         new_step = max(new_step, 6)
