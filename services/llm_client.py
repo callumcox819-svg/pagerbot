@@ -40,12 +40,14 @@ def llm_model() -> str:
 
 
 def llm_router_mode() -> str:
-    """off | learn | fallback | primary | compose (AI writes text from learned chats)."""
+    """off | learn | fallback | primary | compose | assist (rules first, AI for hard questions)."""
     raw = (os.getenv("PAGER_LLM_ROUTER") or "").strip().lower()
     if raw in ("0", "false", "no", "off", ""):
         return "off"
     if raw in ("learn", "observe", "watch"):
         return "learn"
+    if raw in ("assist", "helper", "questions", "qa", "support"):
+        return "assist"
     if raw in ("compose", "writer", "text", "free", "human"):
         return "compose"
     if raw in ("primary", "drive", "auto", "work"):
@@ -56,12 +58,12 @@ def llm_router_mode() -> str:
 
 
 def llm_router_enabled() -> bool:
-    return llm_router_mode() in ("learn", "fallback", "primary", "compose")
+    return llm_router_mode() in ("learn", "fallback", "primary", "compose", "assist")
 
 
 def llm_router_may_send() -> bool:
     """False in learn mode — LLM must not trigger outbound messages."""
-    return llm_router_mode() in ("fallback", "primary", "compose")
+    return llm_router_mode() in ("fallback", "primary", "compose", "assist")
 
 
 def llm_router_primary() -> bool:
@@ -72,6 +74,11 @@ def llm_router_primary() -> bool:
 def llm_router_compose() -> bool:
     """AI writes client-facing text using learned dialogs + locked placeholders."""
     return llm_router_mode() == "compose"
+
+
+def llm_router_assist() -> bool:
+    """Rules/scripts first; AI composes only when rules have no reply (hard questions)."""
+    return llm_router_mode() == "assist"
 
 
 def llm_router_strict() -> bool:
@@ -106,6 +113,11 @@ def llm_rescue_confidence_min() -> float:
 def llm_compose_confidence_min() -> float:
     """Min confidence to send LLM-composed text."""
     return _env_float("PAGER_LLM_COMPOSE_CONF", 0.55)
+
+
+def llm_assist_confidence_min() -> float:
+    """Min confidence to send assist-mode replies (after rules found nothing)."""
+    return _env_float("PAGER_LLM_ASSIST_CONF", 0.5)
 
 
 def _request_headers(api_key: str) -> dict[str, str]:

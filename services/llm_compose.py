@@ -12,6 +12,7 @@ import database as db
 from services.llm_client import (
     chat_completion_json,
     llm_compose_confidence_min,
+    llm_router_assist,
     llm_router_compose,
     llm_router_enabled,
     resolve_llm_api_key,
@@ -87,6 +88,7 @@ def _system_prompt(geo: str, learn_block: str, locked_block: str) -> str:
         "reference_script_keys must include registration+link, NEVER game_id.\n"
         "- Usually 1 message; max 2 short messages in the array.\n"
         "- Do not repeat what the operator already sent (check scripts_delivered).\n"
+        "- Zambia game ID always begins with 17 — never write 159, 59, or other prefixes.\n"
         'JSON: {"action":"send|pause|wait","messages":["..."],"reference_script_keys":["..."],'
         '"intent":"interested|positive|ready|question|unknown|declined|complaint|deposit_done",'
         '"confidence":0.0,"note":""}'
@@ -133,7 +135,9 @@ async def compose_client_reply(
     deposit_script_sent: bool,
     rescue: bool = False,
 ) -> ComposeDecision | None:
-    if not llm_router_enabled() or not llm_router_compose():
+    if not llm_router_enabled():
+        return None
+    if not llm_router_compose() and not (llm_router_assist() and rescue):
         return None
     api_key = resolve_llm_api_key()
     if not api_key:
@@ -174,9 +178,16 @@ async def compose_client_reply(
         "rescue": bool(rescue),
     }
     if rescue:
-        user_payload["situation"] = (
-            "Rules/compose had no good reply — write a motivating operator message."
-        )
+        if llm_router_assist():
+            user_payload["situation"] = (
+                "Funnel rules found no script. The client asked a non-trivial question — "
+                "answer it in operator tone using learned dialogs; keep momentum toward "
+                "registration/deposit. Use LOCK placeholders for links/codes/amounts."
+            )
+        else:
+            user_payload["situation"] = (
+                "Rules/compose had no good reply — write a motivating operator message."
+            )
 
     raw = await chat_completion_json(
         [

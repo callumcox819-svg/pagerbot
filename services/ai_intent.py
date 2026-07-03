@@ -733,6 +733,50 @@ def wants_registration_link(text: str) -> bool:
     return is_requesting_registration_link(text)
 
 
+_LINK_BROKEN = re.compile(
+    r"(?i)\b("
+    r"not\s+work(?:ing)?|doesn'?t\s+work|won'?t\s+work|can'?t\s+work|"
+    r"not\s+open(?:ing)?|doesn'?t\s+open|won'?t\s+open|can'?t\s+open|"
+    r"not\s+load(?:ing)?|error|problem|failed|broken|"
+    r"не\s+відкрива|не\s+працює|не\s+открыва"
+    r")\b"
+)
+
+
+def is_registration_link_broken(text: str) -> bool:
+    """Client says the registration link won't open or shows an error."""
+    t = (text or "").strip()
+    if not t or len(t) > 220:
+        return False
+    if _LINK_BROKEN.search(t):
+        return True
+    if re.search(r"(?i)^it'?s\s+not\s+work", t):
+        return True
+    return False
+
+
+def reg_link_screenshot_request_reply(*, geo: str = "zm") -> str:
+    g = (geo or "zm").strip().lower()
+    return {
+        "zm": (
+            "Please send me a screenshot of the problem you're seeing "
+            "on your screen."
+        ),
+        "eg": "من فضلك ابعتلي سكرين شوت للمشكلة اللي ظاهرة عندك.",
+        "cm": (
+            "Envoyez-moi une capture d'écran du problème que vous voyez "
+            "à l'écran."
+        ),
+        "dj": (
+            "Envoyez-moi une capture d'écran du problème que vous voyez "
+            "à l'écran."
+        ),
+    }.get(g, (
+        "Please send me a screenshot of the problem you're seeing "
+        "on your screen."
+    ))
+
+
 def is_deferral_reply(text: str) -> bool:
     """Client postpones — do not send registration or game ID scripts."""
     t = (text or "").strip()

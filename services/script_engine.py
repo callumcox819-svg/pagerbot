@@ -20,6 +20,7 @@ SCRIPT_KEYS = [
     "06_deposit",
     "08_tg_invite",
     "09_tg_link",
+    "11_fb_link",
 ]
 
 # Unique substrings to find the right row in Pager saved-replies sidebar (Замбія).
@@ -33,6 +34,7 @@ SCRIPT_UI_SNIPPETS: dict[str, str] = {
     "07_game_id": "begins with 17",
     "08_tg_invite": "private Telegram channel",
     "09_tg_link": "t.me/+",
+    "11_fb_link": "slotsofwin",
     "10_reg_screenshot": "ibb.co",
 }
 
@@ -151,6 +153,16 @@ def link_help_script_keys(geo: str = "zm") -> list[str]:
     if g == "eg":
         return ["04_registration", "05_link"]
     return ["04_registration", "05_link"]
+
+
+def post_deposit_channel_keys(geo: str = "zm") -> list[str]:
+    """TG (+ FB for ZM) after deposit is verified."""
+    g = (geo or "zm").strip().lower()
+    if g == "cm":
+        return ["10_tg_invite", "11_tg_link"]
+    if g == "zm":
+        return ["08_tg_invite", "09_tg_link", "11_fb_link"]
+    return ["08_tg_invite", "09_tg_link"]
 
 
 def reg_script_keys_set(geo: str = "zm") -> frozenset[str]:
@@ -761,6 +773,8 @@ def resolve_funnel_scripts(
             return []
 
         if effective_step < 8 and intent == "game_id_text":
+            if script_sent_in_history(out, script_ui_snippet(gid_key, geo)):
+                return []
             return [gid_key]
 
         return []
@@ -879,6 +893,9 @@ def resolve_funnel_scripts(
             return []
         if effective_step < 8 and intent == "game_id_text":
             dep_sn = script_ui_snippet("06_deposit", geo)
+            gid_sn = script_ui_snippet("07_game_id", geo)
+            if script_sent_in_history(out, gid_sn):
+                return []
             if script_sent_in_history(out, dep_sn) or effective_step >= 7:
                 return ["07_game_id"]
             return []
@@ -886,8 +903,13 @@ def resolve_funnel_scripts(
             tg_sn = script_ui_snippet("09_tg_link", geo)
             if not script_sent_in_history(out, tg_sn):
                 gid_sn = script_ui_snippet("07_game_id", geo)
-                if script_sent_in_history(out, gid_sn) and effective_step >= 7:
-                    return ["08_tg_invite", "09_tg_link"]
+                dep_sn = script_ui_snippet("06_deposit", geo)
+                if (
+                    script_sent_in_history(out, gid_sn)
+                    and script_sent_in_history(out, dep_sn)
+                    and effective_step >= 7
+                ):
+                    return post_deposit_channel_keys(geo)
         if effective_step < 4 and (
             intent in ("positive", "interested", "ready") or _positive_signal()
         ):
@@ -956,7 +978,10 @@ def resolve_funnel_scripts(
         return []
 
     if effective_step < 8 and intent == "game_id_text":
-        return ["07_game_id"]
+        gid_sn = script_ui_snippet("07_game_id", geo)
+        if not script_sent_in_history(out, gid_sn):
+            return ["07_game_id"]
+        return []
 
     return []
 
