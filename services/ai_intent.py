@@ -143,7 +143,12 @@ _INTERESTED = re.compile(
     r"your help|help me|go ahead|hi go ahead|interested please|"
     r"i'm serious|i am serious|very interested|yess?\s+sir|"
     r"would like to join|would love to join|wanna join|want to join|"
-    r"like to join|count me in|want to learn|i want to learn|learn how)\b",
+    r"like to join|count me in|want to learn|i want to learn|learn how|"
+    r"je veux investir|i want to invest)\b",
+    re.I,
+)
+_FB_LEAD = re.compile(
+    r"\b(je veux investir|i want to invest|i'?m interested!?|interested!?)\s*$",
     re.I,
 )
 _GREETING = re.compile(
@@ -465,7 +470,15 @@ _FR_DEFERRAL = re.compile(
 _REG_COMPLETE = re.compile(
     r"\b(registered|registration done|done registering|done with registration|"
     r"i registered|have registered|finished registering|signed up|account created|"
-    r"created (my |an )?account|i have registered)\b",
+    r"created (my |an )?account|i have registered|did the registration|"
+    r"done with reg)\b",
+    re.I,
+)
+_INFORMAL_REG_DONE = re.compile(
+    r"^(?:yes[, ]+)?(?:i'?m |am )?done\.?$|"
+    r"^(?:yes[, ]+)?i did(?: it| the registration)?\.?$|"
+    r"^c'?est fait\.?$|^(?:its|it'?s) done\.?$|"
+    r"^(?:oui[, ]+)?(?:c'?est )?(?:fait|terminé|termine)\.?$",
     re.I,
 )
 _FR_REG_COMPLETE = re.compile(
@@ -856,9 +869,31 @@ def is_post_reg_ack(text: str) -> bool:
     return is_registration_acknowledged(text)
 
 
+def is_facebook_lead_message(text: str) -> bool:
+    """Facebook / Messenger lead form opener — always start intro funnel."""
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    if _FB_LEAD.search(t):
+        return True
+    return bool(re.search(r"\bje veux investir\b", t, re.I))
+
+
+def is_informal_registration_done(text: str) -> bool:
+    """Short «am done» / «c'est fait» after reg link — ok to send deposit."""
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    return bool(_INFORMAL_REG_DONE.match(t))
+
+
 def is_registration_confirmed(text: str) -> bool:
     """After 04+05 — client explicitly registered or clearly on the site."""
-    return is_registration_complete(text) or is_on_registration_site(text)
+    return (
+        is_registration_complete(text)
+        or is_on_registration_site(text)
+        or is_informal_registration_done(text)
+    )
 
 
 def is_registration_acknowledged(text: str) -> bool:

@@ -61,6 +61,7 @@ from services.ai_intent import (
     is_registration_acknowledged,
     is_registration_help_request,
     is_registration_link_broken,
+    is_facebook_lead_message,
     reg_link_screenshot_request_reply,
     wants_registration_link,
 )
@@ -985,6 +986,8 @@ class _CycleSendBuffer:
                 continue
             if not texts and keys and self._rest_script_keys_ok(keys, job_geo):
                 rest_jobs.append((*job[:6], job_geo))
+            elif texts and not keys:
+                rest_jobs.append((*job[:6], job_geo))
             else:
                 browser_jobs.append((*job[:6], job_geo))
         return browser_jobs, rest_jobs
@@ -1074,6 +1077,8 @@ class _CycleSendBuffer:
                 continue
             if not texts and keys and self._rest_script_keys_ok(keys, job_geo):
                 eligible.append((*job[:6], job_geo))
+            elif texts and not keys:
+                eligible.append((*job[:6], job_geo))
             else:
                 browser_jobs.append((*job[:6], job_geo))
 
@@ -1115,7 +1120,12 @@ class _CycleSendBuffer:
                             ch = str(nested.get("id") or "").strip()
                     if not ch:
                         return None
-                    bodies = bodies_for_script_keys(geo, keys)
+                    if keys:
+                        bodies = bodies_for_script_keys(geo, keys)
+                    else:
+                        bodies = [t.strip() for t in (_texts or []) if (t or "").strip()]
+                    if not bodies:
+                        return None
                     for i, body in enumerate(bodies):
                         if i:
                             gap = reg_gap if len(bodies) > 1 else script_gap
@@ -1187,7 +1197,7 @@ class _CycleSendBuffer:
                     logger.info(
                         "REST script ok conv=%s keys=%s",
                         cid[:8],
-                        keys,
+                        keys or ["(text)"],
                     )
                     return cid
                 except Exception as exc:
@@ -3707,17 +3717,29 @@ async def _handle_conversation(
                 effective_step,
                 keys,
             )
-    if not keys and geo in ("zm", "dj", "cm") and is_no_status(conv):
-        keys = resolve_zm_backlog_fallback(
-            effective_step, op_outgoing, intent.value, geo=geo, text=text
+    if not keys and geo in ("zm", "dj", "cm") and needs_reply:
+        intro_sn = script_ui_snippet("01_intro", geo)
+        intro_sent = script_sent_in_history(op_outgoing, intro_sn)
+        link_sent = reg_link_sent_in_history(op_outgoing, geo=geo)
+        run_backlog = is_no_status(conv) or (
+            is_facebook_lead_message(text)
+            or is_requesting_registration_link(text)
+            or wants_registration_link(text)
+            or (link_sent and is_registration_confirmed(text))
+            or (not link_sent and not intro_sent)
         )
-        if keys:
-            logger.info(
-                "conv=%s ZM backlog fallback eff_step=%s keys=%s",
-                conv_id[:8],
-                effective_step,
-                keys,
+        if run_backlog:
+            keys = resolve_zm_backlog_fallback(
+                effective_step, op_outgoing, intent.value, geo=geo, text=text
             )
+            if keys:
+                logger.info(
+                    "conv=%s backlog fallback eff_step=%s keys=%s folder=%r",
+                    conv_id[:8],
+                    effective_step,
+                    keys,
+                    folder,
+                )
 
     if (
         not keys
@@ -3918,6 +3940,39 @@ async def _handle_conversation(
                 folder=folder,
                 has_real_image=has_real_image,
                 conv_id=conv_id,
+            )
+
+    if needs_reply and not deposit_signal and not keys and not composed_bodies:
+        if is_facebook_lead_message(text):
+            keys = (
+                ["01_intro", "01_intro_2"]
+                if geo == "cm"
+                else ["01_intro"]
+            )
+            logger.info(
+                "conv=%s facebook lead -> intro keys=%s text=%r",
+                conv_id[:8],
+                keys,
+                (text or "")[:40],
+            )
+        elif (
+            reg_link_sent_in_history(op_outgoing, geo=geo)
+            and effective_step >= 5
+            and is_registration_confirmed(text)
+            and should_send_deposit_script(
+                text,
+                effective_step,
+                op_outgoing,
+                folder_step=folder_step,
+                geo=geo,
+            )
+        ):
+            keys = [deposit_script_key(geo)]
+            logger.info(
+                "conv=%s reg-confirmed deposit keys=%s text=%r",
+                conv_id[:8],
+                keys,
+                (text or "")[:40],
             )
 
     if needs_reply and not deposit_signal and not keys and not composed_bodies:
