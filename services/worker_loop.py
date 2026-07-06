@@ -4903,3 +4903,48 @@ def start_worker(bot: Bot) -> asyncio.Task:
         return _worker_task
     _worker_task = asyncio.create_task(worker_loop(bot))
     return _worker_task
+
+
+_worker_thread: threading.Thread | None = None
+
+
+def start_worker_thread(bot_token: str) -> threading.Thread:
+    """Run Pager worker on a dedicated thread so Telegram polling never blocks."""
+    global _worker_thread
+    if _worker_thread and _worker_thread.is_alive():
+        return _worker_thread
+
+    def _thread_main() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _run() -> None:
+            from aiogram import Bot
+            from aiogram.client.default import DefaultBotProperties
+            from aiogram.enums import ParseMode
+
+            from database import init_db
+
+            await init_db()
+            bot = Bot(
+                bot_token,
+                default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            )
+            logger.info("Pager worker thread event loop started")
+            await worker_loop(bot)
+
+        try:
+            loop.run_until_complete(_run())
+        except Exception:
+            logger.exception("Pager worker thread crashed")
+        finally:
+            loop.close()
+
+    _worker_thread = threading.Thread(
+        target=_thread_main,
+        name="pager-worker",
+        daemon=True,
+    )
+    _worker_thread.start()
+    logger.info("Pager worker thread started")
+    return _worker_thread

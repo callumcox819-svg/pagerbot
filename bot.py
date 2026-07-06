@@ -15,7 +15,7 @@ from config import load_settings, resolve_pager_org_id
 from database import init_db
 from handlers import setup_routers
 from services.bot_commands import register_bot_commands
-from services.worker_loop import start_worker, _env_truthy
+from services.worker_loop import start_worker_thread, _env_truthy
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,16 +84,19 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(setup_routers())
 
+    @dp.startup()
+    async def _on_startup() -> None:
+        if _env_truthy("PAGER_RUN_WORKER", default=True):
+            start_worker_thread(settings.bot_token)
+            logger.info("Pager worker enabled in background thread")
+        else:
+            logger.info("Pager worker disabled (PAGER_RUN_WORKER=0)")
+
     await register_bot_commands(bot)
-    if _env_truthy("PAGER_RUN_WORKER", default=True):
-        start_worker(bot)
-        logger.info("Pager worker enabled (PAGER_RUN_WORKER)")
-    else:
-        logger.info("Pager worker disabled — use worker.py on a separate service")
     await _ensure_polling_mode(bot)
     asyncio.create_task(_webhook_guard(bot))
-    logger.info("Bot + Pager worker running")
-    await dp.start_polling(bot)
+    logger.info("Bot polling starting")
+    await dp.start_polling(bot, handle_as_tasks=True)
 
 
 if __name__ == "__main__":
