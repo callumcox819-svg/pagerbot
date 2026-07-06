@@ -107,6 +107,7 @@ async def cmd_reset_pauses(message: Message) -> None:
     if not acc:
         await message.answer("Pager не подключён.")
         return
+    await message.answer("⏳ Сбрасываю паузы и очередь…")
     aid = int(acc["id"])
     await db.set_account_flags(message.from_user.id, paused=0, auto_reply=1)
     n = await db.clear_pauses_for_account(aid)
@@ -114,5 +115,6 @@ async def cmd_reset_pauses(message: Message) -> None:
     await message.answer(
         f"▶️ Авто-ответы включены.\n"
         f"Сброшено: паузы/метки у {n} чат(ов), полный reset {deleted} записей.\n"
-        f"Бот обработает «Без статусу» (~8 чатов за цикл, take chat + intro)."
+        f"Очередь Pager обрабатывается батчами (~12 чатов за раз, цикл ~10–30 сек). "
+        f"Смотри логи: REST body ok / batch delivered."
     )

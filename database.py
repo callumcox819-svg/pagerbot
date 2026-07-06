@@ -18,6 +18,8 @@ DB_PATH = _settings.db_path
 async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS pager_accounts (
