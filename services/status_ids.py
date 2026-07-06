@@ -13,7 +13,16 @@ ZM_STATUSES = {
 }
 
 _STATUS_NAME_HINTS: dict[str, tuple[str, ...]] = {
-    "in_progress": ("процесі", "процесс", "in progress", "реєстрації"),
+    "in_progress": (
+        "процесі",
+        "процесс",
+        "in progress",
+        "реєстрації",
+        "en cours",
+        "procès",
+        "proces",
+        "в процес",
+    ),
     "wait_id": ("чекаю id", "чекаю ід", "wait id", "wait_id"),
     "registration": ("рега", "реєстрація", "регистрация", "registration"),
     "deps_pending": ("депи не", "депы не", "deps pending", "deps"),
@@ -59,6 +68,11 @@ def resolve_funnel_statuses(
     out = dict(ZM_STATUSES)
     if not rows:
         return out
+    known_ids = {
+        str(st.get("status_id") or "").strip()
+        for st in rows
+        if str(st.get("status_id") or "").strip()
+    }
     for key, hints in _STATUS_NAME_HINTS.items():
         for st in rows:
             sid = str(st.get("status_id") or "").strip()
@@ -66,7 +80,49 @@ def resolve_funnel_statuses(
             if sid and name and any(h in name for h in hints):
                 out[key] = sid
                 break
+    # ZM default UUID is wrong for other orgs — pick real «В процесі» folder.
+    in_prog = str(out.get("in_progress") or "").strip()
+    if known_ids and in_prog not in known_ids:
+        for st in rows:
+            sid = str(st.get("status_id") or "").strip()
+            name = (st.get("name") or "").strip().lower()
+            if not sid or not name:
+                continue
+            if any(
+                h in name
+                for h in (
+                    "процес",
+                    "proces",
+                    "progress",
+                    "en cours",
+                    "cours",
+                    "реєстрації",
+                    "регистрац",
+                )
+            ) and not any(
+                bad in name
+                for bad in (
+                    "заверш",
+                    "complete",
+                    "termin",
+                    "win",
+                    "чекаю",
+                    "депи",
+                    "deps",
+                )
+            ):
+                out["in_progress"] = sid
+                break
     return out
+
+
+def validated_in_progress_sid(
+    funnel_statuses: dict[str, str] | None = None,
+    known_ids: set[str] | frozenset[str] | None = None,
+) -> str:
+    """Return resolved in_progress UUID (same id deposit path uses for folder patch)."""
+    fs = funnel_statuses or ZM_STATUSES
+    return str(fs.get("in_progress") or "").strip()
 
 
 def funnel_status_ids(funnel_statuses: dict[str, str] | None = None) -> frozenset[str]:

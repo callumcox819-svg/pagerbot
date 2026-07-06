@@ -170,6 +170,23 @@ def reg_script_keys_set(geo: str = "zm") -> frozenset[str]:
         return CM_REG_SCRIPT_KEYS
     return frozenset({"04_registration", "05_link"})
 
+
+def reg_send_triggers_in_progress(keys: list[str], geo: str = "zm") -> bool:
+    """True when outbound script keys include registration link bundle."""
+    k = set(filter_auto_script_keys(list(keys or [])))
+    if not k:
+        return False
+    if k & CM_REG_SCRIPT_KEYS:
+        return True
+    if k & ZM_REG_SEND_KEYS or k & EG_REG_SEND_KEYS:
+        return True
+    if "05_registration" in k or "04_registration" in k:
+        return True
+    for g in ("zm", "eg", "dj", "cm"):
+        if reg_link_script_key(g) in k:
+            return True
+    return False
+
 GEO_SCRIPT_UI_SNIPPETS: dict[str, dict[str, str]] = {
     "zm": SCRIPT_UI_SNIPPETS,
     "eg": EG_SCRIPT_UI_SNIPPETS,
@@ -438,6 +455,34 @@ def reg_link_sent_in_history(
     return "tinyurl.com/zam577" in blob or "zam577" in blob
 
 
+def deposit_instructions_in_history(
+    outgoing_texts: list[str], *, geo: str = "zm"
+) -> bool:
+    """Deposit script or operator manual deposit instructions already in thread."""
+    out = outgoing_texts or []
+    dep_sn = script_ui_snippet(deposit_script_key(geo), geo)
+    if script_sent_in_history(out, dep_sn):
+        return True
+    blob = "\n".join(out).lower()
+    if geo == "cm":
+        return bool(
+            re.search(
+                r"d[ée]p[oô]t.{0,48}(1[\s\u00a0]?000|mtn|orange|capture|"
+                r"screenshot|bouton vert|\$)",
+                blob,
+                re.I,
+            )
+            or ("déposer" in blob and ("mtn" in blob or "orange" in blob))
+            or "effectuer un dépôt" in blob
+            or "connecte-toi sur 1xbet" in blob
+        )
+    if geo == "dj":
+        return "déposer" in blob or "deposer" in blob or "bouton vert" in blob
+    if geo == "eg":
+        return "إيداع" in blob or "ايداع" in blob or "deposit" in blob
+    return 'click "deposit"' in blob or "minimum deposit" in blob
+
+
 def should_send_deposit_script(
     text: str,
     step: int,
@@ -449,11 +494,14 @@ def should_send_deposit_script(
     """Client confirmed reg / on 1xbet — send 06_deposit once link was sent."""
     from services.ai_intent import (
         is_deferral_reply,
+        is_registration_acknowledged,
         is_registration_confirmed,
         is_registration_pending,
     )
 
     if is_deferral_reply(text) or is_registration_pending(text):
+        return False
+    if is_registration_acknowledged(text) and not is_registration_confirmed(text):
         return False
     if not is_registration_confirmed(text):
         return False
@@ -463,9 +511,10 @@ def should_send_deposit_script(
     min_step = 4 if geo == "eg" else 4
     if not link_sent and max(step, folder_step) < min_step:
         return False
-    if script_sent_in_history(
-        outgoing_texts, script_ui_snippet("06_deposit", geo)
-    ):
+    if deposit_instructions_in_history(outgoing_texts, geo=geo):
+        return False
+    dep_sn = script_ui_snippet(deposit_script_key(geo), geo)
+    if script_sent_in_history(outgoing_texts, dep_sn):
         return False
     return True
 
@@ -534,6 +583,17 @@ def explain_scripts_sent_in_history(
     how = script_ui_snippet("02_how_it_works", g)
     tier = script_ui_snippet("03_zmw_table", g)
     return script_sent_in_history(out, how) and script_sent_in_history(out, tier)
+
+
+def scripts_for_registration_help(
+    geo: str,
+    outgoing_texts: list[str] | None = None,
+) -> list[str]:
+    """Client needs how-to register — always resend instructions + link."""
+    g = (geo or "zm").strip().lower()
+    if g == "cm":
+        return ["05_registration", "06_link", "07_chrome"]
+    return ["04_registration", "05_link"]
 
 
 def registration_link_keys_for_geo(
@@ -653,14 +713,11 @@ def resolve_funnel_scripts(
         is_funnel_positive_reaction,
         is_refusal_reply,
         is_registration_confirmed,
+        is_registration_help_request,
         is_registration_pending,
         is_ready_for_registration,
-        is_registration_confirmed,
-        is_registration_pending,
         wants_details_after_intro,
         wants_registration_link,
-        is_post_link_registration_question,
-        is_what_required_question,
     )
 
     out = outgoing_texts or []
@@ -685,6 +742,8 @@ def resolve_funnel_scripts(
 
     from services.ai_intent import is_requesting_registration_link
 
+    if is_registration_help_request(t):
+        return scripts_for_registration_help(geo, out)
     if is_requesting_registration_link(t):
         return registration_link_keys_for_geo(geo, out)
 
@@ -776,20 +835,6 @@ def resolve_funnel_scripts(
         if effective_step < 7:
             if intent == "game_id_text":
                 return []
-            dep_sn = script_ui_snippet(dep_key, geo)
-            if (
-                link_sent
-                and effective_step >= 4
-                and not is_deposit_tier_choice(t, geo=geo)
-                and not script_sent_in_history(out, dep_sn)
-                and (
-                    is_what_required_question(t)
-                    or is_post_link_registration_question(t)
-                    or intent in ("question", "interested", "ready")
-                    or (intent == "positive" and t.strip())
-                )
-            ):
-                return [dep_key]
             if is_registration_confirmed(t) or intent == "joined":
                 if should_send_deposit_script(
                     t, effective_step, out, folder_step=0, geo=geo
@@ -809,17 +854,19 @@ def resolve_funnel_scripts(
             return []
 
         if effective_step < 8 and intent == "game_id_text":
-            if script_sent_in_history(out, script_ui_snippet(gid_key, geo)):
-                return []
-            return [gid_key]
+            return []
 
         if (
-            effective_step < 8
+            effective_step < 9
             and intent in ("deposit_done", "joined")
             and script_sent_in_history(out, script_ui_snippet(dep_key, geo))
-            and not script_sent_in_history(out, script_ui_snippet(gid_key, geo))
         ):
-            return [gid_key]
+            tg_keys = post_deposit_channel_keys(geo)
+            tg_sn = script_ui_snippet(
+                "11_tg_link" if geo == "cm" else "09_tg_link", geo
+            )
+            if not script_sent_in_history(out, tg_sn):
+                return tg_keys
 
         return []
 
@@ -843,10 +890,13 @@ def resolve_funnel_scripts(
             out, script_ui_snippet("05_link", geo)
         )
 
-        def _eg_reg_scripts() -> list[str]:
-            if link_sent:
+        def _eg_reg_scripts(*, force: bool = False) -> list[str]:
+            if link_sent and not force:
                 return []
             return ["04_registration", "05_link"]
+
+        if is_registration_help_request(t):
+            return _eg_reg_scripts(force=True)
 
         # After «как работает» — only reg instructions + link, never 02 again.
         if how_sent and not link_sent:
@@ -918,18 +968,6 @@ def resolve_funnel_scripts(
                     t, effective_step, out, folder_step=0, geo=geo
                 ):
                     return ["06_deposit"]
-            dep_sn = script_ui_snippet("06_deposit", geo)
-            if link_sent and effective_step >= 4 and not script_sent_in_history(
-                out, dep_sn
-            ) and (
-                is_what_required_question(t)
-                or is_post_link_registration_question(t)
-                or (
-                    (is_registration_confirmed(t) or intent == "joined")
-                    and intent in ("positive", "interested", "ready", "joined")
-                )
-            ):
-                return ["06_deposit"]
             if effective_step >= 4 and not link_sent and (
                 intent in ("interested", "positive", "ready", "question")
                 or _positive_signal()
@@ -1011,6 +1049,8 @@ def resolve_funnel_scripts(
         return []
 
     # Link already sent (step 4+)
+    if is_registration_help_request(t):
+        return scripts_for_registration_help(geo, out)
     if is_registration_pending(t) and not link_sent_global:
         return ["04_registration", "05_link"]
     if is_registration_pending(t) and link_sent_global:
@@ -1019,19 +1059,6 @@ def resolve_funnel_scripts(
     if effective_step < 7:
         if intent == "game_id_text":
             return []
-        link_sn = script_ui_snippet("05_link", geo)
-        link_sent = script_sent_in_history(out, link_sn)
-        if link_sent and effective_step >= 4:
-            dep_sn = script_ui_snippet("06_deposit", geo)
-            if not script_sent_in_history(out, dep_sn) and (
-                is_what_required_question(t)
-                or is_post_link_registration_question(t)
-                or (
-                    is_registration_confirmed(t)
-                    and intent in ("positive", "interested", "ready", "joined")
-                )
-            ):
-                return ["06_deposit"]
         if is_registration_confirmed(t) or intent == "joined":
             if should_send_deposit_script(
                 t, effective_step, out, folder_step=0, geo=geo

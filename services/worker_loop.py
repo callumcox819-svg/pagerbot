@@ -58,6 +58,8 @@ from services.ai_intent import (
     wants_registration_followup,
     is_registration_pending,
     is_requesting_registration_link,
+    is_registration_acknowledged,
+    is_registration_help_request,
     is_registration_link_broken,
     reg_link_screenshot_request_reply,
     wants_registration_link,
@@ -90,7 +92,9 @@ from services.llm_learn import (
 from services.llm_compose import compose_client_reply
 from services.llm_router import LlmRouteDecision, route_funnel_message
 from services.image_extract import (
-    classify_screenshot_kind,
+    analyze_success_screenshot,
+    screenshot_shows_deposit_proof,
+    screenshot_is_link_error_only,
     extract_game_id_from_message,
     extract_id_from_image_url,
     extract_id_from_text,
@@ -118,13 +122,16 @@ from services.script_engine import (
     registration_link_keys_for_geo,
     reg_bundle_pending_link,
     reg_script_keys_set,
+    reg_send_triggers_in_progress,
     deposit_script_key,
+    deposit_instructions_in_history,
     game_id_script_key,
     link_help_script_keys,
     post_deposit_channel_keys,
     reg_instructions_sent_in_history,
     explain_scripts_sent_in_history,
     scripts_for_registration_resend,
+    scripts_for_registration_help,
     scripts_to_resend_for_step,
     script_sent_in_history,
     script_ui_snippet,
@@ -148,6 +155,7 @@ from services.status_ids import (
     is_no_status,
     normalize_enabled_folders,
     resolve_funnel_statuses,
+    validated_in_progress_sid,
     should_process_conversation,
 )
 from services.telegram_notify import notify_escalation
@@ -198,6 +206,8 @@ def _assist_eligible(
     if is_short_affirmative(text) or is_age_answer(text):
         return False
     if is_ready_for_registration(text, geo=geo):
+        return False
+    if is_registration_help_request(text):
         return False
     if is_registration_pending(text) and step < 6:
         return False
@@ -357,6 +367,66 @@ def _queue_funnel_status(
     new = (new_status_id or "").strip()
     if new and new != cur:
         send_buf.queue_status_patch(conv_id, new)
+
+
+def _in_progress_sid(
+    account: dict[str, Any],
+    funnel_statuses: dict[str, str] | None = None,
+) -> str:
+    fs = funnel_statuses or account.get("_funnel_statuses") or ZM_STATUSES
+    known = account.get("_known_status_ids") or set()
+    return validated_in_progress_sid(fs, known)
+
+
+def _ensure_reg_in_progress_patches(
+    account: dict[str, Any],
+    keys: list[str],
+    geo: str,
+    patches: list[str] | None,
+) -> list[str]:
+    """Guarantee «В процесі» patch on any outbound reg-link script bundle."""
+    out = list(patches or [])
+    if not reg_send_triggers_in_progress(keys, geo):
+        return out
+    sid = _in_progress_sid(account)
+    if not sid:
+        logger.warning(
+            "reg send keys=%s geo=%s but in_progress folder unresolved",
+            keys[:4],
+            geo,
+        )
+        return out
+    if sid not in out:
+        logger.info(
+            "inject in_progress patch folder=%s keys=%s geo=%s",
+            sid[:8],
+            keys[:4],
+            geo,
+        )
+        out.append(sid)
+    return out
+
+
+def _queue_reg_in_progress(
+    send_buf: _CycleSendBuffer,
+    conv_id: str,
+    current_status_id: str,
+    funnel_statuses: dict[str, str],
+    pager_user_id: str | None,
+) -> None:
+    """Move chat to «В процесі» after registration link scripts are queued."""
+    sid = _in_progress_sid(send_buf.account, funnel_statuses)
+    if not sid:
+        return
+    cur = (current_status_id or "").strip()
+    if sid == cur:
+        return
+    _queue_funnel_status(send_buf, conv_id, current_status_id, sid)
+    logger.info(
+        "conv=%s queue reg -> in_progress folder=%s",
+        conv_id[:8],
+        sid[:8],
+    )
 
 
 def _deposit_proof_in_thread(
@@ -655,7 +725,41 @@ class _CycleSendBuffer:
         self._geos: dict[str, str] = {}
         self._commits: list[tuple[str, dict[str, Any]]] = []
         self._status_patches: dict[str, list[str]] = {}
+        self._conv_status_ids: dict[str, str] = {}
         self._order: list[str] = []
+
+    def register_conv(self, conv_id: str, *, conv_status_id: str = "") -> None:
+        with self._lock:
+            cur = (conv_status_id or "").strip()
+            if cur or conv_id not in self._conv_status_ids:
+                self._conv_status_ids[conv_id] = cur
+
+    def _maybe_queue_reg_in_progress(
+        self,
+        conv_id: str,
+        script_keys: list[str],
+        *,
+        geo: str,
+    ) -> None:
+        if not reg_send_triggers_in_progress(script_keys, geo):
+            return
+        sid = _in_progress_sid(self.account)
+        if not sid:
+            logger.warning(
+                "conv=%s reg scripts queued but in_progress folder unknown keys=%s",
+                conv_id[:8],
+                script_keys[:4],
+            )
+            return
+        cur = str(self._conv_status_ids.get(conv_id) or "").strip()
+        if sid != cur:
+            self.queue_status_patch(conv_id, sid)
+            logger.info(
+                "conv=%s queue reg -> in_progress folder=%s keys=%s",
+                conv_id[:8],
+                sid[:8],
+                script_keys[:4],
+            )
 
     def queue_send(
         self,
@@ -689,6 +793,8 @@ class _CycleSendBuffer:
                 self._geos[conv_id] = db.normalize_channel_geo(g)
             if conv_id not in self._order:
                 self._order.append(conv_id)
+            if keys:
+                self._maybe_queue_reg_in_progress(conv_id, keys, geo=geo)
 
     def queue_script_send(
         self,
@@ -699,10 +805,15 @@ class _CycleSendBuffer:
         channel_id: str = "",
         geo: str = "",
     ) -> None:
+        keys = filter_auto_script_keys(
+            [k.strip() for k in (script_keys or []) if (k or "").strip()]
+        )
+        if not keys:
+            return
         self.queue_send(
             conv_id,
             [],
-            script_keys=script_keys,
+            script_keys=keys,
             client_name=client_name,
             channel_id=channel_id,
             geo=geo,
@@ -752,6 +863,63 @@ class _CycleSendBuffer:
         self.client.org_id = self.org_id
         self.client.org_id_fallback = self.org_id
         self.client.cookies["_pager_org_id"] = self.org_id
+
+    async def _retry_status_patches_rest(
+        self,
+        jobs: list[tuple],
+        ok_ids: set[str],
+        *,
+        uid: str,
+    ) -> None:
+        """REST fallback when browser status PATCH failed or was skipped."""
+        op_uid = (uid or self.pager_user_id or "").strip()
+        if not op_uid:
+            try:
+                op_uid = str(await self.client.resolve_session_user_id() or "")
+            except Exception:
+                op_uid = ""
+        if not op_uid:
+            logger.warning(
+                "status patch retry skipped account=%s — no operator user id",
+                self.account.get("id"),
+            )
+            return
+        for job in jobs:
+            cid = str(job[0] or "")
+            if not cid or cid not in ok_ids:
+                continue
+            keys = filter_auto_script_keys(list(job[4]) if len(job) > 4 else [])
+            job_geo = (
+                str(job[6]).strip().lower()
+                if len(job) > 6 and job[6]
+                else self._geos.get(cid) or "zm"
+            )
+            patches = _ensure_reg_in_progress_patches(
+                self.account, keys, job_geo, list(job[5]) if len(job) > 5 else []
+            )
+            if not patches:
+                continue
+            sid = str(patches[-1] or "").strip()
+            if not sid:
+                continue
+            try:
+                uid_send, _ = await self.client.prepare_outbound(
+                    cid, author_id=op_uid
+                )
+                await self.client.patch_status(cid, sid, user_id=uid_send)
+                logger.info(
+                    "REST status retry ok conv=%s folder=%s keys=%s",
+                    cid[:8],
+                    sid[:8],
+                    keys[:4],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "REST status retry failed conv=%s folder=%s: %s",
+                    cid[:8],
+                    sid[:8],
+                    exc,
+                )
 
     async def _commit_delivered_async(
         self,
@@ -921,7 +1089,9 @@ class _CycleSendBuffer:
         async def _one(job: tuple) -> str | None:
             cid, _texts, _client, channel_hint, keys, patches, geo = job
             keys = filter_auto_script_keys(list(keys or []))
-            status_patches = list(patches or [])
+            status_patches = _ensure_reg_in_progress_patches(
+                self.account, keys, geo, patches
+            )
 
             async def _run() -> str | None:
                 try:
@@ -987,6 +1157,30 @@ class _CycleSendBuffer:
                                 cid[:8],
                                 exc,
                             )
+                    elif reg_send_triggers_in_progress(keys, geo):
+                        in_prog = str(
+                            (self.account.get("_funnel_statuses") or ZM_STATUSES).get(
+                                "in_progress"
+                            )
+                            or ""
+                        ).strip()
+                        if in_prog:
+                            try:
+                                await self.client.patch_status(
+                                    cid, in_prog, user_id=uid_send
+                                )
+                                logger.info(
+                                    "REST status patch reg conv=%s status=%s keys=%s",
+                                    cid[:8],
+                                    in_prog[:8],
+                                    keys[:4],
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "REST status patch reg failed conv=%s: %s",
+                                    cid[:8],
+                                    exc,
+                                )
                     await self.client.mark_conversation_read(
                         cid, user_id=uid_send
                     )
@@ -1111,7 +1305,11 @@ class _CycleSendBuffer:
         return ok_total
 
     async def flush(self) -> set[str]:
-        conv_ids_set = set(self._jobs) | set(self._script_keys)
+        conv_ids_set = (
+            set(self._jobs)
+            | set(self._script_keys)
+            | set(self._status_patches)
+        )
         if not conv_ids_set:
             return set()
 
@@ -1135,7 +1333,17 @@ class _CycleSendBuffer:
                 self._clients.get(cid, ""),
                 self._channels.get(cid, ""),
                 self._script_keys.get(cid, []),
-                self._status_patches.get(cid, []),
+                _ensure_reg_in_progress_patches(
+                    self.account,
+                    filter_auto_script_keys(
+                        list(self._script_keys.get(cid, []))
+                    ),
+                    self._geos.get(cid)
+                    or resolve_conv_geo(
+                        self.account, self._channels.get(cid, "")
+                    ),
+                    self._status_patches.get(cid, []),
+                ),
                 self._geos.get(cid)
                 or resolve_conv_geo(self.account, self._channels.get(cid, "")),
             )
@@ -1208,6 +1416,9 @@ class _CycleSendBuffer:
                     )
                 )
 
+        if ok_total:
+            await self._retry_status_patches_rest(jobs, ok_total, uid=uid or "")
+
         self._jobs.clear()
         self._script_keys.clear()
         self._clients.clear()
@@ -1215,6 +1426,7 @@ class _CycleSendBuffer:
         self._geos.clear()
         self._commits.clear()
         self._status_patches.clear()
+        self._conv_status_ids.clear()
         self._order.clear()
         return ok_total
 
@@ -1459,6 +1671,7 @@ async def _handle_conversation(
 
     completed_sid = str(funnel_statuses.get("completed") or "").strip()
     conv_status_id = str(conv.get("statusId") or "").strip()
+    send_buf.register_conv(conv_id, conv_status_id=conv_status_id)
     if _skip_auto_reply_folder(conv, funnel_statuses):
         logger.info(
             "conv=%s skip — closed folder (%s), no auto-reply",
@@ -1743,20 +1956,30 @@ async def _handle_conversation(
     if (
         needs_reply
         and is_registration_confirmed(text)
-        and reg_link_sent_in_history(op_texts_early, geo=geo)
+        and reg_link_sent_in_history(
+            list(dict.fromkeys(thread_out_early + op_texts_early)), geo=geo
+        )
         and not ready_broadcast_reply
     ):
         reg_done_keys: list[str] = []
+        thread_out_combined = list(dict.fromkeys(thread_out_early + op_texts_early))
         if should_send_deposit_script(
             text,
             effective_step,
-            op_texts_early,
+            thread_out_combined,
             folder_step=folder_step,
             geo=geo,
         ):
-            reg_done_keys = ["06_deposit"]
-        elif not reg_instructions_sent_in_history(op_texts_early, geo=geo):
-            reg_done_keys = ["04_registration", "05_link"]
+            reg_done_keys = [deposit_script_key(geo)]
+        elif not reg_instructions_sent_in_history(
+            list(dict.fromkeys(thread_out_early + op_texts_early)),
+            geo=geo,
+        ):
+            reg_done_keys = (
+                ["05_registration", "06_link", "07_chrome"]
+                if geo == "cm"
+                else ["04_registration", "05_link"]
+            )
         if reg_done_keys and pager_user_id:
             _queue_funnel_status(
                 send_buf,
@@ -1782,7 +2005,7 @@ async def _handle_conversation(
             )
             send_buf.queue_commit(
                 conv_id,
-                step=max(step, 7),
+                step=max(step, 7 if deposit_script_key(geo) in reg_done_keys else 5),
                 last_processed_msg_id=msg_id,
                 pause_scripts=0,
             )
@@ -1790,14 +2013,13 @@ async def _handle_conversation(
             await db.save_conversation_state(
                 account_id,
                 conv_id,
-                step=max(stored_step, 6),
-                pause_scripts=1,
+                step=max(stored_step, 5),
+                pause_scripts=0,
                 last_processed_msg_id=msg_id,
             )
         logger.info(
-            "conv=%s reg confirmed — wait_id=%s keys=%s",
+            "conv=%s reg confirmed — keys=%s",
             conv_id[:8],
-            (funnel_statuses.get("wait_id") or "")[:8],
             reg_done_keys,
         )
         return True
@@ -1827,11 +2049,19 @@ async def _handle_conversation(
                 channel_id=channel_id,
                 geo=geo,
             )
+            _queue_reg_in_progress(
+                send_buf,
+                conv_id,
+                conv_status_id,
+                funnel_statuses,
+                pager_user_id,
+            )
             send_buf.queue_commit(
                 conv_id,
                 step=max(step, 5),
                 last_processed_msg_id=msg_id,
                 pause_scripts=0,
+                human_takeover=0,
             )
             logger.info(
                 "conv=%s tier-choice reg keys=%s text=%r",
@@ -1846,7 +2076,10 @@ async def _handle_conversation(
         and is_requesting_registration_link(text)
         and geo in ("cm", "zm", "dj", "eg")
     ):
-        reg_keys = registration_link_keys_for_geo(geo, op_texts_early)
+        if is_registration_help_request(text):
+            reg_keys = scripts_for_registration_help(geo, op_texts_early)
+        else:
+            reg_keys = registration_link_keys_for_geo(geo, op_texts_early)
         send_buf.queue_script_send(
             conv_id,
             reg_keys,
@@ -1854,11 +2087,19 @@ async def _handle_conversation(
             channel_id=channel_id,
             geo=geo,
         )
+        _queue_reg_in_progress(
+            send_buf,
+            conv_id,
+            conv_status_id,
+            funnel_statuses,
+            pager_user_id,
+        )
         send_buf.queue_commit(
             conv_id,
             step=max(step, 5),
             last_processed_msg_id=msg_id,
             pause_scripts=0,
+            human_takeover=0,
         )
         logger.info(
             "conv=%s link-request reg keys=%s text=%r",
@@ -1872,10 +2113,16 @@ async def _handle_conversation(
         list(dict.fromkeys(thread_out_early + op_texts_early)),
         geo=geo,
     )
+    thread_out_combined = list(dict.fromkeys(thread_out_early + op_texts_early))
+    link_already_sent = reg_link_sent_in_history(thread_out_combined, geo=geo)
     client_prompted_link_retry = (
-        is_short_affirmative(text)
-        or wants_registration_link(text)
+        wants_registration_link(text)
         or is_deposit_tier_choice(text, geo=geo)
+        or (
+            is_short_affirmative(text)
+            and not link_already_sent
+            and not is_registration_acknowledged(text)
+        )
     )
     if (
         needs_reply
@@ -1891,11 +2138,19 @@ async def _handle_conversation(
             channel_id=channel_id,
             geo=geo,
         )
+        _queue_reg_in_progress(
+            send_buf,
+            conv_id,
+            conv_status_id,
+            funnel_statuses,
+            pager_user_id,
+        )
         send_buf.queue_commit(
             conv_id,
             step=max(step, 5),
             last_processed_msg_id=msg_id,
             pause_scripts=0,
+            human_takeover=0,
         )
         logger.info(
             "conv=%s reg link retry key=%s text=%r",
@@ -1904,6 +2159,27 @@ async def _handle_conversation(
             (text or "")[:30],
         )
         return True
+
+    # Short «Okay» after reg link — wait for explicit «I registered», not deposit.
+    if (
+        needs_reply
+        and is_registration_acknowledged(text)
+        and not is_registration_confirmed(text)
+        and link_already_sent
+        and not deposit_instructions_in_history(thread_out_combined, geo=geo)
+    ):
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            step=max(step, 5),
+            last_processed_msg_id=msg_id,
+        )
+        logger.info(
+            "conv=%s post-link ack — wait for reg confirm text=%r",
+            conv_id[:8],
+            (text or "")[:40],
+        )
+        return "done"
 
     if needs_reply and ready_broadcast_reply:
         nudge_sn = script_ui_snippet("extras/deposit_screenshot_nudge", geo)
@@ -2088,26 +2364,79 @@ async def _handle_conversation(
         )
         return True
 
-    if (
-        needs_reply
-        and has_real_image
-        and not (text or "").strip()
-        and reg_link_sent
-        and not dep_script_sent
-    ):
+    if needs_reply and has_real_image and reg_link_sent:
         img_url = ""
         for att in attachments:
             if att.get("type") == "image":
                 img_url = (att.get("payload") or {}).get("url") or ""
                 break
+        shot_analysis: dict[str, Any] = {}
         shot_kind = "other"
         if img_url and resolve_llm_api_key():
-            shot_kind = await classify_screenshot_kind(
+            shot_analysis = await analyze_success_screenshot(
                 img_url,
                 resolve_llm_api_key(),
+                geo=geo,
                 cookies=client.cookies,
             )
-        if shot_kind in ("link_error", "registration", "other"):
+            shot_kind = str(shot_analysis.get("kind") or "other").lower()
+        thread_out_img = list(dict.fromkeys(thread_out_early + op_texts_early))
+        tg_keys = post_deposit_channel_keys(geo)
+        tg_link_key = "11_tg_link" if geo == "cm" else "09_tg_link"
+        tg_sn = script_ui_snippet(tg_link_key, geo)
+
+        if screenshot_shows_deposit_proof(shot_analysis):
+            commit_shot: dict[str, Any] = {
+                "step": max(step, 8),
+                "last_processed_msg_id": msg_id,
+                "pause_scripts": 0,
+            }
+            gid_shot = str(shot_analysis.get("game_id") or "").strip()
+            if gid_shot and looks_like_game_id(gid_shot, geo=geo):
+                commit_shot["extracted_game_id"] = gid_shot
+            if not script_sent_in_history(thread_out_img, tg_sn):
+                send_buf.queue_script_send(
+                    conv_id,
+                    tg_keys,
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+                await _escalate_once(
+                    bot,
+                    esc_chat,
+                    account_id=account_id,
+                    conv_id=conv_id,
+                    msg_id=msg_id,
+                    state=state,
+                    account=account,
+                    channel_id=channel_id,
+                    title="Скрин депозита",
+                    client_name=client_name,
+                    channel_name=channel_name,
+                    folder=folder,
+                    reason="Баланс/депозит на скрине — ТГ отправлен, проверьте вручную",
+                    last_message=text or "(photo)",
+                    extra=str(shot_analysis.get("balance") or shot_kind)[:80],
+                    pause=False,
+                )
+                logger.info(
+                    "conv=%s reg-link deposit screenshot — tg keys=%s kind=%s balance=%r",
+                    conv_id[:8],
+                    tg_keys,
+                    shot_kind,
+                    shot_analysis.get("balance"),
+                )
+            else:
+                logger.info(
+                    "conv=%s deposit screenshot — tg already sent kind=%s",
+                    conv_id[:8],
+                    shot_kind,
+                )
+            send_buf.queue_commit(conv_id, **commit_shot)
+            return True
+
+        if screenshot_is_link_error_only(shot_analysis):
             help_keys = link_help_script_keys(geo)
             send_buf.queue_script_send(
                 conv_id,
@@ -2135,8 +2464,8 @@ async def _handle_conversation(
                 client_name=client_name,
                 channel_name=channel_name,
                 folder=folder,
-                reason="Скрин похож на ошибку ссылки — отправлен Chrome + линк",
-                last_message="(photo)",
+                reason="Скрин ошибки ссылки — Chrome + линк",
+                last_message=text or "(photo)",
                 extra=f"vision={shot_kind}",
                 pause=False,
             )
@@ -2147,6 +2476,63 @@ async def _handle_conversation(
                 help_keys,
             )
             return True
+
+        if shot_kind == "registration":
+            if deposit_instructions_in_history(thread_out_img, geo=geo):
+                await db.save_conversation_state(
+                    account_id,
+                    conv_id,
+                    step=max(step, 6),
+                    last_processed_msg_id=msg_id,
+                )
+                logger.info(
+                    "conv=%s reg screenshot — deposit already in thread kind=%s",
+                    conv_id[:8],
+                    shot_kind,
+                )
+                return "done"
+            dep_key = deposit_script_key(geo)
+            dep_sn = script_ui_snippet(dep_key, geo)
+            if not script_sent_in_history(thread_out_img, dep_sn):
+                send_buf.queue_script_send(
+                    conv_id,
+                    [dep_key],
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+                send_buf.queue_commit(
+                    conv_id,
+                    step=max(step, 7),
+                    last_processed_msg_id=msg_id,
+                    pause_scripts=0,
+                )
+                logger.info(
+                    "conv=%s reg screenshot — deposit keys=%s kind=%s",
+                    conv_id[:8],
+                    [dep_key],
+                    shot_kind,
+                )
+                return True
+            await db.save_conversation_state(
+                account_id,
+                conv_id,
+                step=max(step, 6),
+                last_processed_msg_id=msg_id,
+            )
+            return "done"
+
+        await db.save_conversation_state(
+            account_id,
+            conv_id,
+            last_processed_msg_id=msg_id,
+        )
+        logger.info(
+            "conv=%s post-link screenshot kind=%s — no auto scripts",
+            conv_id[:8],
+            shot_kind,
+        )
+        return "done"
 
     deposit_signal = (
         not is_reaction_only
@@ -2161,13 +2547,7 @@ async def _handle_conversation(
             or (
                 has_real_image
                 and reg_link_sent
-                and (
-                    dep_script_sent
-                    or script_sent_in_history(
-                        op_texts_early,
-                        script_ui_snippet(game_id_script_key(geo), geo),
-                    )
-                )
+                and effective_step >= 5
             )
         )
     )
@@ -2183,6 +2563,7 @@ async def _handle_conversation(
         and (
             is_ready_for_registration(text, geo=geo)
             or wants_registration_link(text)
+            or is_registration_help_request(text)
             or is_funnel_positive_reaction(
                 text,
                 attachments,
@@ -2210,9 +2591,15 @@ async def _handle_conversation(
         needs_reply
         and effective_step >= 1
         and effective_step < 6
-        and is_registration_pending(text)
+        and (
+            is_registration_pending(text)
+            or is_registration_help_request(text)
+        )
         and not is_registration_confirmed(text)
-        and not reg_link_sent_in_history(op_texts_early, geo=geo)
+        and (
+            is_registration_help_request(text)
+            or not reg_link_sent_in_history(op_texts_early, geo=geo)
+        )
     )
 
     reg_confirmed_funnel = needs_reply and should_send_deposit_script(
@@ -2595,8 +2982,6 @@ async def _handle_conversation(
             for m in msg_only
             if _valid_outgoing_reply(m)
         ]
-        gid_key = game_id_script_key(geo)
-        gid_sn = script_ui_snippet(gid_key, geo)
         gid = extract_id_from_text(text, geo=geo)
         img_url = ""
         if has_real_image:
@@ -2623,8 +3008,75 @@ async def _handle_conversation(
             or is_affirmative_to_deposit_check(text, op_texts_early, geo=geo)
         )
 
+        if payment_proof:
+            tg_keys = post_deposit_channel_keys(geo)
+            tg_link_key = "11_tg_link" if geo == "cm" else "09_tg_link"
+            tg_sn = script_ui_snippet(tg_link_key, geo)
+            tg_sent = script_sent_in_history(op_outgoing, tg_sn)
+            commit_fields: dict[str, Any] = {
+                "step": max(step, 8),
+                "last_processed_msg_id": msg_id,
+                "pause_scripts": 0,
+            }
+            if gid and looks_like_game_id(gid, geo=geo):
+                commit_fields["extracted_game_id"] = gid
+            if (
+                dep_script_sent
+                or deposit_instructions_in_history(op_outgoing, geo=geo)
+                or has_real_image
+            ) and not tg_sent:
+                send_buf.queue_script_send(
+                    conv_id,
+                    tg_keys,
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+                if pager_user_id:
+                    _queue_reg_in_progress(
+                        send_buf,
+                        conv_id,
+                        conv_status_id,
+                        funnel_statuses,
+                        pager_user_id,
+                    )
+                send_buf.queue_commit(conv_id, **commit_fields)
+                reason = (
+                    "Клиент прислал скрин оплаты — ТГ отправлен, проверьте депозит"
+                    if has_real_image or _recent_client_image_in_thread()
+                    else "Клиент подтвердил депозит — ТГ отправлен, проверьте вручную"
+                )
+                await _escalate_once(
+                    bot,
+                    esc_chat,
+                    account_id=account_id,
+                    conv_id=conv_id,
+                    msg_id=msg_id,
+                    state=state,
+                    account=account,
+                    channel_id=channel_id,
+                    title="Депозит",
+                    client_name=client_name,
+                    channel_name=channel_name,
+                    folder=folder,
+                    reason=reason,
+                    last_message=text or "(photo)",
+                    extra=f"ID: {gid}" if gid else "",
+                    pause=False,
+                )
+                logger.info(
+                    "conv=%s deposit proof — tg keys=%s gid=%s",
+                    conv_id[:8],
+                    tg_keys,
+                    gid or "-",
+                )
+                return True
+
+            send_buf.queue_commit(conv_id, **commit_fields)
+            return True
+
         if gid and looks_like_game_id(gid, geo=geo):
-            await _outbound_send([EXCELLENT], script_keys=[deposit_script_key(geo)])
+            await _outbound_send([EXCELLENT], script_keys=[])
             if pager_user_id:
                 send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
             send_buf.queue_commit(
@@ -2646,75 +3098,10 @@ async def _handle_conversation(
                 client_name=client_name,
                 channel_name=channel_name,
                 folder=folder,
-                reason="Депозит + ID — проверьте вручную",
+                reason="ID без подтверждённого депозита — проверьте вручную",
                 last_message=text or "(photo)",
                 extra=f"ID: {gid}",
                 pause=False,
-            )
-            return True
-
-        if payment_proof:
-            stored_gid = _stored_game_id(state)
-            deposit_screenshot = _is_deposit_screenshot_without_gid(
-                has_real_image=has_real_image,
-                extracted=gid,
-                stored_gid=stored_gid,
-                geo=geo,
-            )
-            if dep_script_sent and (
-                not script_sent_in_history(op_outgoing, gid_sn) or deposit_screenshot
-            ):
-                send_buf.queue_script_send(
-                    conv_id,
-                    [gid_key],
-                    client_name=client_name,
-                    channel_id=channel_id,
-                    geo=geo,
-                )
-                if pager_user_id:
-                    send_buf.queue_status_patch(
-                        conv_id, funnel_statuses["wait_id"]
-                    )
-                send_buf.queue_commit(
-                    conv_id,
-                    step=max(step, 6),
-                    last_processed_msg_id=msg_id,
-                    pause_scripts=0,
-                )
-                reason = (
-                    "Клиент прислал скрин оплаты — проверьте депозит"
-                    if has_real_image or _recent_client_image_in_thread()
-                    else "Клиент подтвердил депозит — запрошен ID из кабинета"
-                )
-                await _escalate_once(
-                    bot,
-                    esc_chat,
-                    account_id=account_id,
-                    conv_id=conv_id,
-                    msg_id=msg_id,
-                    state=state,
-                    account=account,
-                    channel_id=channel_id,
-                    title="Депозит",
-                    client_name=client_name,
-                    channel_name=channel_name,
-                    folder=folder,
-                    reason=reason,
-                    last_message=text or "(photo)",
-                    pause=False,
-                )
-                logger.info(
-                    "conv=%s deposit proof — request game_id keys=%s",
-                    conv_id[:8],
-                    [gid_key],
-                )
-                return True
-
-            await db.save_conversation_state(
-                account_id,
-                conv_id,
-                step=max(step, 6),
-                last_processed_msg_id=msg_id,
             )
             return True
 
@@ -2920,9 +3307,8 @@ async def _handle_conversation(
             if _valid_outgoing_reply(m)
         ]
         if (
-            4 <= step < 7
+            4 <= step < 8
             and reg_link_sent_in_history(op_out_img, geo=geo)
-            and dep_script_sent
             and _is_deposit_screenshot_without_gid(
                 has_real_image=has_real_image,
                 extracted=extracted,
@@ -2930,27 +3316,30 @@ async def _handle_conversation(
                 geo=geo,
             )
         ):
-            gid_key = game_id_script_key(geo)
-            send_buf.queue_script_send(
-                conv_id,
-                [gid_key],
-                client_name=client_name,
-                channel_id=channel_id,
-                geo=geo,
-            )
-            if pager_user_id:
-                send_buf.queue_status_patch(conv_id, funnel_statuses["wait_id"])
-            send_buf.queue_commit(
-                conv_id,
-                step=max(step, 6),
-                last_processed_msg_id=msg_id,
-                pause_scripts=0,
-            )
+            tg_keys = post_deposit_channel_keys(geo)
+            tg_link_key = "11_tg_link" if geo == "cm" else "09_tg_link"
+            tg_sn = script_ui_snippet(tg_link_key, geo)
+            if not script_sent_in_history(op_out_img, tg_sn):
+                send_buf.queue_script_send(
+                    conv_id,
+                    tg_keys,
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+            commit_img: dict[str, Any] = {
+                "step": max(step, 8),
+                "last_processed_msg_id": msg_id,
+                "pause_scripts": 0,
+            }
+            if extracted and looks_like_game_id(extracted, geo=geo):
+                commit_img["extracted_game_id"] = extracted
+            send_buf.queue_commit(conv_id, **commit_img)
             logger.info(
-                "conv=%s deposit screenshot step=%s — request game_id keys=%s",
+                "conv=%s deposit screenshot step=%s — tg keys=%s",
                 conv_id[:8],
                 step,
-                [gid_key],
+                tg_keys,
             )
             return True
 
@@ -2971,11 +3360,64 @@ async def _handle_conversation(
             has_image = False
 
         if step >= 7:
-            gid_key = game_id_script_key(geo)
-            gid_sn = script_ui_snippet(gid_key, geo)
-            stored_gid = _stored_game_id(state)
+            op_out_step7 = [
+                (m.get("text") or "")
+                for m in msg_only
+                if _valid_outgoing_reply(m)
+            ]
+            tg_keys = post_deposit_channel_keys(geo)
+            tg_link_key = "11_tg_link" if geo == "cm" else "09_tg_link"
+            tg_sn = script_ui_snippet(tg_link_key, geo)
+            deposit_verified = _deposit_proof_in_thread(
+                msg_only, geo=geo
+            ) or _is_deposit_screenshot_without_gid(
+                has_real_image=has_real_image,
+                extracted=extracted,
+                stored_gid=_stored_game_id(state),
+                geo=geo,
+            )
+            if deposit_verified and not script_sent_in_history(op_out_step7, tg_sn):
+                commit_s7: dict[str, Any] = {
+                    "step": 8,
+                    "last_processed_msg_id": msg_id,
+                    "pause_scripts": 0,
+                }
+                if extracted and looks_like_game_id(extracted, geo=geo):
+                    commit_s7["extracted_game_id"] = extracted
+                send_buf.queue_script_send(
+                    conv_id,
+                    tg_keys,
+                    client_name=client_name,
+                    channel_id=channel_id,
+                    geo=geo,
+                )
+                send_buf.queue_commit(conv_id, **commit_s7)
+                await _escalate_once(
+                    bot,
+                    esc_chat,
+                    account_id=account_id,
+                    conv_id=conv_id,
+                    msg_id=msg_id,
+                    state=state,
+                    account=account,
+                    channel_id=channel_id,
+                    title="Скрин депозита",
+                    client_name=client_name,
+                    channel_name=channel_name,
+                    folder=folder,
+                    reason="ТГ отправлен — проверьте депозит вручную",
+                    last_message=text or "(photo)",
+                    extra=f"ID: {extracted}" if extracted else "",
+                    pause=False,
+                )
+                logger.info(
+                    "conv=%s step>=7 deposit proof — tg keys=%s",
+                    conv_id[:8],
+                    tg_keys,
+                )
+                return True
             if extracted and looks_like_game_id(extracted, geo=geo):
-                await _outbound_send([EXCELLENT], script_keys=[deposit_script_key(geo)])
+                await _outbound_send([EXCELLENT], script_keys=[])
                 if pager_user_id:
                     send_buf.queue_status_patch(
                         conv_id, funnel_statuses["wait_id"]
@@ -3005,99 +3447,6 @@ async def _handle_conversation(
                     pause=False,
                 )
                 return True
-            if not script_sent_in_history(
-                [
-                    (m.get("text") or "")
-                    for m in msg_only
-                    if _valid_outgoing_reply(m)
-                ],
-                gid_sn,
-            ):
-                send_buf.queue_script_send(
-                    conv_id,
-                    [gid_key],
-                    client_name=client_name,
-                    channel_id=channel_id,
-                    geo=geo,
-                )
-                if pager_user_id:
-                    send_buf.queue_status_patch(
-                        conv_id, funnel_statuses["wait_id"]
-                    )
-                send_buf.queue_commit(
-                    conv_id,
-                    step=max(step, 6),
-                    last_processed_msg_id=msg_id,
-                )
-                return True
-            if _is_deposit_screenshot_without_gid(
-                has_real_image=has_real_image,
-                extracted=extracted,
-                stored_gid=stored_gid,
-                geo=geo,
-            ):
-                send_buf.queue_script_send(
-                    conv_id,
-                    [gid_key],
-                    client_name=client_name,
-                    channel_id=channel_id,
-                    geo=geo,
-                )
-                if pager_user_id:
-                    send_buf.queue_status_patch(
-                        conv_id, funnel_statuses["wait_id"]
-                    )
-                send_buf.queue_commit(
-                    conv_id,
-                    step=max(step, 6),
-                    last_processed_msg_id=msg_id,
-                )
-                logger.info(
-                    "conv=%s deposit screenshot — re-request game_id keys=%s",
-                    conv_id[:8],
-                    [gid_key],
-                )
-                return True
-            tg_sn = script_ui_snippet("09_tg_link", geo)
-            if not script_sent_in_history(
-                [
-                    (m.get("text") or "")
-                    for m in msg_only
-                    if _valid_outgoing_reply(m)
-                ],
-                tg_sn,
-            ):
-                await _escalate_once(
-                    bot,
-                    esc_chat,
-                    account_id=account_id,
-                    conv_id=conv_id,
-                    msg_id=msg_id,
-                    state=state,
-                    account=account,
-                    channel_id=channel_id,
-                    title="Скрин депозита",
-                    client_name=client_name,
-                    channel_name=channel_name,
-                    folder=folder,
-                    reason="Подтвердите депозит вручную",
-                    last_message="(photo)",
-                    pause=False,
-                )
-                await _outbound_send(
-                    [EXCELLENT],
-                    script_keys=post_deposit_channel_keys(geo),
-                )
-                if pager_user_id:
-                    _queue_funnel_status(
-                        send_buf,
-                        conv_id,
-                        conv_status_id,
-                        funnel_statuses["deps_pending"],
-                    )
-                send_buf.queue_commit(
-                    conv_id, step=9, last_processed_msg_id=msg_id
-                )
             return True
 
     # --- Text game ID (legacy path — early accept handles wait_id) ---
@@ -3308,14 +3657,7 @@ async def _handle_conversation(
         elif (
             geo in ("zm", "dj", "cm")
             and 4 <= effective_step <= 7
-            and intent in (Intent.POSITIVE, Intent.READY)
-            and (
-                is_short_affirmative(text)
-                or is_registration_confirmed(text)
-                or is_affirmative_to_deposit_check(
-                    text, op_outgoing, geo=geo
-                )
-            )
+            and is_registration_confirmed(text)
             and reg_link_sent_in_history(op_outgoing, geo=geo)
             and not script_sent_in_history(
                 op_outgoing, script_ui_snippet(deposit_script_key(geo), geo)
@@ -3323,7 +3665,7 @@ async def _handle_conversation(
         ):
             keys = [deposit_script_key(geo)]
             logger.info(
-                "conv=%s positive-after-link fallback keys=%s text=%r",
+                "conv=%s reg-confirmed deposit keys=%s text=%r",
                 conv_id[:8],
                 keys,
                 (text or "")[:40],
@@ -3656,6 +3998,21 @@ async def _handle_conversation(
         blocked = {game_id_script_key(geo), deposit_script_key(geo)}
         keys = [k for k in keys if k not in blocked]
 
+    if keys and deposit_script_key(geo) in keys:
+        out_combined = list(
+            dict.fromkeys(thread_out_early + op_outgoing + op_texts_early)
+        )
+        if (
+            is_registration_acknowledged(text)
+            and not is_registration_confirmed(text)
+        ) or deposit_instructions_in_history(out_combined, geo=geo):
+            keys = [k for k in keys if k != deposit_script_key(geo)]
+            logger.info(
+                "conv=%s skip duplicate deposit text=%r",
+                conv_id[:8],
+                (text or "")[:30],
+            )
+
     if keys and reg_link_sent_in_history(op_outgoing, geo=geo):
         if is_registration_confirmed(text) or intent == Intent.JOINED:
             keys = [
@@ -3668,12 +4025,15 @@ async def _handle_conversation(
                     "03_zmw_table",
                     "04_registration",
                     "05_link",
+                    "05_registration",
+                    "06_link",
+                    "07_chrome",
                 )
             ]
             if should_send_deposit_script(
                 text, effective_step, op_outgoing, folder_step=folder_step, geo=geo
             ):
-                keys = ["06_deposit"]
+                keys = [deposit_script_key(geo)]
 
     if intent == Intent.JOINED and effective_step >= 8:
         await db.save_conversation_state(
@@ -3713,44 +4073,44 @@ async def _handle_conversation(
         actions_sent = True
 
     new_step = step
-    reg_keys = reg_script_keys_set(geo)
     explain_keys = (
         {"02_age", "03_steps", "04_tier"}
         if geo == "cm"
         else {"02_how_it_works", "03_zmw_table"}
     )
-    reg_handoff = geo in ("zm", "eg", "dj", "cm") and bool(reg_keys.intersection(keys))
+    reg_handoff = geo in ("zm", "eg", "dj", "cm") and reg_send_triggers_in_progress(
+        keys, geo
+    )
     if reg_handoff:
-        new_step = 4
-        if pager_user_id:
-            _queue_funnel_status(
-                send_buf,
-                conv_id,
-                conv_status_id,
-                funnel_statuses["in_progress"],
-            )
+        new_step = max(new_step, 5)
+        _queue_reg_in_progress(
+            send_buf,
+            conv_id,
+            conv_status_id,
+            funnel_statuses,
+            pager_user_id,
+        )
     elif explain_keys.intersection(keys):
         new_step = max(new_step, 2 if geo == "eg" else 3)
     elif keys == ["01_intro"]:
         new_step = max(new_step, 1)
     elif deposit_script_key(geo) in keys:
         new_step = max(new_step, 7)
-        if pager_user_id:
-            _queue_funnel_status(
-                send_buf,
-                conv_id,
-                conv_status_id,
-                funnel_statuses["in_progress"],
-            )
+        _queue_reg_in_progress(
+            send_buf,
+            conv_id,
+            conv_status_id,
+            funnel_statuses,
+            pager_user_id,
+        )
     elif game_id_script_key(geo) in keys:
         new_step = max(new_step, 6)
-        if pager_user_id:
-            _queue_funnel_status(
-                send_buf,
-                conv_id,
-                conv_status_id,
-                funnel_statuses["wait_id"],
-            )
+        _queue_funnel_status(
+            send_buf,
+            conv_id,
+            conv_status_id,
+            funnel_statuses["wait_id"],
+        )
 
     if actions_sent:
         commit: dict[str, Any] = {
@@ -4018,6 +4378,11 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 )
         funnel_statuses = resolve_funnel_statuses(status_rows)
         account["_funnel_statuses"] = funnel_statuses
+        account["_known_status_ids"] = {
+            str(st.get("status_id") or "").strip()
+            for st in (status_rows or [])
+            if str(st.get("status_id") or "").strip()
+        }
         name_by_id: dict[str, str] = {}
         if status_rows:
             name_by_id = {
@@ -4025,12 +4390,22 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 for s in status_rows
             }
             logger.info(
-                "Worker account=%s: funnel map completed=%r deps_pending=%r wait_id=%r",
+                "Worker account=%s: funnel map in_progress=%r completed=%r deps_pending=%r wait_id=%r",
                 account_id,
+                name_by_id.get(str(funnel_statuses.get("in_progress") or ""), "?"),
                 name_by_id.get(str(funnel_statuses.get("completed") or ""), "?"),
                 name_by_id.get(str(funnel_statuses.get("deps_pending") or ""), "?"),
                 name_by_id.get(str(funnel_statuses.get("wait_id") or ""), "?"),
             )
+            in_prog_id = str(funnel_statuses.get("in_progress") or "").strip()
+            in_prog_name = name_by_id.get(in_prog_id, "?")
+            if in_prog_id and in_prog_name == "?":
+                logger.error(
+                    "Worker account=%s: in_progress UUID %s not in org statuses — "
+                    "reg-link folder patch may fail",
+                    account_id,
+                    in_prog_id[:8],
+                )
         account["_channel_geo"] = await db.get_channel_geo_map(
             account_id, account_geo=str(account.get("geo") or "zm")
         )

@@ -75,7 +75,9 @@ _FR_WHAT_REQUIRED = re.compile(
 _FR_POST_LINK = re.compile(
     r"\b(et après|et apres|prochaine étape|prochaine etape|"
     r"comment déposer|comment deposer|déposer|deposer|"
-    r"vous êtes inscrit|etes vous inscrit|êtes-vous inscrit|inscrit\??)\b",
+    r"vous êtes inscrit|etes vous inscrit|êtes-vous inscrit|"
+    r"tu es inscrit|es[- ]tu inscrit)\b|"
+    r"\binscrit\s*\?\s*$",
     re.I,
 )
 _XBET_BRAND = re.compile(r"\b(1xbet|1x\s*bet|xbet|1хбет|1х\s*бет)\b", re.I)
@@ -418,6 +420,18 @@ _AR_REG_LINK = re.compile(
     r"(اللينك|الرابط|لينك|رابط)|"
     r"ازاي.*(سجل|تسجيل|حساب)"
 )
+_AR_REG_HELP = re.compile(
+    r"مش عارف.{0,16}(اسجل|أسجل|سجل|تسجيل|حساب)|"
+    r"مش فاهم.{0,16}(اسجل|أسجل|سجل|تسجيل|حساب)|"
+    r"(ما|مش|لا)\s*(اعرف|أعرف).{0,16}(اسجل|أسجل|سجل|تسجيل|حساب)|"
+    r"(ازاي|إزاي|ازاى|كيف).{0,20}(اسجل|أسجل|سجل|تسجيل|حساب)|"
+    r"(اسجل|أسجل|تسجيل).{0,20}(ازاي|إزاي|ازاى|كيف)"
+)
+_EN_REG_HELP = re.compile(
+    r"(?i)(don'?t know how to (?:register|sign up)|"
+    r"not sure how to (?:register|sign up)|"
+    r"how (?:do i|to) (?:register|sign up|create (?:an )?account))"
+)
 _REGISTRATION_FOLLOWUP = re.compile(
     r"\b(explain|how can i start|how do i start|how to start|tell me how|"
     r"how does it work|how it works|what do i do|what should i do|"
@@ -459,8 +473,12 @@ _FR_REG_COMPLETE = re.compile(
     r"(inscription|inscrit).{0,12}(fait|faite|termin)|"
     r"compte.{0,16}(ouvert|1x|créé|cree|ouvre)|"
     r"(ouvert|ouverte).{0,12}(compte|account)|"
-    r"\bje suis inscrit\b|"
-    r"\bj'ai (créé|cree|ouvert).{0,12}compte\b",
+    r"\bje (me )?suis inscrit\b|"
+    r"\bje m[' ]?inscri(s|t)\b|"
+    r"\b(me suis|m[' ]?suis) inscrit\b|"
+    r"\bj[' ]?ai (fini|terminé|termine|fait).{0,16}(inscription|inscrit|compte)\b|"
+    r"\bj[' ]?ai (créé|cree|ouvert).{0,12}compte\b|"
+    r"\binscription (faite|terminée|termine|ok|finie)\b",
     re.I,
 )
 _DEPOSIT_TIER = re.compile(
@@ -694,11 +712,25 @@ def xbet_site_confirm_reply(*, geo: str = "zm") -> str:
         return fallbacks.get(g, fallbacks["zm"])
 
 
+def is_registration_help_request(text: str) -> bool:
+    """Client does not know how to register — resend instructions + link."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _AR_REG_HELP.search(t):
+        return True
+    return bool(_EN_REG_HELP.search(t))
+
+
 def is_requesting_registration_link(text: str) -> bool:
     """Client wants registration URL — «Link», «send link», «lien», Arabic, etc."""
     t = (text or "").strip()
     if not t:
         return False
+    if is_registration_confirmed(t):
+        return False
+    if is_registration_help_request(t):
+        return True
     if re.fullmatch(
         r"(?:the\s+)?(?:link|url|lien|le\s+lien)(?:\s+please)?\s*[.!?]*",
         t,
@@ -820,24 +852,8 @@ def is_on_registration_site(text: str) -> bool:
 
 
 def is_post_reg_ack(text: str) -> bool:
-    """Short yes after reg link — treat as registered, send deposit script."""
-    raw = (text or "").strip()
-    if not raw:
-        return False
-    if _AR_DETAILS.search(raw):
-        return False
-    if _AR_POSITIVE.search(raw) and len(raw.split()) <= 3:
-        return True
-    t = re.sub(r"[^\w\s]", "", raw)
-    if not t:
-        return False
-    return bool(
-        re.fullmatch(
-            r"(yeah|yes|yep|yess|ok|okay|sure|alright|done|finished)\s*",
-            t,
-            re.I,
-        )
-    )
+    """Short yes/ok after reg link — not enough to send deposit yet."""
+    return is_registration_acknowledged(text)
 
 
 def is_registration_confirmed(text: str) -> bool:
@@ -847,7 +863,28 @@ def is_registration_confirmed(text: str) -> bool:
 
 def is_registration_acknowledged(text: str) -> bool:
     """Short okay after reg link — wait for explicit registration, not deposit yet."""
-    return is_post_reg_ack(text)
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if is_registration_confirmed(raw):
+        return False
+    if _AR_DETAILS.search(raw):
+        return False
+    if is_short_affirmative(raw):
+        return True
+    if _AR_POSITIVE.search(raw) and len(raw.split()) <= 3:
+        return True
+    t = re.sub(r"[^\w\s]", "", raw)
+    if not t:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(yeah|yes|yep|yess|ok|okay|oki|okey|sure|alright|done|finished|"
+            r"oui|ouais|daccord|parfait|super)\s*",
+            t,
+            re.I,
+        )
+    )
 
 
 def is_already_registered_before_funnel(text: str) -> bool:
@@ -1338,6 +1375,8 @@ def _classify_arabic(t: str) -> Intent | None:
         return Intent.COMPLAINT
     if is_deposit_question(t):
         return Intent.QUESTION
+    if is_registration_help_request(t):
+        return Intent.QUESTION
     if _AR_DEPOSIT.search(t):
         return Intent.DEPOSIT_DONE
     if is_registration_confirmed(t):
@@ -1545,6 +1584,8 @@ def needs_human_for_text(
     if is_reg_confirmed_funnel_message(text, step):
         return False
     if is_registration_pending(text) and step < 6:
+        return False
+    if is_registration_help_request(text) and step < 6:
         return False
     if is_ready_for_registration(text, geo=geo) and step < 5:
         return False

@@ -95,11 +95,38 @@ async def extract_game_id_from_message(
     return ""
 
 
+def screenshot_shows_deposit_proof(analysis: dict[str, Any] | None) -> bool:
+    """Logged-in 1xBet with balance, receipt, or account ID on screenshot."""
+    if not analysis:
+        return False
+    if analysis.get("is_success"):
+        return True
+    kind = str(analysis.get("kind") or "").lower()
+    if kind in ("deposit_profile", "payment_receipt", "game_id", "deposit"):
+        return True
+    balance = str(analysis.get("balance") or "").strip()
+    return bool(balance and re.search(r"\d", balance))
+
+
+def screenshot_is_link_error_only(analysis: dict[str, Any] | None) -> bool:
+    """True only for broken link / browser error — not logged-in account screens."""
+    if screenshot_shows_deposit_proof(analysis):
+        return False
+    kind = str(analysis.get("kind") or "").lower()
+    return kind == "link_error"
+
+
 async def classify_screenshot_kind(
-    url: str, api_key: str = "", *, cookies: dict[str, str] | None = None
+    url: str,
+    api_key: str = "",
+    *,
+    geo: str = "zm",
+    cookies: dict[str, str] | None = None,
 ) -> str:
-    data = await analyze_success_screenshot(url, api_key, cookies=cookies)
-    return str(data.get("kind") or "other").lower().replace("deposit_profile", "deposit")
+    data = await analyze_success_screenshot(
+        url, api_key, geo=geo, cookies=cookies
+    )
+    return str(data.get("kind") or "other").strip().lower()
 
 
 async def analyze_success_screenshot(
@@ -143,7 +170,11 @@ async def analyze_success_screenshot(
                             "- OR payment/deposit receipt visible\n"
                             "- OR numeric account/game ID visible (often starts with 17)\n"
                             "deposit_profile = 1xBet screen with name + balance + "
-                            "deposit / Mes paris / Faire un dépôt button."
+                            "deposit / Mes paris / Faire un dépôt button.\n"
+                            "registration = age gate, signup form, or promo page "
+                            "without visible account balance yet.\n"
+                            "link_error = browser cannot open URL, DNS error, blank "
+                            "page — NOT age popup, NOT logged-in 1xBet with balance."
                         ),
                     },
                     {
