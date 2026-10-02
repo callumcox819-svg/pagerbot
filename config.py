@@ -16,6 +16,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 # Known org for tehsup deployment (override via PAGER_ORG_ID)
 DEFAULT_ORG_ID_BY_SLUG: dict[str, str] = {
     "tehsup": "org_3Cd5AHJTskSRAzLNkoft2qlfaUw",
+    "bernad": "org_38CYfMQbk7tuAZLykdMZfPmj46s",
 }
 
 # Operator user for tehsup (Тех Саппорт) — used for take-chat + send.

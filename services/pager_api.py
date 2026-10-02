@@ -234,13 +234,27 @@ class PagerClient:
         referer = f"{self.base_url}/"
         if self.org_slug:
             referer = f"{self.base_url}/{self.locale}/{self.org_slug}/chats"
-        return {
+        headers = {
             "Accept": "*/*",
             "User-Agent": UA,
             "Cookie": self._cookie_header(),
             "Referer": referer,
             "Origin": self.base_url,
         }
+        # api.pager.co.ua often expects Clerk JWT as Bearer, not only Cookie.
+        session_jwt = str(
+            self.cookies.get("__session")
+            or self.cookies.get("__session_token")
+            or ""
+        ).strip()
+        if not session_jwt:
+            for key, val in self.cookies.items():
+                if key.startswith("__session_") and str(val or "").strip():
+                    session_jwt = str(val).strip()
+                    break
+        if session_jwt:
+            headers["Authorization"] = f"Bearer {session_jwt}"
+        return headers
 
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in _clean_cookies(self.cookies).items())

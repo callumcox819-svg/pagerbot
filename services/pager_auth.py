@@ -169,7 +169,8 @@ async def _validate_cookies(
     except PagerAPIError as exc:
         if is_session_error(exc):
             raise RuntimeError(
-                "Сессия Pager не принята. Перелогиньтесь или обновите cookies."
+                "Сессия Pager не принята. Перелогиньтесь или обновите cookies. "
+                f"({exc.status}: {exc.body[:160]})"
             ) from exc
         raise RuntimeError(str(exc)) from exc
     logger.info("Login OK, cookie keys: %s", ", ".join(sorted(cookies.keys())))
