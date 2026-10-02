@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Sequence
 
-from services.pager_auth import PAGER_BASE, UA, playwright_sign_in_on_page
+from services.pager_auth import PAGER_API_BASE, PAGER_BASE, UA, playwright_sign_in_on_page
 from services.playwright_lock import chromium_session
 
 from services.script_engine import (
@@ -26,7 +26,7 @@ from services.script_engine import (
 
 logger = logging.getLogger(__name__)
 
-_API = PAGER_BASE.rstrip("/")
+_API = PAGER_API_BASE.rstrip("/")
 
 _TAKE_UI = (
     r"take chat|take the chat|take dialog|взяти чат|взяти діалог|взяв.*чат",
@@ -1832,6 +1832,7 @@ async def _browser_pager_client(
         locale=locale,
         org_id_fallback=org_id,
         session_user_id=user_id,
+        api_base_url=PAGER_API_BASE,
     )
 
 

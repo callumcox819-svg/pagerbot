@@ -46,6 +46,7 @@ def _pager_client(
         org_slug=slug,
         locale=locale or _settings.pager_locale,
         org_id_fallback=resolved_org,
+        api_base_url=_settings.pager_api_base_url,
     )
 
 

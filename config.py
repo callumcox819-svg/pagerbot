@@ -100,6 +100,7 @@ class Settings:
     poll_sec: float
     db_path: Path
     pager_base_url: str = "https://www.pager.co.ua"
+    pager_api_base_url: str = "https://api.pager.co.ua"
     pager_locale: str = "uk"
     pager_org_slug: str = ""
     pager_org_id: str = ""
@@ -133,6 +134,11 @@ def load_settings() -> Settings:
     if not pager_user_id and pager_org_slug:
         pager_user_id = DEFAULT_USER_ID_BY_SLUG.get(pager_org_slug.lower(), "")
 
+    pager_base = (os.getenv("PAGER_BASE_URL") or "https://www.pager.co.ua").strip().rstrip("/")
+    pager_api = (
+        os.getenv("PAGER_API_BASE_URL") or "https://api.pager.co.ua"
+    ).strip().rstrip("/")
+
     return Settings(
         bot_token=token,
         encryption_key=enc,
@@ -140,6 +146,8 @@ def load_settings() -> Settings:
         admin_ids=admin_ids,
         poll_sec=poll,
         db_path=ROOT / db,
+        pager_base_url=pager_base or "https://www.pager.co.ua",
+        pager_api_base_url=pager_api or "https://api.pager.co.ua",
         pager_locale=(os.getenv("PAGER_LOCALE") or "uk").strip() or "uk",
         pager_org_slug=pager_org_slug,
         pager_org_id=pager_org_id,

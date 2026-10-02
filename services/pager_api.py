@@ -194,8 +194,14 @@ class PagerClient:
         locale: str = "uk",
         org_id_fallback: str = "",
         session_user_id: str = "",
+        api_base_url: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        # Pager moved REST API off www → api.pager.co.ua (www returns 410 Gone).
+        self.api_base_url = (
+            (api_base_url or "").strip().rstrip("/")
+            or "https://api.pager.co.ua"
+        )
         self.cookies = cookies
         slug = (org_slug or "").strip()
         self.org_slug = slug
@@ -256,7 +262,7 @@ class PagerClient:
         json_body: dict[str, Any] | None = None,
         referer: str = "",
     ) -> Any:
-        url = f"{self.base_url}{path}"
+        url = f"{self.api_base_url}{path}"
         headers = self._api_headers()
         if referer:
             headers["Referer"] = referer

@@ -4265,6 +4265,7 @@ async def _process_account(bot: Bot, account: dict[str, Any]) -> int:
                 locale=str(account.get("pager_locale") or _settings.pager_locale),
                 org_id_fallback=org_id,
                 session_user_id=session_uid,
+                api_base_url=_settings.pager_api_base_url,
             )
 
         client = _make_client(cookies)

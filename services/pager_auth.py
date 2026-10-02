@@ -12,6 +12,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 PAGER_BASE = "https://www.pager.co.ua"
+PAGER_API_BASE = "https://api.pager.co.ua"
 CLERK_BASE = "https://clerk.pager.co.ua"
 CLERK_JS_VERSION = "5.68.0"
 CLERK_API_VERSION = "2024-10-01"
@@ -151,6 +152,7 @@ async def _validate_cookies(
         org_slug=settings.pager_org_slug,
         locale=settings.pager_locale,
         org_id_fallback=settings.pager_org_id,
+        api_base_url=settings.pager_api_base_url or PAGER_API_BASE,
     )
     try:
         probe = await client.probe_session()

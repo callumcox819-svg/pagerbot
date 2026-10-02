@@ -108,6 +108,7 @@ async def refresh_pager_session(account: dict[str, Any]) -> dict[str, str] | Non
         org_slug=org_slug,
         locale=str(account.get("pager_locale") or _settings.pager_locale),
         org_id_fallback=org_id,
+        api_base_url=_settings.pager_api_base_url,
     )
     try:
         probe = await client.probe_session()
